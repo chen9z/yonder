@@ -1,0 +1,13 @@
+herdc-app
+Copyright 2026 chen
+
+icon.png is rendered from icon.svg, Yonder's own icon.
+
+assets/icons/ and assets/chrome/ are adapted from herdr-app (Apache-2.0):
+- Brand icons: Simple Icons (https://simpleicons.org), CC0 1.0. Brands are
+  their owners' trademarks.
+- Glyphs, including assets/chrome/: Lucide (https://lucide.dev), ISC, with
+  MIT-licensed Feather-derived icons. See assets/icons/LICENSE-Lucide.txt.
+- Agent icons: LobeHub icons (MIT) and the agents' own marks. See
+  assets/icons/LICENSE-LobeHub.txt.
+Trademark rights are not granted by these licenses.

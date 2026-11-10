@@ -1,0 +1,125 @@
+//! The "more" sheet of the workspace: what the desktop's pane header and
+//! menus offer, grouped, from the bottom of the screen where a thumb is.
+//! Closing the pane sits apart, in red.
+
+use crate::live::{self, Live};
+use crate::nav::{self, Route};
+use crate::i18n::tr;
+use crate::{theme, ui};
+use nsh_base::sheet;
+use nsh_core::prelude::*;
+use serde_json::json;
+
+/// An action of the sheet: id, glyph, label.
+type Action = (&'static str, &'static str, &'static str);
+
+const PANE: [Action; 4] = [("terminal", "+", "New terminal"), ("right", "◨", "Split right"), ("down", "⬓", "Split down"), ("zoom", "⇱", "Zoom")];
+const HERE: [Action; 4] = [("files", "▤", "Files"), ("changes", "±", "Changes"), ("worktrees", "⎇", "Worktrees"), ("rename", "✎", "Rename tab")];
+const APP: [Action; 3] = [("commands", "⌘", "Commands"), ("settings", "⚙", "Settings"), ("leave", "⏏", "Leave")];
+
+pub fn more_sheet(live: Live, open: Signal<bool>) -> impl IntoElement {
+    let zoomed = {
+        let world = live.view;
+        computed(move || world.with(|v| v.active_tab().is_some_and(|t| t.zoomed.is_some())))
+    };
+    let pick = move |id: &'static str| {
+        let live = live.clone();
+        move || {
+            open.set(false);
+            let live = live.clone();
+            spawn(async move { act(live, id).await });
+        }
+    };
+    let group = {
+        let pick = pick.clone();
+        move |actions: &'static [Action]| {
+            let pick = pick.clone();
+            view().flex_row().flex_wrap().px(px(8.0)).children(actions.iter().map(move |&(id, glyph, label)| {
+                let label = move || if id == "zoom" && zoomed.get() { t!("Unzoom").to_owned() } else { tr(label).to_owned() };
+                tile(glyph, label, pick(id))
+            }))
+        }
+    };
+    sheet()
+        .open(move || Some(open.get()))
+        .close_on_swipe(true)
+        .backdrop_class("bg-black/40")
+        .on_close(move || open.set(false))
+        .on_cancel(move || open.set(false))
+        .child(
+            view().w_full().items_center().child(
+                view()
+                    .w_full()
+                    .max_w(px(560.0))
+                    .rounded_t(px(18.0))
+                    .bg(theme::CHROME)
+                    .pt(px(8.0))
+                    .pb(move || px(safe_area().bottom.0 + 8.0))
+                    .child(view().w(px(36.0)).h(px(4.0)).rounded(px(2.0)).bg(theme::BORDER).self_center().mb(px(8.0)))
+                    .child(group(&PANE))
+                    .child(group(&HERE))
+                    .child(group(&APP))
+                    .child(view().h(px(1.0)).mx(px(16.0)).my(px(6.0)).bg(theme::BORDER))
+                    .child(
+                        view()
+                            .flex_row()
+                            .items_center()
+                            .h(px(52.0))
+                            .px(px(20.0))
+                            .active(|s| s.bg(theme::HOVER))
+                            .role(AccessibilityRole::Button)
+                            .label(t!("Close pane"))
+                            .on_press(pick("close"))
+                            .child(text(t!("Close pane")).text_size(px(16.0)).text_color(theme::BLOCKED)),
+                    ),
+            ),
+        )
+}
+
+/// One action: its glyph over its name, a quarter of a row.
+fn tile(glyph: &'static str, label: impl Fn() -> String + Clone + 'static, press: impl Fn() + 'static) -> impl IntoElement {
+    view()
+        .w(percentage(0.25))
+        .h(px(76.0))
+        .items_center()
+        .justify_center()
+        .gap(px(6.0))
+        .rounded(px(12.0))
+        .active(|s| s.bg(theme::HOVER))
+        .role(AccessibilityRole::Button)
+        .label(label.clone())
+        .on_press(press)
+        .child(text(glyph).text_size(px(22.0)).text_color(theme::FOREGROUND))
+        .child(text(label).text_size(px(12.0)).text_color(theme::MUTED).number_of_lines(1))
+}
+
+async fn act(live: Live, picked: &str) {
+    match picked {
+        "terminal" => crate::palette::new_terminal(live.clone()).await,
+        "right" | "down" => live.run("pane.split", json!({ "direction": picked })),
+        "zoom" => live.run("pane.zoom", json!({})),
+        "close" => {
+            // A phone is easy to mistap: an agent mid-work or waiting is asked about first.
+            let pane = live.view.with_untracked(|v| v.active_tab().and_then(|t| t.panes.iter().find(|p| p.focused).cloned()));
+            if let Some(p) = pane.filter(|p| matches!(p.status, Some("working" | "blocked")))
+                && !ui::confirm(t!("Close pane?"), &t!("{} is {}. Closing the pane ends it.", ui::title(&p.title), tr(p.status.unwrap_or_default())), t!("Close")).await
+            {
+                return;
+            }
+            live.run("pane.close", json!({}))
+        }
+        "rename" => live.run("tab.rename", json!({})),
+        "files" | "changes" | "worktrees" => {
+            let Some(place) = live.view.with_untracked(|v| v.location()) else { return };
+            nav::push(match picked {
+                "files" => Route::Files(place),
+                "changes" => Route::Changes(place),
+                _ => Route::Worktrees(place),
+            });
+        }
+        "commands" => nav::push(Route::Commands),
+        "settings" => nav::push(Route::Settings),
+        "leave" => live::close(),
+        _ => {}
+    }
+}

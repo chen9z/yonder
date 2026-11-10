@@ -1,0 +1,10 @@
+[package]
+name = "herdc-term"
+description = "The terminal screen herdc draws: a VT fed with a core terminal's bytes, and key encoding in its modes"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+version.workspace = true
+
+[dependencies]
+alacritty_terminal = { version = "0.26", default-features = false }

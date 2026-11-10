@@ -1,0 +1,10 @@
+{
+  "name": "Yonder",
+  "id": "dev.yonder.app",
+  "version": "0.1.0",
+  "build": 1,
+  "appearance": "system",
+  "rust": ".",
+  "root": "App",
+  "icon": "icon.png"
+}

@@ -1,0 +1,9 @@
+herdc-engine ports herdr-app (https://github.com/herdrdev/herdr-app) at
+revision adf94cb2c9b6f1cadbb31c51f84114b1aa332f0a, licensed under the Apache
+License 2.0 (LICENSE-herdr-app): src/state.rs and src/commands.rs follow its
+src/window.rs and src/commands.rs, src/docs.rs its src/mirror_sync.rs, and
+src/geometry.rs its pane navigation. They run without a window: async core
+calls instead of blocking ones, questions instead of dialogs.
+
+src/tools/ follows its built-in mods (defaults/mods/*/main.js): files,
+changes, worktree, machine-add, and the known agents of src/programs.rs.

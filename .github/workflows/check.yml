@@ -1,0 +1,28 @@
+# What runs without a phone (scripts/check.sh): clippy and the tests,
+# against isolated cores of the herdr-core the phone is tested with.
+name: check
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    env:
+      HC_VERSION: 0.1.18
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            app
+      - name: herdr-core
+        run: |
+          curl -fsSL https://releases.herdr.dev/core/install.sh | sh
+          ~/.local/bin/herdr-core --version
+      - run: ./scripts/check.sh

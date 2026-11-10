@@ -1,0 +1,12 @@
+target/
+app/target/
+app/.nsh/
+*.apk
+
+# Recovery evidence stays local, outside source history.
+recovery/
+.DS_Store
+*.jks
+*.keystore
+.env
+.env.*

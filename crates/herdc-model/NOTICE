@@ -1,0 +1,9 @@
+herdc-model vendors src/layout.rs, src/model.rs and src/mirror.rs from
+herdr-app (https://github.com/herdrdev/herdr-app) at revision adf94cb2c9b6f1cadbb31c51f84114b1aa332f0a,
+licensed under the Apache License 2.0 (LICENSE-herdr-app).
+Changes: module paths only, marked "herdc:".
+
+src/programs.rs (with defaults/programs.json) and src/shell.rs are adapted
+from herdr-app's src/programs.rs and src/remote_shell.rs at the same
+revision: the person's programs.json, icon installation and local shell
+checks are left out.
