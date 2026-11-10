@@ -13,7 +13,7 @@ use nsh_core::prelude::*;
 pub fn settings_page(live: Live) -> nsh_core::element::Screen {
     let prefs = use_context::<Prefs>().expect("prefs");
     let world = live.view;
-    let (_, public) = link::phone_key();
+    let public = link::phone_key().map(|(_, public)| public).unwrap_or_else(|error| format!("Cannot load phone key: {error}"));
     let about = live.clone();
     let core = computed(move || {
         world.with(|v| match &v.link {
@@ -84,7 +84,7 @@ pub fn settings_page(live: Live) -> nsh_core::element::Screen {
     )
 }
 
-/// The app's version and build (the commits it was built at, `apk.sh`).
+/// The app's release build number and source revision (`apk.sh`).
 fn version() -> String {
     let build = option_env!("HERDC_BUILD").map(|b| format!(" ({b}, {})", option_env!("HERDC_COMMIT").unwrap_or("?"))).unwrap_or_default();
     format!("{}{build}", env!("CARGO_PKG_VERSION"))

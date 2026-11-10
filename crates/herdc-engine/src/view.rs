@@ -216,34 +216,29 @@ impl View {
 /// is read from (serde takes a `&str` field to be).
 pub type Word = &'static str;
 
-/// The words a view keeps as `&'static str` (statuses, a layout's
-/// state), read back (a view kept from before): each word once, so the
-/// few there are cost nothing more however often they are read.
+/// Persisted status words have a finite vocabulary. No allocation survives
+/// deserialization; unknown values reject the cached view instead of leaking.
 mod word {
     use serde::{Deserialize, Deserializer};
-    use std::collections::HashSet;
-    use std::sync::Mutex;
 
-    fn kept(word: String) -> &'static str {
-        static WORDS: Mutex<Option<HashSet<&'static str>>> = Mutex::new(None);
-        let mut words = WORDS.lock().unwrap_or_else(|e| e.into_inner());
-        let words = words.get_or_insert_with(HashSet::new);
-        match words.get(word.as_str()) {
-            Some(known) => known,
-            None => {
-                let known: &'static str = Box::leak(word.into_boxed_str());
-                words.insert(known);
-                known
+    #[derive(Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    enum Saved { Idle, Working, Blocked, Error, Done, Ready, Loading, Unavailable }
+
+    impl Saved {
+        fn word(self) -> &'static str {
+            match self {
+                Self::Idle => "idle", Self::Working => "working", Self::Blocked => "blocked",
+                Self::Error => "error", Self::Done => "done", Self::Ready => "ready",
+                Self::Loading => "loading", Self::Unavailable => "unavailable",
             }
         }
     }
-
     pub fn one<'de, D: Deserializer<'de>>(from: D) -> Result<&'static str, D::Error> {
-        Ok(kept(String::deserialize(from)?))
+        Ok(Saved::deserialize(from)?.word())
     }
-
     pub fn maybe<'de, D: Deserializer<'de>>(from: D) -> Result<Option<&'static str>, D::Error> {
-        Ok(Option::<String>::deserialize(from)?.map(kept))
+        Ok(Option::<Saved>::deserialize(from)?.map(Saved::word))
     }
 }
 
@@ -267,6 +262,12 @@ pub fn shown_title(title: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unknown_saved_status_is_rejected_without_interning() {
+        let machine = serde_json::json!({"name":null,"state":"connected","layout":"arbitrary-new-word","error":null,"host":null});
+        assert!(serde_json::from_value::<Machine>(machine).is_err());
+    }
 
     #[test]
     fn a_view_kept_reads_back_as_it_was() {

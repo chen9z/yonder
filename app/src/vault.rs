@@ -11,19 +11,24 @@ const SEALED: &str = "sealed1:";
 /// Sealed with the app's own key.
 const ASIDE: &str = "aside1:";
 
-/// `plain`, sealed if the phone can; else as it is.
-pub fn seal(plain: &str) -> String {
-    let sealed = keystore::seal(plain.as_bytes())
+/// Encryption failures are errors on a phone. Desktop headless tests have
+/// an explicit plaintext backend and never exercise Android persistence.
+pub fn seal(plain: &str) -> Result<String, String> {
+    let sealed = seal_with(plain, keystore::seal(plain.as_bytes()), || aside::folder().ok_or_else(|| "no app folder".into()));
+    #[cfg(target_os = "android")]
+    { sealed }
+    #[cfg(not(target_os = "android"))]
+    { sealed.or_else(|_| Ok(plain.to_owned())) }
+}
+
+fn seal_with(plain: &str, primary: Result<(Vec<u8>, Vec<u8>), String>, folder: impl FnOnce() -> Result<std::path::PathBuf, String>) -> Result<String, String> {
+    primary
         .map(|(iv, sealed)| format!("{SEALED}{}:{}", hex(&iv), hex(&sealed)))
         .or_else(|why| {
             log::info!("no Keystore ({why}): the app's own key seals");
-            let dir = aside::folder().ok_or("no app folder")?;
+            let dir = folder()?;
             aside::seal(&dir, plain.as_bytes()).map(|(iv, sealed)| format!("{ASIDE}{}:{}", hex(&iv), hex(&sealed)))
-        });
-    sealed.unwrap_or_else(|why: String| {
-        log::warn!("kept unsealed: {why}");
-        plain.to_owned()
-    })
+        })
 }
 
 /// What `kept` holds: opened if sealed (None if it can't be: sealed on
@@ -49,7 +54,8 @@ pub fn open(kept: &str) -> Option<String> {
 }
 
 /// Whether `kept` is sealed.
-pub fn sealed(kept: &str) -> bool {
+#[cfg(test)]
+fn sealed(kept: &str) -> bool {
     kept.starts_with(SEALED) || kept.starts_with(ASIDE)
 }
 
@@ -294,11 +300,21 @@ mod tests {
 
     #[test]
     fn without_a_keystore_words_stay_as_they_are() {
-        assert_eq!(seal("secret"), "secret");
+        assert_eq!(seal("secret").unwrap(), "secret");
         assert_eq!(open("secret").as_deref(), Some("secret"));
         assert!(!sealed("secret"));
         // Sealed elsewhere: not opened here, and not taken for the words.
         assert_eq!(open("sealed1:00:00"), None);
+    }
+
+    #[test]
+    fn failed_encryption_never_returns_plaintext() {
+        let dir = std::env::temp_dir().join(format!("herdc-broken-vault-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("herdc.vault"), b"broken").unwrap();
+        assert!(seal_with("synthetic", Err("no keystore".into()), || Ok(dir.clone())).is_err());
+        assert!(seal_with("synthetic", Err("no keystore".into()), || Err("no folder".into())).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

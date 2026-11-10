@@ -5,7 +5,10 @@
 //!
 //! Ported from herdr-app `src/window.rs`, Apache-2.0.
 
-use crate::docs::{self, Outcome, Slot, Work};
+mod documents;
+mod projection;
+
+use crate::docs::{self, Outcome, Slot};
 use crate::exec;
 use crate::view::{self, AgentView, Focused, Link, Machine, Note, PaneView, SpaceView, TabView, View};
 use herdc_model::layout::{Axis, Content};
@@ -76,6 +79,7 @@ pub(crate) struct Here {
 
 pub(crate) struct State {
     jobs: mpsc::UnboundedSender<Job>,
+    pub(crate) tasks: crate::tasks::Tasks,
     out: Outlets,
     pub(crate) core: Option<Client>,
     /// Bumped on every (re)connect and loss: replies to an older line are dropped.
@@ -125,11 +129,20 @@ pub(crate) struct State {
     pub(crate) settled: Vec<oneshot::Sender<()>>,
 }
 
+impl Drop for State {
+    fn drop(&mut self) {
+        // Receivers retain the last value after a watch publisher is gone.
+        // Clear the client so retained UI handles cannot keep SSH alive.
+        self.out.clients.send_replace(None);
+    }
+}
+
 impl State {
-    pub(crate) fn new(jobs: mpsc::UnboundedSender<Job>, out: Outlets, store: Option<PathBuf>) -> State {
+    pub(crate) fn new(jobs: mpsc::UnboundedSender<Job>, out: Outlets, store: Option<PathBuf>, tasks: crate::tasks::Tasks) -> State {
         let initial_view = store.as_ref().and_then(|p| std::fs::read_to_string(p).ok()).and_then(|t| serde_json::from_str(&t).ok());
         State {
             jobs,
+            tasks,
             out,
             core: None,
             generation: 0,
@@ -179,7 +192,7 @@ impl State {
         then: impl FnOnce(&mut State, T) + Send + 'static,
     ) {
         let (jobs, generation) = (self.jobs.clone(), self.generation);
-        tokio::spawn(async move {
+        self.tasks.spawn(async move {
             let result = work.await;
             let _ = jobs.send(Box::new(move |s: &mut State| {
                 if s.generation == generation {
@@ -222,11 +235,7 @@ impl State {
             self.home = home;
         }
         for (machine, slot) in &mut self.documents {
-            slot.available = false;
-            slot.connected = machine.is_empty();
-            slot.read_attempted = false;
-            slot.pending = false;
-            slot.blocked = false;
+            slot.restart(machine.is_empty());
         }
         self.documents.entry(String::new()).or_default().connection(true, None, None);
         self.watching = false;
@@ -245,8 +254,7 @@ impl State {
         self.watching = false;
         self.events = None;
         for slot in self.documents.values_mut() {
-            slot.available = false;
-            slot.pending = false;
+            slot.lost();
         }
     }
 
@@ -272,7 +280,7 @@ impl State {
             let all = pushed.doc_machines.is_empty();
             for (machine, slot) in &mut self.documents {
                 let named = pushed.doc_machines.iter().any(|m| m.as_deref().unwrap_or("") == machine);
-                slot.dirty |= all || named;
+                if all || named { slot.invalidate(); }
             }
         }
         if pushed.terminals {
@@ -444,192 +452,6 @@ impl State {
         }
     }
 
-    /// This screen's own choices (focus, zoom, settled tabs, what was seen),
-    /// kept across restarts like herdr-app's `view.json`.
-    fn save_view(&mut self) {
-        let Some(path) = self.store.clone() else { return };
-        if !self.documents.values().any(|s| s.document.is_some()) {
-            return;
-        }
-        let mut view = mirror::View::capture(&self.model);
-        if let Some(saved) = &self.initial_view {
-            let documents = &self.documents;
-            view.preserve_unloaded(saved, |machine| documents.get(machine.unwrap_or("")).is_some_and(|s| s.document.is_some()));
-        }
-        let text = serde_json::to_string_pretty(&view).unwrap_or_default() + "\n";
-        if text == self.written_view {
-            return;
-        }
-        let tmp = path.with_extension("tmp");
-        let wrote = path.parent().is_none_or(|d| std::fs::create_dir_all(d).is_ok())
-            && std::fs::write(&tmp, &text).is_ok()
-            && std::fs::rename(&tmp, &path).is_ok();
-        if wrote {
-            self.written_view = text;
-        }
-    }
-
-    // ---- layout documents --------------------------------------------------
-
-    pub(crate) fn flush_documents(&mut self, refresh: bool) {
-        if !self.watching {
-            return;
-        }
-        let Some(core) = self.core.clone() else { return };
-        for (machine, slot) in &mut self.documents {
-            slot.dirty |= refresh;
-            if !slot.ready() {
-                continue;
-            }
-            let doc = mirror::Document::capture(&self.model, (!machine.is_empty()).then_some(machine.as_str()));
-            let write = (slot.available && slot.document.as_ref() != Some(&doc)).then_some(doc);
-            if write.is_none() && slot.available && !slot.dirty {
-                continue;
-            }
-            slot.pending = true;
-            slot.dirty = false;
-            let work = Work { machine: machine.clone(), version: slot.version, write };
-            let jobs = self.jobs.clone();
-            let generation = self.generation;
-            let core = core.clone();
-            tokio::spawn(async move {
-                let (machine, outcome) = docs::round(core, work).await;
-                let _ = jobs.send(Box::new(move |s: &mut State| {
-                    if s.generation != generation {
-                        return;
-                    }
-                    if let Some(slot) = s.documents.get_mut(&machine) {
-                        slot.pending = false;
-                    }
-                    s.documents_updated(None, vec![(machine, outcome)]);
-                }));
-            });
-        }
-    }
-
-    fn layout_notice(&self, title: &str, body: &str) {
-        self.note(Note::info(title, body));
-    }
-
-    fn documents_updated(&mut self, machines: Option<Value>, results: Vec<(String, Outcome)>) -> bool {
-        let mut changed = false;
-        for (machine, result) in results {
-            let Some(slot) = self.documents.get_mut(&machine) else { continue };
-            let first = slot.document.is_none();
-            slot.read_attempted = true;
-            let on = (!machine.is_empty()).then_some(machine.as_str());
-            let (document, version, replace, conflict) = match result {
-                Outcome::Read(d, v) => {
-                    let replace = !slot.available || slot.version != v || slot.document.is_none();
-                    let projection = mirror::Document::capture(&self.model, on);
-                    let unsent = slot.document.as_ref().is_some_and(|old| old != &projection);
-                    let conflict = replace && unsent && projection != d;
-                    (d, v, replace, conflict)
-                }
-                Outcome::Written(d, v) => (d, v, false, false),
-                Outcome::Conflict(d, v) => (d, v, true, true),
-                outcome @ (Outcome::Unavailable(_) | Outcome::Undecodable(_) | Outcome::Blocked(_)) => {
-                    // Unavailable is retried on the next event or tick; the others wait for a change.
-                    let (blocked, error) = match outcome {
-                        Outcome::Unavailable(e) => (false, e),
-                        Outcome::Undecodable(e) | Outcome::Blocked(e) => (true, e),
-                        _ => unreachable!(),
-                    };
-                    let notify = slot.connected && blocked && slot.notified_error.as_ref() != Some(&error);
-                    slot.available = false;
-                    slot.blocked = blocked;
-                    if slot.connected || slot.error.is_none() {
-                        slot.error = Some(error.clone());
-                    }
-                    if notify {
-                        tracing::warn!("layout on {machine:?} unavailable: {error}");
-                        slot.notified_error = Some(error.clone());
-                        let place = if machine.is_empty() { "This machine" } else { machine.as_str() };
-                        self.layout_notice("Layout unavailable", &format!("{place}: {error}"));
-                    }
-                    continue;
-                }
-            };
-            slot.version = version;
-            slot.available = slot.connected;
-            slot.blocked = false;
-            if slot.connected {
-                slot.error = None;
-                slot.notified_error = None;
-            }
-            slot.document = Some(document.clone());
-            if replace {
-                document.replace(&mut self.model, on);
-                if first && let Some(view) = &self.initial_view {
-                    view.apply_machine(&mut self.model, on);
-                }
-                changed = true;
-            }
-            if conflict {
-                self.layout_notice("Layout changed elsewhere", "The other screen's layout is shown.");
-            }
-        }
-        if let Some(machines) = machines {
-            // Temporary machines are agents' short-lived sandboxes: left out.
-            let kept: Vec<&Value> = machines["machines"].as_array().into_iter().flatten().filter(|m| m["temporary"] != true).collect();
-            let states: HashMap<&str, &str> = kept.iter().filter_map(|m| Some((m["name"].as_str()?, m["state"].as_str()?))).collect();
-            for machine in &kept {
-                let Some(name) = machine["name"].as_str() else { continue };
-                let state = machine["state"].as_str().unwrap_or("unavailable");
-                let reason = (state != "connected").then(|| {
-                    machine["why"].as_str().map(str::to_owned).unwrap_or_else(|| match state {
-                        "needs_update" => format!("{name} needs a core update; run hc machine update {name}"),
-                        "needs_login" => format!("{name} needs login; run hc machine login {name}"),
-                        _ => format!("{name} is {state}"),
-                    })
-                });
-                self.documents.entry(name.to_owned()).or_default().connection(state == "connected", machine["since_ms"].as_u64(), reason);
-            }
-            if self.model.spaces.iter().any(|s| s.machine.as_deref().is_some_and(|m| !states.contains_key(m))) {
-                let mut view = mirror::View::capture(&self.model);
-                if let Some(saved) = &self.initial_view {
-                    let documents = &self.documents;
-                    view.preserve_unloaded(saved, |m| documents.get(m.unwrap_or("")).is_some_and(|s| s.document.is_some()));
-                }
-                self.initial_view = Some(view);
-            }
-            self.documents.retain(|m, _| m.is_empty() || states.contains_key(m.as_str()));
-            let before = self.model.spaces.len();
-            self.model.spaces.retain(|s| s.machine.as_deref().is_none_or(|m| states.contains_key(m)));
-            changed |= before != self.model.spaces.len();
-            self.machines = kept
-                .iter()
-                .filter_map(|m| {
-                    let name = m["name"].as_str()?;
-                    Some(Machine {
-                        name: Some(name.to_owned()),
-                        state: m["state"].as_str().unwrap_or("unavailable").to_owned(),
-                        layout: self.documents.get(name).map_or("unavailable", Slot::layout),
-                        error: self.documents.get(name).and_then(|s| s.error.clone()),
-                        host: m["host"].as_str().map(str::to_owned),
-                    })
-                })
-                .collect();
-        }
-        if changed {
-            self.tend_terminals(false);
-        }
-        changed
-    }
-
-    /// The machine a space's terminals run on must have its layout in hand
-    /// before anything there changes.
-    pub(crate) fn require_document(&self, machine: Option<&str>) -> Result<(), String> {
-        match self.documents.get(machine.unwrap_or("")) {
-            Some(slot) if slot.available => Ok(()),
-            Some(slot) => Err(slot.error.clone().unwrap_or_else(|| "This machine's layout is unavailable. Try again when it reconnects.".into())),
-            None => Err(match machine {
-                Some(m) => format!("Herdr has no machine called {m}. See hc machine ls; machines added with --temp stay out of Herdr."),
-                None => "This machine's layout is unavailable. Try again when it reconnects.".into(),
-            }),
-        }
-    }
-
     // ---- core facts --------------------------------------------------------
 
     fn terminals_listed(&mut self, list: Vec<Value>) {
@@ -753,7 +575,7 @@ impl State {
             .filter(|(a, _)| self.model.pane_of(a).is_none() && !self.changing.contains(*a) && !self.closing.contains_key(*a))
             .filter_map(|(a, r)| {
                 let machine = a.split_once('/').map(|(m, _)| m);
-                if !self.documents.get(machine.unwrap_or("")).is_some_and(|s| s.available) {
+                if !self.documents.get(machine.unwrap_or("")).is_some_and(|s| s.available()) {
                     return None;
                 }
                 let space = r.pointer("/labels/herdr.space")?.as_str().filter(|s| !s.is_empty())?;
@@ -1083,167 +905,7 @@ impl State {
 
     // ---- the published view ------------------------------------------------
 
-    fn program(&self, addr: &str) -> Value {
-        self.live.get(addr).map(|r| r["program"].clone()).unwrap_or(Value::Null)
-    }
 
-    fn title(&self, addr: &str) -> String {
-        self.live.get(addr).and_then(|r| r["title"].as_str()).unwrap_or_default().to_owned()
-    }
-
-    /// The agent an agents page shows: the chosen one while it lives, else
-    /// the focused pane's if it's an agent, else the first agent.
-    pub(crate) fn shown_agent(&self) -> Option<String> {
-        let focused = self.model.focused_pane().and_then(|p| self.model.address_of(&p));
-        self.agent
-            .clone()
-            .filter(|a| self.live.contains_key(a))
-            .or_else(|| focused.filter(|a| self.model.status(a).is_some()))
-            .or_else(|| self.agent_order().into_iter().next())
-    }
-
-    pub(crate) fn agent_order(&self) -> Vec<String> {
-        self.model.all_addresses().into_iter().filter(|a| self.model.status(a).is_some()).collect()
-    }
-
-    fn view(&self) -> View {
-        let m = &self.model;
-        let home = &self.home;
-        let focused_pane = m.focused_pane();
-        let mut agents = Vec::new();
-        let spaces = m
-            .spaces
-            .iter()
-            .enumerate()
-            .map(|(i, p)| {
-                let active_tab = p.active_tab().map(|c| c.id.clone());
-                let first = p.active_tab().and_then(|c| c.focused_pane()).and_then(|pane| m.address_of(&pane));
-                let tabs = p
-                    .tabs
-                    .iter()
-                    .enumerate()
-                    .map(|(ci, c)| {
-                        let panes = c
-                            .root
-                            .panes()
-                            .into_iter()
-                            .map(|n| {
-                                let focused = m.active.as_deref() == Some(p.id.as_str()) && focused_pane.as_deref() == Some(n.id.as_str());
-                                let zoomed = c.zoomed.as_deref() == Some(n.id.as_str());
-                                let addr = n.terminal().map(str::to_owned);
-                                let (mod_name, props) = match n.content() {
-                                    Some(Content::Mod { name, props }) => (Some(name.clone()), props.clone()),
-                                    _ => (None, Value::Null),
-                                };
-                                let a = addr.as_deref().and_then(|a| m.agents.get(a));
-                                if let Some(addr) = &addr
-                                    && let Some(status) = m.status(addr)
-                                {
-                                    agents.push(AgentView {
-                                        address: addr.clone(),
-                                        pane: n.id.clone(),
-                                        space: p.id.clone(),
-                                        space_name: m.space_name(p, home),
-                                        machine: p.machine.clone(),
-                                        tab: c.id.clone(),
-                                        tab_index: ci + 1,
-                                        tab_name: Model::tab_name(p, c),
-                                        status,
-                                        app: a.and_then(|a| a.app.clone()),
-                                        program: self.program(addr),
-                                        title: self.title(addr),
-                                        seq: a.map_or(0, |a| a.seq),
-                                        // The core's, else when this engine saw it change.
-                                        since: self.live.get(addr).and_then(|r| r["status_ms"].as_u64()).unwrap_or(a.map_or(0, |a| a.since)),
-                                        pinned: self.live.get(addr).and_then(|r| r.pointer("/labels/herdr.pinned")).and_then(Value::as_str).is_some_and(|v| !v.is_empty()),
-                                        focused,
-                                    });
-                                }
-                                PaneView {
-                                    pane: n.id.clone(),
-                                    title: addr.as_deref().map(|a| self.title(a)).or_else(|| mod_name.clone()).unwrap_or_default(),
-                                    cwd: addr.as_deref().and_then(|a| self.cwds.get(a).cloned()),
-                                    branch: addr.as_deref().and_then(|a| m.folder_info.get(a)).and_then(|f| f.branch.clone()),
-                                    status: addr.as_deref().and_then(|a| m.status(a)),
-                                    app: a.and_then(|a| a.app.clone()),
-                                    program: addr.as_deref().map(|a| self.program(a)).unwrap_or(Value::Null),
-                                    live: addr.as_deref().is_some_and(|a| self.live.contains_key(a)),
-                                    shown: self.swapped.get(&n.id).cloned(),
-                                    terminal: addr,
-                                    mod_name,
-                                    props,
-                                    focused,
-                                    zoomed,
-                                }
-                            })
-                            .collect();
-                        TabView {
-                            id: c.id.clone(),
-                            index: ci + 1,
-                            name: Model::tab_name(p, c),
-                            named: !c.name.is_empty(),
-                            active: active_tab.as_ref() == Some(&c.id),
-                            status: m.rollup(&model::addresses(&c.root)),
-                            settled: c.settled.is_some(),
-                            settled_at: c.settled,
-                            changed_at: m.changed_at(c),
-                            working_since: m.working_since(c),
-                            focused: c.focused_pane(),
-                            zoomed: c.zoomed.clone(),
-                            root: c.root.clone(),
-                            panes,
-                        }
-                    })
-                    .collect();
-                let all: Vec<String> = p.tabs.iter().flat_map(|c| model::addresses(&c.root)).collect();
-                SpaceView {
-                    id: p.id.clone(),
-                    index: i + 1,
-                    name: m.space_name(p, home),
-                    named: !p.name.is_empty(),
-                    folder: p.folder.clone(),
-                    machine: p.machine.clone(),
-                    branch: first.and_then(|a| m.folder_info.get(&a)).and_then(|f| f.branch.clone()),
-                    active: m.active.as_deref() == Some(p.id.as_str()),
-                    status: m.rollup(&all),
-                    tabs,
-                }
-            })
-            .collect();
-        let focused = m.active_space().and_then(|p| {
-            let tab = p.active_tab()?;
-            let pane = tab.focused_pane();
-            let terminal = pane.as_deref().and_then(|p| m.address_of(p));
-            Some(Focused {
-                space: p.id.clone(),
-                tab: tab.id.clone(),
-                shown: pane.as_deref().and_then(|p| self.swapped.get(p).cloned()),
-                cwd: terminal.as_deref().and_then(|a| self.cwds.get(a).cloned()),
-                agent: self.shown_agent(),
-                terminal,
-                pane,
-            })
-        });
-        let local = self.documents.get("");
-        let mut machines = vec![Machine {
-            name: None,
-            state: if self.core.is_some() { "connected" } else { "connecting" }.into(),
-            layout: local.map_or("unavailable", Slot::layout),
-            error: local.and_then(|s| s.error.clone()),
-            host: match &self.link {
-                Link::Connected { core, .. } => Some(core.clone()),
-                _ => None,
-            },
-        }];
-        machines.extend(self.machines.iter().cloned().map(|mut mc| {
-            if let Some(slot) = mc.name.as_deref().and_then(|n| self.documents.get(n)) {
-                mc.layout = slot.layout();
-                mc.error = slot.error.clone();
-            }
-            mc
-        }));
-        View { link: self.link.clone(), home: self.home.clone(), machines, spaces, agents, terminals: self.records.clone(), focused }
-    }
 }
 
 /// A terminal record as screens use it: `status` its 7501 word, `report`
@@ -1306,43 +968,4 @@ fn powershell_argv(sh: &[String]) -> Vec<String> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn records_show_their_word_program_and_plain_title() {
-        let r = normalize(json!({"address": "t1", "status": {"state": "working", "app": "claude-code"}, "title": "\u{2819} fix", "argv": ["zsh"]}));
-        assert_eq!(r["status"], "working");
-        assert_eq!(r["program"]["key"], "claude");
-        assert_eq!(r["report"]["app"], "claude-code");
-        assert_eq!(r["title"], "fix");
-        let shell = normalize(json!({"address": "t2", "argv": ["/bin/zsh"], "foreground": {"argv": ["vim", "x"]}}));
-        assert_eq!(shell["program"]["key"], "vim");
-        assert!(shell["status"].is_null());
-    }
-
-    #[test]
-    fn folders_are_asked_again_only_when_the_answer_could_change() {
-        let last = FolderCheck { at: Instant::now(), cwd: "/a".into(), busy: true, repo: true };
-        assert!(recheck(None, "/a", false, true));
-        assert!(recheck(Some(&last), "/b", true, true));
-        assert!(recheck(Some(&last), "/a", false, true));
-        assert!(!recheck(Some(&last), "/a", true, true));
-    }
-
-    #[test]
-    fn early_launch_failures_show_exit_code_and_last_output_lines() {
-        let mut record = json!({"reason":"exited", "exit_code":127, "created_ms":1000, "finished_ms":3000});
-        assert_eq!(launch_failure(&record, "old\none\ntwo\nthree\nfour\nfive\n\n").as_deref(), Some("Exit code 127\none\ntwo\nthree\nfour\nfive"));
-        assert_eq!(launch_failure(&record, "").as_deref(), Some("Exit code 127"));
-        record["exit_code"] = 0.into();
-        assert!(launch_failure(&record, "").is_none());
-        record["exit_code"] = 1.into();
-        record["finished_ms"] = 3001.into();
-        assert!(launch_failure(&record, "").is_none());
-        record["finished_ms"] = 2000.into();
-        record["reason"] = "killed".into();
-        assert!(launch_failure(&record, "").is_none());
-        assert!(launch_failure(&Value::Null, "").is_none());
-    }
-}
+mod tests;

@@ -95,21 +95,17 @@ pub fn shorthand(c: &Command, value: &str) -> Value {
 }
 
 /// Rejects misspelled arguments before a command can use its current-target default.
-pub fn validate_args(c: &Command, args: &Value) -> Result<(), String> {
+fn parse_args(c: &Command, args: &Value) -> Result<Args, String> {
     let valid = if c.args.is_empty() { "none".into() } else { c.args.iter().map(|a| a.name).collect::<Vec<_>>().join(", ") };
     match args {
-        Value::Null => Ok(()),
+        Value::Null => Ok(Args::default()),
         Value::Object(args) => {
             let unknown: Vec<_> = args.keys().filter(|key| !c.args.iter().any(|a| a.name == key.as_str())).map(String::as_str).collect();
             if !unknown.is_empty() {
                 return Err(format!("{}: unknown argument(s): {}; valid arguments: {valid}", c.name, unknown.join(", ")));
             }
-            for (key, value) in args {
-                if matches!(key.as_str(), "id" | "pane" | "space" | "terminal" | "target") && !value.is_string() && !value.is_null() {
-                    return Err(format!("{}: argument {key} must be a string (or null to omit it)", c.name));
-                }
-            }
-            Ok(())
+            serde_json::from_value(Value::Object(args.clone()))
+                .map_err(|e| format!("{}: invalid arguments: {e}", c.name))
         }
         _ => Err(format!("{}: arguments must be an object; valid arguments: {valid}", c.name)),
     }
@@ -124,7 +120,7 @@ pub fn missing(c: &Command, args: &Value) -> Option<&'static str> {
     })
 }
 
-/// Where a command's answer goes. Dropped unanswered, it says `ok`.
+/// A command must explicitly complete; discarded work is cancelled.
 pub(crate) struct Reply(Option<oneshot::Sender<Result<Value, String>>>);
 
 impl Reply {
@@ -132,21 +128,21 @@ impl Reply {
         Reply(Some(tx))
     }
 
-    pub(crate) fn send(mut self, result: Result<Value, String>) {
+    pub(crate) fn send(&mut self, result: Result<Value, String>) {
         if let Some(tx) = self.0.take() {
             let _ = tx.send(result);
         }
     }
 
-    fn value(self, v: Value) {
+    fn value(&mut self, v: Value) {
         self.send(Ok(v))
     }
 
-    fn fail(self, e: impl Into<String>) {
+    fn fail(&mut self, e: impl Into<String>) {
         self.send(Err(e.into()))
     }
 
-    fn ask(self, ask: Value) {
+    fn ask(&mut self, ask: Value) {
         self.value(json!({ "ask": ask }))
     }
 }
@@ -154,22 +150,32 @@ impl Reply {
 impl Drop for Reply {
     fn drop(&mut self) {
         if let Some(tx) = self.0.take() {
-            let _ = tx.send(Ok(json!({ "ok": true })));
+            let _ = tx.send(Err("command cancelled before completion".into()));
         }
     }
 }
 
+#[derive(Debug, Default, serde::Deserialize)]
+struct Args {
+    id: Option<String>, pane: Option<String>, space: Option<String>,
+    terminal: Option<String>, target: Option<String>, name: Option<String>,
+    folder: Option<String>, tab: Option<String>, task: Option<String>,
+    machine: Option<String>, direction: Option<String>, place: Option<String>,
+    to: Option<String>,
+    #[serde(rename = "mod")]
+    module: Option<String>,
+    argv: Option<Vec<String>>,
+    index: Option<u64>, confirmed: Option<bool>, pinned: Option<bool>,
+    px: Option<f32>, weight: Option<f32>,
+    #[serde(default)]
+    props: Value,
+}
+
+// JSON is retained only at the external command/prompt boundary.
 fn arg<'a>(a: &'a Value, k: &str) -> Option<&'a str> {
     a.get(k).and_then(Value::as_str)
 }
-
-fn owned(a: &Value, k: &str) -> Option<String> {
-    arg(a, k).map(str::to_owned)
-}
-
-fn argv(a: &Value) -> Option<Vec<String>> {
-    a.get("argv").and_then(|v| serde_json::from_value(v.clone()).ok())
-}
+fn owned(a: &Value, k: &str) -> Option<String> { arg(a, k).map(str::to_owned) }
 
 /// An agent with its first message, in that machine's shell, which stays
 /// when the agent exits.
@@ -187,12 +193,12 @@ fn machine_of_address(addr: &str) -> Option<&str> {
 
 impl State {
     /// Runs a command for the person: what it made, or why not.
-    pub(crate) fn run(&mut self, name: &str, mut args: Value, reply: Reply) {
+    pub(crate) fn run(&mut self, name: &str, args: Value, mut reply: Reply) {
         // `name:value`, as in keys.json.
         if let Some((n, v)) = name.split_once(':')
             && let Some(c) = find(n)
         {
-            if let Err(error) = validate_args(c, &args) {
+            if let Err(error) = parse_args(c, &args) {
                 return reply.fail(error);
             }
             let mut short = shorthand(c, v);
@@ -204,21 +210,18 @@ impl State {
         let Some(command) = find(name) else {
             return reply.fail(format!("unknown command {name:?}"));
         };
-        if let Err(error) = validate_args(command, &args) {
-            return reply.fail(error);
-        }
+        let mut parsed = match parse_args(command, &args) {
+            Ok(parsed) => parsed,
+            Err(error) => return reply.fail(error),
+        };
         if name.ends_with(".rename") && args.get("name").is_none_or(Value::is_null) {
             return self.ask_name(name, args, reply);
         }
         if let Some(arg) = missing(command, &args) {
             return reply.fail(format!("{name} needs {arg}"));
         }
-        if !args.is_object() {
-            args = json!({});
-        }
         if name == "space.new" {
-            let machine = arg(&args, "machine").map(str::to_owned).or_else(|| self.model.active_space().and_then(|s| s.machine.clone()));
-            args["machine"] = json!(machine.filter(|m| !m.is_empty()));
+            parsed.machine = parsed.machine.or_else(|| self.model.active_space().and_then(|s| s.machine.clone())).filter(|m| !m.is_empty());
         }
         let structural = matches!(
             name,
@@ -226,23 +229,23 @@ impl State {
                 | "pane.close" | "pane.swap" | "terminal.keep" | "terminal.park" | "layout.resize"
         );
         if structural {
-            let node = ["id", "space", "pane"].into_iter().find_map(|k| arg(&args, k));
+            let node = parsed.id.as_deref().or(parsed.space.as_deref()).or(parsed.pane.as_deref());
             let target = node.and_then(|id| self.model.space(id).or_else(|| self.model.space_of(id))).or_else(|| self.model.active_space());
             let machine = match name {
-                "space.new" => arg(&args, "machine"),
-                "terminal.park" => arg(&args, "terminal").and_then(machine_of_address),
+                "space.new" => parsed.machine.as_deref(),
+                "terminal.park" => parsed.terminal.as_deref().and_then(machine_of_address),
                 _ => target.and_then(|s| s.machine.as_deref()),
             };
             if let Err(error) = self.require_document(machine) {
                 return reply.fail(error);
             }
         }
-        self.dispatch(name, &args, reply);
+        self.dispatch(name, &parsed, reply);
     }
 
     /// Asks for a new name (space.rename, tab.rename), starting with the one
     /// someone gave (empty for an automatic one).
-    fn ask_name(&mut self, name: &str, mut args: Value, reply: Reply) {
+    fn ask_name(&mut self, name: &str, mut args: Value, mut reply: Reply) {
         if !args.is_object() {
             args = json!({});
         }
@@ -261,24 +264,24 @@ impl State {
             "command": { "name": name, "args": args } }));
     }
 
-    fn dispatch(&mut self, name: &str, a: &Value, reply: Reply) {
+    fn dispatch(&mut self, name: &str, a: &Args, mut reply: Reply) {
         let active_tab = self.model.active_tab().map(|c| c.id.clone());
         match name {
             // ---- spaces
             "space.new" => {
                 let request = NewSpace {
-                    name: arg(a, "name").unwrap_or_default().trim().to_owned(),
-                    folder: owned(a, "folder"),
-                    tab: arg(a, "tab").unwrap_or_default().trim().to_owned(),
-                    argv: agent_argv(argv(a), arg(a, "task")).or(argv(a)),
-                    machine: owned(a, "machine").filter(|m| !m.is_empty()),
+                    name: a.name.as_deref().unwrap_or_default().trim().to_owned(),
+                    folder: a.folder.clone(),
+                    tab: a.tab.as_deref().unwrap_or_default().trim().to_owned(),
+                    argv: agent_argv(a.argv.clone(), a.task.as_deref()).or(a.argv.clone()),
+                    machine: a.machine.clone().filter(|m| !m.is_empty()),
                 };
-                self.new_space(request, reply);
+                return self.new_space(request, reply);
             }
             "space.close" => {
-                let Some(id) = owned(a, "id").or_else(|| self.model.active.clone()) else { return reply.fail("no space to close") };
+                let Some(id) = a.id.clone().or_else(|| self.model.active.clone()) else { return reply.fail("no space to close") };
                 let Some(p) = self.model.space(&id) else { return reply.fail(format!("no space {id:?}")) };
-                if a["confirmed"] != true {
+                if a.confirmed != Some(true) {
                     let panes: usize = p.tabs.iter().map(|c| c.root.panes().len()).sum();
                     let count = |n: usize, one: &str| if n == 1 { format!("1 {one}") } else { format!("{n} {one}s") };
                     let detail = format!("{} \u{2014} {}, {}", self.model.space_name(p, &self.home), count(p.tabs.len(), "tab"), count(panes, "terminal"));
@@ -289,20 +292,20 @@ impl State {
                 self.kill(&addrs);
             }
             "space.rename" => {
-                let Some(id) = owned(a, "id").or_else(|| self.model.active.clone()) else { return reply.fail("no space to rename") };
-                let Some(name) = arg(a, "name") else { return reply.fail("space.rename needs name (empty: automatic)") };
+                let Some(id) = a.id.clone().or_else(|| self.model.active.clone()) else { return reply.fail("no space to rename") };
+                let Some(name) = a.name.as_deref() else { return reply.fail("space.rename needs name (empty: automatic)") };
                 let Some(p) = self.model.space_mut(&id) else { return reply.fail(format!("no space {id:?}")) };
                 p.name = name.trim().to_owned();
             }
             "space.move" => {
-                let (Some(id), Some(i)) = (arg(a, "id"), a["index"].as_u64()) else { return reply.fail("space.move needs id and index") };
+                let (Some(id), Some(i)) = (a.id.as_deref(), a.index) else { return reply.fail("space.move needs id and index") };
                 if !self.model.move_space(id, i as usize) {
                     reply.fail(format!("no space {id:?}"))
                 }
             }
             "space.select" => {
-                let id = owned(a, "id").or_else(|| {
-                    let i = a["index"].as_u64()? as usize;
+                let id = a.id.clone().or_else(|| {
+                    let i = a.index? as usize;
                     self.model.spaces.get(i.checked_sub(1)?).map(|p| p.id.clone())
                 });
                 match id.filter(|id| self.model.space(id).is_some()) {
@@ -319,48 +322,48 @@ impl State {
             }
             // ---- tabs
             "tab.new" => {
-                let name = arg(a, "name").unwrap_or_default().trim().to_owned();
-                match owned(a, "mod") {
+                let name = a.name.as_deref().unwrap_or_default().trim().to_owned();
+                match a.module.clone() {
                     Some(m) => {
-                        let r = self.new_mod_tab(owned(a, "space"), &name, m, a.get("props").cloned().unwrap_or(Value::Null));
+                        let r = self.new_mod_tab(a.space.clone(), &name, m, a.props.clone());
                         reply.send(r);
                     }
                     // A new tab with no space open starts one, as space.new does.
-                    None if a.get("space").is_none_or(Value::is_null) && self.model.active_space().is_none() => {
+                    None if a.space.is_none() && self.model.active_space().is_none() => {
                         let request = NewSpace {
                             name: String::new(),
-                            folder: owned(a, "folder"),
+                            folder: a.folder.clone(),
                             tab: name,
-                            argv: agent_argv(argv(a), arg(a, "task")).or(argv(a)),
+                            argv: agent_argv(a.argv.clone(), a.task.as_deref()).or(a.argv.clone()),
                             machine: None,
                         };
-                        self.new_space(request, reply);
+                        return self.new_space(request, reply);
                     }
                     None => {
-                        let argv = agent_argv(argv(a), arg(a, "task")).or(argv(a));
-                        self.new_tab(owned(a, "space"), name, owned(a, "folder"), argv, reply);
+                        let argv = agent_argv(a.argv.clone(), a.task.as_deref()).or(a.argv.clone());
+                        return self.new_tab(a.space.clone(), name, a.folder.clone(), argv, reply);
                     }
                 }
             }
             "tab.close" => {
-                let Some(id) = owned(a, "id").or(active_tab) else { return reply.fail("no tab to close") };
+                let Some(id) = a.id.clone().or(active_tab) else { return reply.fail("no tab to close") };
                 let Some(p) = self.model.space_of(&id) else { return reply.fail(format!("no tab {id:?}")) };
                 // The last tab takes its space with it: asked like closing the space.
                 if p.tabs.len() == 1 {
-                    let args = json!({ "id": p.id, "confirmed": a.get("confirmed").cloned().unwrap_or(Value::Null) });
+                    let args = Args { id: Some(p.id.clone()), confirmed: a.confirmed, ..Default::default() };
                     return self.dispatch("space.close", &args, reply);
                 }
                 let (addrs, _) = self.model.remove_tab(&id);
                 self.kill(&addrs);
             }
             "tab.rename" => {
-                let Some(id) = owned(a, "id").or(active_tab) else { return reply.fail("no tab to rename") };
-                let Some(name) = arg(a, "name") else { return reply.fail("tab.rename needs name (empty: its number)") };
+                let Some(id) = a.id.clone().or(active_tab) else { return reply.fail("no tab to rename") };
+                let Some(name) = a.name.as_deref() else { return reply.fail("tab.rename needs name (empty: its number)") };
                 let Some(c) = self.model.tab_mut(&id) else { return reply.fail(format!("no tab {id:?}")) };
                 c.name = name.trim().to_owned();
             }
             "tab.move" => {
-                let (Some(id), Some(i)) = (arg(a, "id"), a["index"].as_u64()) else { return reply.fail("tab.move needs id and index") };
+                let (Some(id), Some(i)) = (a.id.as_deref(), a.index) else { return reply.fail("tab.move needs id and index") };
                 let Some(pid) = self.model.space_of(id).map(|p| p.id.clone()) else { return reply.fail(format!("no tab {id:?}")) };
                 let p = self.model.space_mut(&pid).unwrap();
                 let from = p.tabs.iter().position(|c| c.id == id).unwrap();
@@ -369,7 +372,7 @@ impl State {
                 p.tabs.insert(to, c);
             }
             "tab.settle" | "tab.unsettle" => {
-                let Some(id) = owned(a, "id").or(active_tab) else { return reply.fail("no tab") };
+                let Some(id) = a.id.clone().or(active_tab) else { return reply.fail("no tab") };
                 let found = if name == "tab.settle" {
                     self.model.settle(&id, model::now_ms())
                 } else {
@@ -384,8 +387,8 @@ impl State {
             }
             "tab.select" => {
                 // By position among the tabs the lists show (settled ones are put away).
-                let id = owned(a, "id").or_else(|| {
-                    let i = a["index"].as_u64()? as usize;
+                let id = a.id.clone().or_else(|| {
+                    let i = a.index? as usize;
                     self.model.active_space()?.tabs.iter().filter(|c| c.settled.is_none()).nth(i.checked_sub(1)?).map(|c| c.id.clone())
                 });
                 if !id.is_some_and(|id| self.model.select_tab(&id)) {
@@ -405,35 +408,35 @@ impl State {
             }
             // ---- panes
             "pane.split" => {
-                let axis = match arg(a, "direction") {
+                let axis = match a.direction.as_deref() {
                     Some("right") => Axis::Row,
                     Some("down") => Axis::Column,
                     other => return reply.fail(format!("pane.split direction is \"right\" or \"down\", not {other:?}")),
                 };
-                match owned(a, "mod") {
+                match a.module.clone() {
                     Some(m) => {
-                        let r = self.split_mod(owned(a, "pane"), axis, m, a.get("props").cloned().unwrap_or(Value::Null));
+                        let r = self.split_mod(a.pane.clone(), axis, m, a.props.clone());
                         reply.send(r);
                     }
-                    None => self.split(owned(a, "pane"), axis, argv(a), None, reply),
+                    None => return self.split(a.pane.clone(), axis, a.argv.clone(), None, reply),
                 }
             }
             "pane.close" => {
-                let Some(pane) = owned(a, "pane").or_else(|| self.model.focused_pane()) else { return reply.fail("no pane to close") };
+                let Some(pane) = a.pane.clone().or_else(|| self.model.focused_pane()) else { return reply.fail("no pane to close") };
                 let Some(c) = self.model.tab_of(&pane) else { return reply.fail(format!("no pane {pane:?}")) };
                 if c.root.find(&pane).is_some_and(|n| !n.closable()) {
-                    return;
+                    return reply.value(json!({"ok": true}));
                 }
                 if c.root.panes().len() == 1 {
                     let id = c.id.clone();
-                    return self.dispatch("tab.close", &json!({ "id": id }), reply);
+                    return self.dispatch("tab.close", &Args { id: Some(id), ..Default::default() }, reply);
                 }
                 let addr = self.model.address_of(&pane);
                 self.model.remove_pane(&pane);
                 self.kill(&addr.into_iter().collect::<Vec<_>>());
             }
             "pane.zoom" => {
-                let pane = owned(a, "pane").or_else(|| self.model.focused_pane());
+                let pane = a.pane.clone().or_else(|| self.model.focused_pane());
                 if let Some(pane) = pane
                     && let Some(tab) = self.model.tab_of(&pane).map(|c| c.id.clone())
                     && let Some(c) = self.model.tab_mut(&tab)
@@ -443,14 +446,14 @@ impl State {
                 }
             }
             "pane.focus" => {
-                let pane = owned(a, "pane").or_else(|| arg(a, "terminal").and_then(|t| self.model.pane_of(t)));
+                let pane = a.pane.clone().or_else(|| a.terminal.as_deref().and_then(|t| self.model.pane_of(t)));
                 let Some(p) = pane.filter(|p| self.model.tab_of(p).is_some()) else { return reply.fail("no such pane") };
                 self.model.focus_pane(&p);
                 self.agent = self.model.address_of(&p);
                 self.swapped.remove(&p);
             }
             "pane.go" => {
-                let dir = arg(a, "direction").unwrap_or_default();
+                let dir = a.direction.as_deref().unwrap_or_default();
                 if !matches!(dir, "left" | "right" | "up" | "down") {
                     return reply.fail(format!("{name} direction is left, right, up or down, not {dir:?}"));
                 }
@@ -461,14 +464,14 @@ impl State {
                 }
             }
             "pane.swap" => {
-                let explicit = arg(a, "pane").is_some();
-                let Some(pane) = owned(a, "pane").or_else(|| self.model.focused_pane()) else {
-                    if arg(a, "target").is_some() {
+                let explicit = a.pane.as_deref().is_some();
+                let Some(pane) = a.pane.clone().or_else(|| self.model.focused_pane()) else {
+                    if a.target.as_deref().is_some() {
                         reply.fail("no pane to swap");
                     }
-                    return;
+                    return reply.value(json!({"ok": true}));
                 };
-                let r = match (arg(a, "direction"), arg(a, "target")) {
+                let r = match (a.direction.as_deref(), a.target.as_deref()) {
                     (Some(_), Some(_)) => Err("pane.swap takes direction or target, not both".into()),
                     (None, None) => Err("pane.swap needs direction or target".into()),
                     (None, Some(target)) => self.model.swap_panes(&pane, target),
@@ -481,24 +484,24 @@ impl State {
             }
             // ---- terminals
             "terminal.open" => {
-                let argv = argv(a);
-                match arg(a, "place").unwrap_or("tab") {
-                    "right" => self.split(None, Axis::Row, argv, owned(a, "folder"), reply),
-                    "down" => self.split(None, Axis::Column, argv, owned(a, "folder"), reply),
+                let argv = a.argv.clone();
+                match a.place.as_deref().unwrap_or("tab") {
+                    "right" => return self.split(None, Axis::Row, argv, a.folder.clone(), reply),
+                    "down" => return self.split(None, Axis::Column, argv, a.folder.clone(), reply),
                     _ => {
-                        let name = owned(a, "name")
+                        let name = a.name.clone()
                             .or_else(|| argv.as_ref().and_then(|v| v.first()).map(|p| p.rsplit('/').next().unwrap_or(p).to_owned()))
                             .unwrap_or_else(|| "shell".into());
-                        self.new_tab(None, name, owned(a, "folder"), argv, reply);
+                        return self.new_tab(None, name, a.folder.clone(), argv, reply);
                     }
                 }
             }
             "terminal.keep" => {
-                let r = self.keep_terminal(arg(a, "terminal").unwrap_or_default(), arg(a, "place").unwrap_or("tab"));
+                let r = self.keep_terminal(a.terminal.as_deref().unwrap_or_default(), a.place.as_deref().unwrap_or("tab"));
                 reply.send(r);
             }
             "terminal.park" => {
-                let t = arg(a, "terminal").unwrap_or_default().to_owned();
+                let t = a.terminal.as_deref().unwrap_or_default().to_owned();
                 if self.changing.contains(&t) {
                     return reply.fail("This terminal already has a pane change in progress.");
                 }
@@ -506,33 +509,33 @@ impl State {
                 reply.send(r);
             }
             "terminal.right_click" => {
-                let to = match arg(a, "to") {
+                let to = match a.to.as_deref() {
                     Some("program") => "program",
                     Some("menu") => "",
                     other => return reply.fail(format!("terminal.right_click to is \"program\" or \"menu\", not {other:?}")),
                 };
-                let t = owned(a, "terminal").or_else(|| self.model.focused_pane().and_then(|p| self.model.address_of(&p)));
+                let t = a.terminal.clone().or_else(|| self.model.focused_pane().and_then(|p| self.model.address_of(&p)));
                 let Some(t) = t.filter(|t| self.live.contains_key(t)) else { return reply.fail("no such running terminal") };
                 self.label_now(&t, json!({ "herdr.right-click": to }));
             }
             "terminal.pin" => {
-                let Some(pinned) = a["pinned"].as_bool() else { return reply.fail("terminal.pin pinned is true or false") };
-                let t = arg(a, "terminal").unwrap_or_default().to_owned();
+                let Some(pinned) = a.pinned else { return reply.fail("terminal.pin pinned is true or false") };
+                let t = a.terminal.as_deref().unwrap_or_default().to_owned();
                 if !self.live.contains_key(&t) {
                     return reply.fail(format!("no running terminal {t:?}"));
                 }
                 self.label_now(&t, json!({ "herdr.pinned": if pinned { "1" } else { "" } }));
             }
             "terminal.kill" => {
-                let t = arg(a, "terminal").unwrap_or_default();
+                let t = a.terminal.as_deref().unwrap_or_default();
                 if !self.live.contains_key(t) {
                     return reply.fail(format!("no running terminal {t:?}"));
                 }
                 self.kill(&[t.to_owned()]);
             }
             "terminal.show" => {
-                let pane = owned(a, "pane").or_else(|| self.model.focused_pane());
-                let target = arg(a, "terminal").filter(|t| self.live.contains_key(*t)).map(str::to_owned);
+                let pane = a.pane.clone().or_else(|| self.model.focused_pane());
+                let target = a.terminal.as_deref().filter(|t| self.live.contains_key(*t)).map(str::to_owned);
                 if let Some(p) = pane {
                     match target {
                         // One with a pane of its own is shown there.
@@ -552,7 +555,7 @@ impl State {
             }
             // ---- agents
             "agent.focus" => {
-                let t = arg(a, "terminal").unwrap_or_default().to_owned();
+                let t = a.terminal.as_deref().unwrap_or_default().to_owned();
                 if !self.live.contains_key(&t) {
                     return reply.fail(format!("no running terminal {t:?}"));
                 }
@@ -561,7 +564,7 @@ impl State {
             "agent.next" | "agent.prev" => {
                 let order = self.agent_order();
                 if order.is_empty() {
-                    return;
+                    return reply.value(json!({"ok": true}));
                 }
                 let current = self.shown_agent().map(|a| self.root_agent(&a));
                 let n = order.len();
@@ -576,24 +579,25 @@ impl State {
             }
             // ---- layout
             "layout.resize" => {
-                let id = arg(a, "id").unwrap_or_default();
+                let id = a.id.as_deref().unwrap_or_default();
                 let Some(n) = self.model.spaces.iter_mut().flat_map(|p| p.tabs.iter_mut()).find_map(|c| c.root.find_mut(id)) else {
                     return reply.fail(format!("no node {id:?}"));
                 };
-                if let Some(px) = a["px"].as_f64() {
-                    n.size = Some(Size::Px { px: px as f32 });
-                } else if let Some(w) = a["weight"].as_f64() {
-                    n.size = Some(Size::Weight { weight: w as f32 });
+                if let Some(px) = a.px {
+                    n.size = Some(Size::Px { px });
+                } else if let Some(w) = a.weight {
+                    n.size = Some(Size::Weight { weight: w });
                 }
             }
             other => reply.fail(format!("command {other:?} is listed but not handled")),
         }
+        reply.value(json!({"ok": true}));
     }
 
     fn label_now(&self, terminal: &str, labels: Value) {
         let Ok(core) = self.client() else { return };
         let params = json!({ "terminal": terminal, "labels": labels });
-        tokio::spawn(async move {
+        self.tasks.spawn(async move {
             if let Err(e) = core.call("terminal.label", params).await {
                 tracing::warn!("label: {e}");
             }
@@ -646,7 +650,7 @@ impl State {
     /// A space with its first tab and terminal, shown once it runs. Its
     /// terminals start where the focused one is (on that machine), else in
     /// the machine's home.
-    fn new_space(&mut self, r: NewSpace, reply: Reply) {
+    fn new_space(&mut self, r: NewSpace, mut reply: Reply) {
         let on = r.machine.clone();
         let follow = r.folder.is_none();
         let here = self
@@ -671,7 +675,7 @@ impl State {
     }
 
     /// A tab in a space (default: the shown one), shown once it runs.
-    fn new_tab(&mut self, space: Option<String>, name: String, folder: Option<String>, argv: Option<Vec<String>>, reply: Reply) {
+    fn new_tab(&mut self, space: Option<String>, name: String, folder: Option<String>, argv: Option<Vec<String>>, mut reply: Reply) {
         let Some(space) = space.or_else(|| self.model.active_space().map(|p| p.id.clone())) else {
             return reply.fail("no space yet: make one first (space.new)");
         };
@@ -710,7 +714,7 @@ impl State {
 
     /// A new terminal beside a pane (default: the focused one), on the
     /// pane's machine, in its folder.
-    fn split(&mut self, pane: Option<String>, axis: Axis, argv: Option<Vec<String>>, folder: Option<String>, reply: Reply) {
+    fn split(&mut self, pane: Option<String>, axis: Axis, argv: Option<Vec<String>>, folder: Option<String>, mut reply: Reply) {
         let Some(target) = pane.or_else(|| self.model.focused_pane()) else { return reply.fail("no pane to split") };
         let (Some(p), Some(c)) = (self.model.space_of(&target), self.model.tab_of(&target)) else {
             return reply.fail(format!("no pane {target:?}"));
@@ -796,13 +800,49 @@ mod tests {
     #[test]
     fn unknown_arguments_are_rejected_for_every_command() {
         for c in COMMANDS {
-            let error = validate_args(c, &json!({ "typo": "target" })).unwrap_err();
+            let error = parse_args(c, &json!({ "typo": "target" })).unwrap_err();
             assert!(error.contains(c.name) && error.contains("unknown argument(s): typo"), "{error}");
-            assert!(validate_args(c, &Value::Null).is_ok());
-            assert!(validate_args(c, &json!(["target"])).is_err());
-            let args: serde_json::Map<String, Value> = c.args.iter().map(|a| (a.name.into(), json!("target"))).collect();
-            assert!(validate_args(c, &Value::Object(args)).is_ok());
+            assert!(parse_args(c, &Value::Null).is_ok());
+            assert!(parse_args(c, &json!(["target"])).is_err());
+            let args: serde_json::Map<String, Value> = c.args.iter().map(|a| {
+                let v = match a.name {
+                    "argv" => json!(["sh"]), "index" => json!(1),
+                    "confirmed" | "pinned" => json!(true), "px" | "weight" => json!(1.0),
+                    "props" => json!({}), _ => json!("target"),
+                };
+                (a.name.into(), v)
+            }).collect();
+            assert!(parse_args(c, &Value::Object(args)).is_ok());
         }
+    }
+
+    #[test]
+    fn invalid_argument_types_are_errors_not_defaults() {
+        for (name, args) in [
+            ("space.new", json!({"argv":42})),
+            ("space.new", json!({"argv":["sh",42]})),
+            ("space.new", json!({"folder":false})),
+            ("space.rename", json!({"name":12})),
+            ("space.close", json!({"confirmed":"true"})),
+            ("space.select", json!({"index":-1})),
+            ("layout.resize", json!({"px":"wide"})),
+        ] {
+            assert!(parse_args(find(name).unwrap(), &args).is_err(), "{name}: {args}");
+        }
+    }
+
+    #[tokio::test]
+    async fn discarded_completion_is_cancelled_and_explicit_success_is_preserved() {
+        let (tx, rx) = oneshot::channel();
+        let mut reply = Reply::new(tx);
+        let callback = move || reply.value(json!({"space":"created"}));
+        drop(callback);
+        assert!(rx.await.unwrap().unwrap_err().contains("cancelled"));
+        let (tx, rx) = oneshot::channel();
+        let mut reply = Reply::new(tx);
+        reply.value(json!({"ok":true}));
+        drop(reply);
+        assert_eq!(rx.await.unwrap().unwrap(), json!({"ok":true}));
     }
 
     #[test]

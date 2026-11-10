@@ -13,6 +13,7 @@ mod docs;
 mod exec;
 mod geometry;
 mod state;
+mod tasks;
 pub mod tools;
 mod view;
 mod viewer;
@@ -53,6 +54,7 @@ pub struct Options {
 /// A running engine. Cheap to clone; it stops when every clone is gone.
 #[derive(Clone)]
 pub struct Engine {
+    session: Arc<tasks::Session>,
     jobs: mpsc::UnboundedSender<Job>,
     view: watch::Receiver<Arc<View>>,
     notes: broadcast::Sender<Note>,
@@ -66,19 +68,20 @@ pub struct Engine {
 impl Engine {
     /// Starts on the current tokio runtime.
     pub fn start(connect: Connector, options: Options) -> Engine {
+        let (session, tasks) = tasks::Session::new();
         let (jobs, mut queue) = mpsc::unbounded_channel::<Job>();
         let (view_tx, view) = watch::channel(Arc::new(View::default()));
         let (notes, _) = broadcast::channel(64);
         let (clients_tx, clients) = watch::channel(None);
         let redial = Arc::new(Notify::new());
         let out = Outlets { view: view_tx, notes: notes.clone(), clients: clients_tx };
-        let mut state = State::new(jobs.clone(), out, options.store);
+        let mut state = State::new(jobs.clone(), out, options.store, tasks.clone());
         state.display = options.display;
         let here = Arc::new(Mutex::new(Here { size: options.size, ..Here::default() }));
         state.here = here.clone();
 
         let weak = jobs.downgrade();
-        tokio::spawn(async move {
+        tasks.spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_millis(500));
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
@@ -96,8 +99,13 @@ impl Engine {
                 state.settle();
             }
         });
-        tokio::spawn(line(weak, connect, redial.clone()));
-        Engine { jobs, view, notes, clients, redial, here, shown: Arc::new(watch::Sender::new(true)) }
+        tasks.spawn(line(weak, connect, redial.clone()));
+        Engine { session, jobs, view, notes, clients, redial, here, shown: Arc::new(watch::Sender::new(true)) }
+    }
+
+    /// Stops this session, including work retained by other handles.
+    pub fn close(&self) {
+        self.session.close();
     }
 
     /// Runs a command (see [`COMMANDS`]): what it made, or why not, once
@@ -120,10 +128,13 @@ impl Engine {
 
     /// Runs a command nobody waits for: a failure becomes a note.
     pub fn send(&self, name: &str, args: Value) {
-        let (engine, name) = (self.clone(), name.to_owned());
-        tokio::spawn(async move {
-            if let Err(error) = engine.run(&name, args).await {
-                let _ = engine.notes.send(Note::error(format!("{name} failed"), error));
+        let (name, notes) = (name.to_owned(), self.notes.clone());
+        let (tx, rx) = oneshot::channel();
+        let command = name.clone();
+        self.job(move |s| s.run(&command, args, Reply::new(tx)));
+        self.session.tasks().spawn(async move {
+            if let Ok(Err(error)) = rx.await {
+                let _ = notes.send(Note::error(format!("{name} failed"), error));
             }
         });
     }
@@ -222,7 +233,7 @@ impl Engine {
 
     /// A viewer for a terminal, on this engine's line.
     pub fn viewer(&self, address: &str, mode: Mode, palette: herdc_term::Palette) -> Viewer {
-        Viewer::open(Seat { clients: self.clients(), view: self.view.clone(), here: self.here.clone(), shown: self.shown.subscribe() }, address, mode, palette, Value::Null)
+        Viewer::open(Seat { tasks: self.session.tasks(), clients: self.clients(), view: self.view.clone(), here: self.here.clone(), shown: self.shown.subscribe() }, address, mode, palette, Value::Null)
     }
 
     fn job(&self, job: impl FnOnce(&mut State) + Send + 'static) {
@@ -308,5 +319,47 @@ async fn line(jobs: mpsc::WeakUnboundedSender<Job>, connect: Connector, redial: 
             return;
         }
         tokio::time::sleep(backoff).await;
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+
+    async fn stopped(mut view: watch::Receiver<Arc<View>>) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while view.changed().await.is_ok() {}
+        }).await.expect("session must release the publisher");
+    }
+
+    #[tokio::test]
+    async fn last_handle_stops_even_a_pending_connection() {
+        let marker = Arc::new(());
+        let weak = Arc::downgrade(&marker);
+        let connector: Connector = Arc::new(move || {
+            let _ = &marker;
+            Box::pin(std::future::pending())
+        });
+        let engine = Engine::start(connector, Options::default());
+        let view = engine.watch();
+        let clone = engine.clone();
+        drop(engine);
+        assert!(view.has_changed().is_ok());
+        drop(clone);
+        stopped(view).await;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while weak.upgrade().is_some() { tokio::task::yield_now().await; }
+        }).await.expect("pending connector must be dropped");
+    }
+
+    #[tokio::test]
+    async fn explicit_close_stops_retained_handles_and_rejects_commands() {
+        let engine = Engine::start(Arc::new(|| Box::pin(std::future::pending())), Options::default());
+        let other = engine.clone();
+        let view = engine.watch();
+        engine.close();
+        stopped(view).await;
+        let result = tokio::time::timeout(Duration::from_secs(2), other.run("space.new", serde_json::json!({}))).await.unwrap();
+        assert!(result.is_err());
     }
 }

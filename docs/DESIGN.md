@@ -43,7 +43,7 @@ core 能力和内置 mods 的功能全部复刻，界面按手机重新设计；
 
 | 桌面 | 手机 |
 |---|---|
-| spaces mod（侧栏、按机器分组、拖动排序） | 抽屉：按机器分组的 space 列表，状态点，长按重命名/关闭/移动 |
+| spaces mod（侧栏、按机器分组、拖动排序） | 首页：按机器分组的 space 列表，状态点，长按重命名/关闭/移动 |
 | tabs mod / terminals-bar | 顶部 tab 条，状态汇总，settle / unsettle |
 | 分屏树（row/column/stack） | 平板：真实分屏；手机：一次一个 pane + pane 切换条，缩放即全屏 |
 | agents mod（working/blocked/done/idle，子 agent） | Agents 页：跨 space 列表，排序同桌面，不止一组时按 置顶 / 等你处理 / 完成 / 工作中 / 空闲 加小标题；点进 peek。blocked 的 agent 直接显示它问的最后几行和菜单选项（Codex / Claude Code 的编号菜单），点选项即发对应按键；“回复…”先按 Esc 离开菜单再发文字（菜单上直接回车会选中高亮的“是”）。工作区里，别处的 agent 等你时弹出同样的问题卡片，一直留到它不再等（正看着它时不显示），可点 ✕ 先放下 |
@@ -51,7 +51,7 @@ core 能力和内置 mods 的功能全部复刻，界面按手机重新设计；
 | toast / 声音提醒 | 应用内 toast（blocked / done）。系统通知要等 NSH 发布通知 API（0.4.0 没有），后台常驻需要前台服务（打包的 APK 不能加 Java） |
 | palette（命令面板） | 命令面板：同一套命令名和参数 |
 | new-menu | 新建终端：本机探测到的 agent 程序、新 space、新建/打开 worktree |
-| machine-add | 抽屉底部「Add a machine…」：电脑 `~/.ssh/config` 里的 host（含 Include）或手填，经 `machine.add` 添加；需要回答时提示在终端里跑的命令 |
+| machine-add | 首页菜单「Add a machine…」：电脑 `~/.ssh/config` 里的 host（含 Include）或手填，经 `machine.add` 添加；需要回答时提示在终端里跑的命令 |
 | files / changes / worktree | 对应页面，经 `machine.exec`（mods 原样的命令行）实现，远程目录每 10 s 刷新；打开的文件用 nsh-base 的只读 `Editor` 显示，按文件名高亮 |
 | help（快捷键表） | 手机没有快捷键，不复刻；命令页列出全部命令 |
 | settings | 手机端设置：字号（终端上也可双指缩放）、打字时适配、语言（跟随系统 / English / 中文）、本机密钥 |
@@ -79,9 +79,9 @@ core 能力和内置 mods 的功能全部复刻，界面按手机重新设计；
 - **tab 名字**：没起名的 tab 显示它里面 agent 的标题，不再只是一个数字；起了名的照旧。
 - **密钥存放**：保存的密码和手机的 ed25519 私钥用 Android Keystore 里的 AES-GCM 密钥加密后再放进 NSH 的 Storage（`app/src/vault.rs`，JNI 调 `javax.crypto`）。Keystore 的密钥不出手机，所以备份或拷走的数据打不开；打不开时再要一次密码。NSH 生成的 manifest 带 `allowBackup`，改不了，所以靠加密而不是关备份。
   Android 12 以前拿不到 JVM，改用 app 自己的 AES-256-GCM 密钥（`ring`），放在 `no_backup` 目录、权限 0600，备份和换机迁移都不带它（前缀 `aside1:`）。
-- **打包**：`app/apk.sh`（`--install` 顺带装到手机）：只打 arm64-v8a，fat LTO，用 `~/.config/herdc/release.jks` 正式签名（密码在 macOS 钥匙串 `herdc-release-keystore`）；没有时用 debug 签名。名字 Yonder（包名 `dev.yonder.app`；以前叫 Herdr / `dev.herdc.app`，换包名不能覆盖升级）。图标是自己的（`app/icon.svg`：一条小路通进远处的终端窗口，窗口是张眨眼微笑的脸，`icon.png` 由它渲染）。仓库和 crate 仍叫 herdc，用户看不到。
-  build 号 = 提交数（`git rev-list --count HEAD`），和提交号一起编进 app，设置 → 关于里显示；更新记录在 `CHANGELOG.md`。
-  nsh-base 关掉默认的 `highlight`（syntect 和语法包），app 不做代码着色；LTO 本来就裁掉了它，APK 没变小，只是少编译一些。libnsh.so 里 24 MB 是 `.text`。
+- **打包**：`app/apk.sh`（`--install` 顺带装到手机）：只打 arm64-v8a，fat LTO，用 `~/.config/herdc/release.jks` 正式签名（密码在 macOS 钥匙串 `herdc-release-keystore`）；签名不可用时停止，只有显式 `--debug` 才使用调试签名。名字 Yonder（包名 `dev.yonder.app`；以前叫 Herdr / `dev.herdc.app`，换包名不能覆盖升级）。图标是自己的（`app/icon.svg`：一条小路通进远处的终端窗口，窗口是张眨眼微笑的脸，`icon.png` 由它渲染）。仓库和 crate 仍叫 herdc，用户看不到。
+  build 号由 `app/build-number` 或 `HERDC_BUILD` 指定，和提交号一起编进 app，设置 → 关于里显示；更新记录在 `CHANGELOG.md`。
+  nsh-base 保留默认的 `highlight` 功能，文件查看器按文件名提供语法高亮。
 - **诊断信息**：设置 → 关于 → 复制诊断信息：版本、系统、偏好、密钥怎么存的、电脑地址和用户、线路和各机器的状态、数量。不含密码和密钥。
 - **CI**：`.github/workflows/check.yml` 在 Ubuntu 上装指定版本的 herdr-core（`HC_VERSION`），跑 `scripts/check.sh`。
 - **大量输出限速**：viewer 以 512 KiB/s 归还 credit（`Attach::pace`）。输出超过这个速度持续 1 s，就算“落后”，断开重新 attach，从当前屏幕开始，不再一个字节一个字节追 core 那边最多 4 MiB 的积压。省流量、省电，刷屏结束后 0.5 s 内看到最后的输出。
@@ -93,11 +93,30 @@ core 能力和内置 mods 的功能全部复刻，界面按手机重新设计；
 - **先画上次的样子**：每台电脑连上并读完布局后，把它的 View 存起来（`seen.<id>`，有变化时最多 10 s 后存一次，进后台、断开时也存；超过 256 KiB 就不存 terminals）。
   再打开时先画这份，线路状态用实时的，读完新的就换成新的。电脑列表在每台电脑下列出它上次的 spaces，圆点是当时最需要关注的状态；点一个 space，连上后直接到那里；直接打开时回到上次看的 space（engine 不存 `view.json`，靠这份）。
 - **多个 session**：添加电脑时可以填 `HC_SESSION`（只允许字母、数字和 `._-/`，因为要拼进远端 shell），同一台电脑的不同 session 是不同的条目（`id` 末尾加 `/session`）。
-- **抽屉列表**：本机用电脑自己的名字，保留机器名大小写，本机在前、远程机器按名字排序。机器标题的小箭头可折叠整组空间，按电脑和机器存在 prefs，重启后保留；当前空间所在机器也允许折叠，选中空间不会自动展开。空间不显示标签页数量，只有非 main/master、不同于空间名及仓库目录名的分支才显示第二行，没内容就只画一行。
+- **首页空间列表**：本机用电脑自己的名字，保留机器名大小写，本机在前、远程机器按名字排序。机器标题的小箭头可折叠整组空间，按电脑和机器存在 prefs，重启后保留；当前空间所在机器也允许折叠，选中空间不会自动展开。空间不显示标签页数量，只有非 main/master、不同于空间名及仓库目录名的分支才显示第二行，没内容就只画一行。
 - **Agents 列表**：子 agent 已在别人的后代树中时不再占顶层行，置顶例外；已保留的后代优先取 AgentView 的状态，done 仍归 idle。主文字按桌面 Priority 视图显示空间加有意义的标签页或 agent 标题，数字自动名仅在重名时补上；空标题回退程序/app 名，远程行追加机器名。状态旁显示变化距今的 <1m / Nm / Nh / Nd，每 30 s 刷新。时间用 core 记录的 `status_ms`（电脑上状态变化的那一刻，不是手机连上的时刻），没有时才用引擎自己看到变化的时间；旧缓存缺失时默认为 0（暂不显示时间）。
-- **抽屉排序**：每个 space 右边的 ≡ 可以上下拖，按行高算移动几格，松手执行 `space.move`（只在同一台机器的 spaces 里移动）。
+- **空间排序**：每个 space 右边的 ≡ 可以上下拖，按行高算移动几格，松手执行 `space.move`（只在同一台机器的 spaces 里移动）。
 - **按键栏可编辑**：设置 → 按键栏：栏上的键可以前移、后移、移除，下面是可以加上的键（`\` `` ` `` `:` 等符号、Del、Ins、F1–F12）。存在 prefs 里，⌄ 始终在最后。
 - **焦点不共享**：手机上的焦点、放大、当前 tab 只记在本机引擎里，不发给 core，不会让桌面跟着跳。
+
+## 会话与持久化边界
+
+- `Engine` 的最后一个持有者释放，或显式调用 `close()`，会取消会话内的连接、后台请求和终端流。内部任务不持有会话所有权；关闭时清空发布给界面的客户端引用。
+- 命令入口把 JSON 解析成有类型的参数，错误类型不得被当作缺省值。每条同步命令显式完成；异步回调被取消或因重连过期时返回错误，不会自动宣告成功。
+- `docs::Slot` 独占布局同步状态及其转换规则，外层通过 `prepare`、`apply`、`connection` 等操作驱动同步。`state/documents.rs` 负责协调，`state/projection.rs` 负责构造视图。
+- 缓存状态词通过有限枚举校验，不使用全局字符串驻留或永久分配。未知词使缓存解析失败，由实时状态重建界面。
+- Android 上两种加密方式都失败时停止保存并报告错误。电脑列表先完整序列化，再替换存储；手机密钥对保存在同一个记录中，旧记录在新记录保存成功后移除。桌面无头测试保留显式的明文后端。
+
+## 恢复后的版本与打包
+
+原 Git 历史无法恢复，当前仓库从恢复源码建立新的基线。`recovery/` 中的恢复证据和归档保留在本地，不进入 Git。
+
+`app/build-number` 从 50 开始，后续每次分发递增，也可通过 `HERDC_BUILD` 显式指定。版本号不依赖提交数量。
+
+- `sh app/apk.sh --check`：仅检查版本参数。
+- `sh app/apk.sh`：正式签名构建；缺少密钥或钥匙串解锁失败会停止。
+- `sh app/apk.sh --debug`：明确选择调试签名。
+- 追加 `--install` 才会安装到设备。正式密钥默认位于 `~/.config/herdc/release.jks`，可通过 `HERDC_KEYSTORE` 指定路径。
 
 ## 测试
 

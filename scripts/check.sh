@@ -5,8 +5,9 @@
 set -e
 cd "$(dirname "$0")/.."
 . ./env.sh
+python3 scripts/test-apk.py
 times=1
-[ "$1" = --times ] && times=$2
+[ "${1:-}" = --times ] && times=$2
 cargo clippy -q --all-targets -- -D warnings
 (cd app && cargo clippy -q --all-targets -- -D warnings)
 i=0

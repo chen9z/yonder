@@ -380,3 +380,31 @@ async fn out_of_sight_a_viewer_takes_nothing_and_back_shows_the_screen() {
     shows(&viewer, "what was said, back", |v| v.snapshot().text().contains("said while away")).await;
     client.call("terminal.kill", json!({"terminal": address})).await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn close_releases_published_client_even_with_retained_handles() {
+    let session = Arc::new(Session::new());
+    let engine = screen(&session);
+    ready(&engine).await;
+    let mut clients = engine.clients();
+    assert!(clients.borrow().is_some());
+    let other = engine.clone();
+    engine.close();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while clients.borrow_and_update().is_some() {
+            if clients.changed().await.is_err() { break; }
+        }
+    }).await.expect("closed session must clear its published client");
+    assert!(other.client().is_none());
+    assert!(other.run("space.new", json!({})).await.is_err());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn malformed_launch_arguments_do_not_create_a_default_terminal() {
+    let session = Arc::new(Session::new());
+    let engine = screen(&session);
+    ready(&engine).await;
+    assert!(engine.run("space.new", json!({"argv":42})).await.is_err());
+    assert!(engine.view().spaces.is_empty());
+    assert!(engine.view().terminals.is_empty());
+}

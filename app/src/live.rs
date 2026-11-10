@@ -86,8 +86,20 @@ pub fn open(computer: Computer, first: Option<Session>) {
     // The pane's grid, near enough: the window below the header and tabs.
     let (w, h) = untracked(|| (window().width.0, window().height.0 - safe_area().top.0 - safe_area().bottom.0 - 88.0));
     let password: link::Password = Arc::new(std::sync::Mutex::new(computer.password.clone()));
-    let engine = link::open(&computer, first, link::display(&palette, (cell.width, cell.height)), cell.fit((w, h)), password.clone());
-    link::remember(&computer);
+    let engine = match link::open(&computer, first, link::display(&palette, (cell.width, cell.height)), cell.fit((w, h)), password.clone()) {
+        Ok(engine) => engine,
+        Err(error) => { link::storage_error(error); return; }
+    };
+    if let Err(error) = link::remember(&computer) {
+        engine.close();
+        link::storage_error(error);
+        return;
+    }
+    if let Some(previous) = live() {
+        previous.keep();
+        previous.engine.close();
+        previous.owner.dispose();
+    }
     link::set_open(Some(&computer.id()));
     let id = computer.id();
     // Drawn until the computer is known: what it showed last.
@@ -103,7 +115,6 @@ pub fn open(computer: Computer, first: Option<Session>) {
         Some(old) => Arc::new(View { link: fresh.link.clone(), ..old.clone() }),
         None => fresh,
     };
-    link::set_open(Some(&computer.id()));
     // The connection's own root, detached: its tasks outlive the page that
     // opened it (often gone by now: what is made under a disposed owner is
     // disposed at once).
@@ -165,21 +176,6 @@ pub fn open(computer: Computer, first: Option<Session>) {
                 }
             }
         });
-        // The network back, the computer is dialed at once (the engine
-        // would wait up to 10 s).
-        let (lost, again, computer) = (live.view, engine.clone(), live.computer.clone());
-        spawn(async move {
-            loop {
-                off(tokio::time::sleep(std::time::Duration::from_secs(1))).await;
-                let network = lost.with_untracked(|v| matches!(&v.link, herdc_engine::Link::Lost { error } if link::Lost::of(error).network()));
-                let computer = computer.clone();
-                if network && off(async move { link::reachable(&computer).await }).await == Some(true) {
-                    again.redial();
-                    // Give the dial its time.
-                    off(tokio::time::sleep(std::time::Duration::from_secs(10))).await;
-                }
-            }
-        });
         let mut said = engine.notes();
         let shown = live.clone();
         spawn(async move {
@@ -204,6 +200,7 @@ pub fn close() {
     link::set_open(None);
     if let Some(live) = live() {
         live.keep();
+        live.engine.close();
         current().set(Current(None));
         live.owner.dispose();
     }
@@ -241,8 +238,11 @@ impl Live {
             masked: true,
         };
         let Some(words) = self.words(prompt).await.filter(|w| !w.is_empty()) else { return };
-        *self.password.lock().unwrap() = Some(words.clone());
-        link::update(&Computer { password: Some(words), ..self.computer.clone() });
+        if let Err(error) = link::update(&Computer { password: Some(words.clone()), ..self.computer.clone() }) {
+            self.say(Note::error("Cannot save credentials", error));
+            return;
+        }
+        *self.password.lock().unwrap() = Some(words);
         self.engine.redial();
     }
 

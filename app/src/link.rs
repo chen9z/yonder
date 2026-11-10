@@ -13,6 +13,7 @@ use std::sync::{Arc, OnceLock};
 
 const COMPUTERS: &str = "computers";
 const OPEN: &str = "open";
+const IDENTITY: &str = "phone.identity";
 const PHONE_KEY: &str = "phone.key";
 const PHONE_PUB: &str = "phone.pub";
 /// What a computer showed last: `seen.<id>`.
@@ -23,7 +24,7 @@ const SEEN_MOST: usize = 256 * 1024;
 
 /// How the phone's key is kept, said for a diagnosis.
 pub fn key_kept() -> &'static str {
-    Storage::get_item(PHONE_KEY).map_or("none yet", |kept| vault::how(&kept))
+    stored_key().map_or("none yet", |(kept, _)| vault::how(&kept))
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -47,7 +48,7 @@ pub struct Computer {
 }
 
 fn sealed<S: serde::Serializer>(words: &Option<String>, to: S) -> Result<S::Ok, S::Error> {
-    words.as_deref().map(vault::seal).serialize(to)
+    words.as_deref().map(vault::seal).transpose().map_err(serde::ser::Error::custom)?.serialize(to)
 }
 
 /// What can't be opened here (sealed on another phone) is gone: the
@@ -85,11 +86,11 @@ pub fn computers() -> Vec<Computer> {
 }
 
 /// Keeps `computer` first (the one opened last), replacing its old entry.
-pub fn remember(computer: &Computer) {
+pub fn remember(computer: &Computer) -> Result<(), String> {
     let mut all = computers();
     all.retain(|c| c.id() != computer.id());
     all.insert(0, computer.clone());
-    keep(&all);
+    keep(&all)
 }
 
 /// The computer the app was on when it stopped, to open again (none once
@@ -109,7 +110,10 @@ pub fn set_open(id: Option<&str>) {
 pub fn forget(id: &str) {
     let mut all = computers();
     all.retain(|c| c.id() != id);
-    keep(&all);
+    if let Err(error) = keep(&all) {
+        storage_error(error);
+        return;
+    }
     Storage::remove_item(&format!("{SEEN}{id}"));
 }
 
@@ -143,40 +147,37 @@ pub fn keep_seen(id: &str, view: &View, started: Vec<String>) {
     }
 }
 
-fn keep(all: &[Computer]) {
-    if let Err(full) = Storage::set_item(COMPUTERS, serde_json::to_string(all).unwrap_or_default()) {
-        log::warn!("{full}");
-    }
+fn keep(all: &[Computer]) -> Result<(), String> {
+    // Serialize completely before replacing the saved list. Encryption errors
+    // must neither erase the list nor write a plaintext fallback.
+    let json = serde_json::to_string(all).map_err(|e| e.to_string())?;
+    Storage::set_item(COMPUTERS, json).map_err(|e| e.to_string())
+}
+
+fn stored_key() -> Option<(String, String)> {
+    Storage::get_item(IDENTITY).and_then(|s| serde_json::from_str(&s).ok())
+        .or_else(|| Storage::get_item(PHONE_KEY).zip(Storage::get_item(PHONE_PUB)))
 }
 
 /// This phone's own SSH key: (private OpenSSH, public line), made once and
 /// kept sealed. One that can't be opened here (the app's data came from
 /// another phone, or from before it was installed again) is replaced: the
 /// computers then ask for the password once more.
-pub fn phone_key() -> (String, String) {
+pub fn phone_key() -> Result<(String, String), String> {
     static KEY: std::sync::Mutex<Option<(String, String)>> = std::sync::Mutex::new(None);
     let mut known = KEY.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(key) = known.as_ref() {
-        return key.clone();
-    }
-    let kept = Storage::get_item(PHONE_KEY).zip(Storage::get_item(PHONE_PUB));
-    let key = match kept.and_then(|(kept, public)| Some((vault::open(&kept)?, public, vault::sealed(&kept)))) {
-        Some((private, public, sealed)) => {
-            // Kept before keys were sealed: sealed now.
-            if !sealed {
-                let _ = Storage::set_item(PHONE_KEY, vault::seal(&private));
-            }
-            (private, public)
-        }
-        None => {
-            let (private, public) = herdc_ssh::generate_key("herdc").expect("an ed25519 key");
-            let _ = Storage::set_item(PHONE_KEY, vault::seal(&private));
-            let _ = Storage::set_item(PHONE_PUB, public.clone());
-            (private, public)
-        }
+    if let Some(key) = known.as_ref() { return Ok(key.clone()); }
+    let key = match stored_key().and_then(|(private, public)| Some((vault::open(&private)?, public))) {
+        Some(key) => key,
+        None => herdc_ssh::generate_key("herdc").map_err(|e| e.to_string())?,
     };
+    let sealed = vault::seal(&key.0)?;
+    let json = serde_json::to_string(&(sealed, &key.1)).map_err(|e| e.to_string())?;
+    Storage::set_item(IDENTITY, json).map_err(|e| e.to_string())?;
+    Storage::remove_item(PHONE_KEY);
+    Storage::remove_item(PHONE_PUB);
     *known = Some(key.clone());
-    key
+    Ok(key)
 }
 
 /// Where the engine, viewers and SSH live: a runtime of their own, there
@@ -249,10 +250,10 @@ pub fn display(palette: &herdc_term::Palette, cell: (f32, f32)) -> Value {
 
 /// Starts the engine for `computer` on the app's runtime.
 /// `size`: the grid new terminals start at until a pane says its own.
-pub fn open(computer: &Computer, first: Option<Session>, display: Value, size: (u16, u16), password: Password) -> Engine {
+pub fn open(computer: &Computer, first: Option<Session>, display: Value, size: (u16, u16), password: Password) -> Result<Engine, String> {
     let _entered = runtime().enter();
-    let (key, _) = phone_key();
-    Engine::start(connector(computer.clone(), key, first, password), Options { store: None, size: Some(size), display })
+    let (key, _) = phone_key()?;
+    Ok(Engine::start(connector(computer.clone(), key, first, password), Options { store: None, size: Some(size), display }))
 }
 
 #[cfg(test)]
@@ -271,9 +272,9 @@ mod tests {
 }
 
 /// Keeps `computer` as it is now, where it is in the list.
-pub fn update(computer: &Computer) {
+pub fn update(computer: &Computer) -> Result<(), String> {
     let all: Vec<Computer> = computers().into_iter().map(|c| if c.id() == computer.id() { computer.clone() } else { c }).collect();
-    keep(&all);
+    keep(&all)
 }
 
 
@@ -349,3 +350,10 @@ impl Lost {
     }
 }
 
+
+/// Surface persistence failures instead of silently losing credentials.
+pub fn storage_error(error: String) {
+    nsh_core::prelude::spawn(async move {
+        crate::ui::confirm("Cannot save credentials", &error, "OK").await;
+    });
+}

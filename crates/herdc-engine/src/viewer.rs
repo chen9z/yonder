@@ -51,6 +51,7 @@ enum Keys {
 
 /// What a viewer needs from its engine.
 pub(crate) struct Seat {
+    pub tasks: crate::tasks::Tasks,
     pub clients: watch::Receiver<Option<Client>>,
     pub view: watch::Receiver<Arc<View>>,
     pub here: Arc<Mutex<Here>>,
@@ -138,7 +139,7 @@ impl Viewer {
         });
         let (gone, kept) = oneshot::channel();
         let pumping = pump(shared.clone(), seat.clients, seat.view, seat.shown, display);
-        tokio::spawn(async move {
+        seat.tasks.spawn(async move {
             tokio::select! {
                 _ = pumping => {}
                 _ = kept => {}
@@ -303,7 +304,6 @@ async fn pump(shared: Arc<Shared>, mut clients: watch::Receiver<Option<Client>>,
             }
             Mode::Type { cols, rows } => Attach::new(&shared.address, cols, rows),
         };
-        eprintln!("DEBUG attach {} mode {:?} observe {} {}x{}", shared.address, m, request.observe, request.cols, request.rows);
         request.history = HISTORY;
         request.pace = Some(PACE);
         request.resumed = resumed;
