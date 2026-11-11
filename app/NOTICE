@@ -1,7 +1,7 @@
 herdc-app
 Copyright 2026 chen
 
-icon.png is rendered from icon.svg, Yonder's own icon.
+icon.png is Yonder's launcher artwork.
 
 assets/icons/ and assets/chrome/ are adapted from herdr-app (Apache-2.0):
 - Brand icons: Simple Icons (https://simpleicons.org), CC0 1.0. Brands are

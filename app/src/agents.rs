@@ -346,6 +346,8 @@ fn agent_row(live: Live, l: ReadSignal<Line>, now: Signal<u64>, inline: bool, fo
         Line::Agent { agent, name, more, machine, subs, open, compact } => Some((agent.address, agent.status, agent.focused, agent.pinned, name, more, machine, subs, open, compact)),
         _ => None,
     });
+    let prefs = use_context::<crate::prefs::Prefs>().unwrap();
+    let computer = live.computer.id();
     let (press, hold) = (live.clone(), live);
     view()
         .mx(px(8.0))
@@ -400,7 +402,7 @@ fn agent_row(live: Live, l: ReadSignal<Line>, now: Signal<u64>, inline: bool, fo
                         )
                         .child(text(move || row.with(|r| r.as_ref().and_then(|r| r.5.as_ref()).map(|m| format!("· {m}")).unwrap_or_default())).flex_1().text_size(px(15.0)).text_color(theme::DIM).number_of_lines(1)),
                 )
-                .child(text(move || row.with(|r| r.as_ref().and_then(|r| r.6.clone()).unwrap_or_default())).text_size(px(11.0)).text_color(theme::DIM))
+                .child(text(move || row.with(|r| r.as_ref().and_then(|r| r.6.as_ref()).map(|m| prefs.machine_name(&computer, m)).unwrap_or_default())).text_size(px(11.0)).text_color(theme::DIM))
                 .child(when(move || row.with(|r| r.as_ref().is_some_and(|r| r.7 > 0)), move || {
                     // The sub-agents' fold; folded, how many.
                     view()

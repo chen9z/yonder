@@ -92,7 +92,7 @@ fn spaces(live: Live) -> impl IntoElement {
                         remote: m.name.is_some(),
                         key: serde_json::to_string(&(&computer, &m.name)).unwrap(),
                         machine: m.name.clone().unwrap_or_default(),
-                        name: m.name.clone().unwrap_or_else(|| m.host.clone().unwrap_or_else(|| here.clone())),
+                        name: m.name.as_deref().map_or_else(|| here.clone(), |m| prefs.machine_name(&computer, m)),
                         state: m.state.clone(),
                         loading: m.layout == "loading" || m.state == "connecting",
                         spaces: v.spaces.iter().filter(|s| s.machine == m.name).cloned().collect(),
@@ -183,6 +183,8 @@ fn spaces(live: Live) -> impl IntoElement {
 /// A machine's heading: a tap folds its spaces; `+` makes one there.
 // Adapted from herdr-app defaults/mods/spaces/main.js, Apache-2.0.
 fn machine_heading(live: Live, g: ReadSignal<Group>, folded: Signal<Vec<String>>) -> impl IntoElement {
+    let rename = live.clone();
+    let prefs = use_context::<crate::prefs::Prefs>().unwrap();
     let connected = computed(move || g.with(|g| g.state == "connected"));
     let is_folded = computed(move || folded.with(|set| g.with(|g| set.contains(&g.key))));
     view()
@@ -197,6 +199,11 @@ fn machine_heading(live: Live, g: ReadSignal<Group>, folded: Signal<Vec<String>>
         .active(|s| s.bg(theme::HOVER))
         .role(AccessibilityRole::Button)
         .label(move || g.with(|g| t!("Fold or unfold {}", g.name)))
+        .on_long_press(move || {
+            let live = rename.clone();
+            let machine = g.with_untracked(|g| g.machine.clone());
+            if !machine.is_empty() { spawn(async move { prefs.rename_machine(&live, &machine).await; }); }
+        })
         .on_press(move || folded.update(|set| {
             let key = g.with_untracked(|g| g.key.clone());
             if set.contains(&key) { set.retain(|k| k != &key); } else { set.push(key); }

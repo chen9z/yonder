@@ -58,14 +58,16 @@ class Packaging(unittest.TestCase):
     def test_build_is_independent_of_git_and_above_recovered_apk(self):
         result = self.run_apk("--check")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("Build 50", result.stdout)
+        default_build = int((ROOT / "app/build-number").read_text())
+        self.assertGreaterEqual(default_build, 50)
+        self.assertIn(f"Build {default_build} ", result.stdout)
         for build in ("49", "0", "050", "bad", "2100000001", "99999999999999999999"):
             self.env["HERDC_BUILD"] = build
             self.assertNotEqual(self.run_apk("--debug").returncode, 0, build)
         self.assertFalse(self.called.exists())
-        self.env["HERDC_BUILD"] = "51"
+        self.env["HERDC_BUILD"] = str(default_build + 1)
         self.assertEqual(self.run_apk("--debug").returncode, 0)
-        self.assertIn("51", self.called.read_text().splitlines())
+        self.assertIn(str(default_build + 1), self.called.read_text().splitlines())
 
 
 if __name__ == "__main__":

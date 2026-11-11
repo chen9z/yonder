@@ -86,7 +86,7 @@ pub fn open(computer: Computer, first: Option<Session>) {
     // The pane's grid, near enough: the window below the header and tabs.
     let (w, h) = untracked(|| (window().width.0, window().height.0 - safe_area().top.0 - safe_area().bottom.0 - 88.0));
     let password: link::Password = Arc::new(std::sync::Mutex::new(computer.password.clone()));
-    let engine = match link::open(&computer, first, link::display(&palette, (cell.width, cell.height)), cell.fit((w, h)), password.clone()) {
+    let engine = match link::open(&computer, first, link::display(&palette, (cell.width, cell.height)), cell.fit((w - 2.0 * crate::terminal::INSET_X, h - 2.0 * crate::terminal::INSET_Y)), password.clone()) {
         Ok(engine) => engine,
         Err(error) => { link::storage_error(error); return; }
     };

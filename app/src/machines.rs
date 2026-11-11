@@ -78,7 +78,8 @@ pub fn add_machine_page(live: Live) -> nsh_core::element::Screen {
             add(live.clone(), page, target, Some(typed));
         }
     };
-    let listed = computed(move || page.hosts.get().unwrap_or_default());
+    let listed = computed(move || page.hosts.get().unwrap_or_default().into_iter().filter(|h| !page.is_added(&h.alias)).collect::<Vec<_>>());
+    let prefs = use_context::<crate::prefs::Prefs>().unwrap();
     ui::page(t!("Add a machine")).child(
         scroll().flex_1().bg(theme::CANVAS).keyboard_dismiss_mode(KeyboardDismissMode::Interactive).child(
             view()
@@ -90,6 +91,24 @@ pub fn add_machine_page(live: Live) -> nsh_core::element::Screen {
                         .text_size(px(14.0))
                         .text_color(theme::MUTED),
                 )
+                .child(each(move || page.added.with(|all| all.iter().filter_map(|m| {
+                    let name = m["name"].as_str()?;
+                    Some((name.to_owned(), m["target"].as_str().unwrap_or(name).to_owned()))
+                }).collect::<Vec<_>>()), |row: &(String, String)| row.0.clone(), {
+                    let live = live.clone();
+                    move |row, _| {
+                        let (name, target): (String, String) = row.get_untracked();
+                        let id = live.computer.id();
+                        let shown = name.clone();
+                        let live = live.clone();
+                        let details = live.clone();
+                        view().child(ui::row(move || prefs.machine_name(&id, &shown), || t!("Added").into())
+                            .child(ui::ghost_button(t!("Rename"), move || {
+                                let (live, name) = (live.clone(), name.clone());
+                                spawn(async move { prefs.rename_machine(&live, &name).await; });
+                            }))).child(said(details, page, move || target.clone()))
+                    }
+                }))
                 .child(ui::heading(move || match page.hosts.with(|h| h.as_ref().map(Vec::len)) {
                     None => t!("READING ~/.SSH/CONFIG…").into(),
                     Some(0) => t!("YOUR SSH CONFIG LISTS NO HOSTS").into(),

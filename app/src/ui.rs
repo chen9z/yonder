@@ -301,6 +301,10 @@ pub struct Prompt {
 }
 
 /// The dialog of [`Prompt`]s: `answer` gets the words (None: cancelled).
+pub fn name_prompt(value: String) -> Prompt {
+    Prompt { title: t!("Rename").into(), placeholder: t!("Display name").into(), value, done: t!("OK"), masked: false }
+}
+
 pub fn prompt_dialog(asking: Signal<Option<Prompt>>, answer: impl Fn(Option<String>) + 'static) -> impl IntoElement {
     let answer = std::rc::Rc::new(answer);
     when(move || asking.with(Option::is_some), move || {

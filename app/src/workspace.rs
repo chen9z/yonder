@@ -96,9 +96,11 @@ fn header(
                 .child(
                     text({
                         // A machine's space says which, before the computer it's reached through.
+                        let id = live.computer.id();
+                        let prefs = use_context::<crate::prefs::Prefs>().unwrap();
                         let computer = live.computer.name.clone();
                         move || {
-                        let machine = world.with(|v| v.active_space().and_then(|s| s.machine.clone())).map_or(computer.clone(), |m| format!("{m} · {computer}"));
+                        let machine = world.with(|v| v.active_space().and_then(|s| s.machine.clone())).map_or(computer.clone(), |m| format!("{} · {computer}", prefs.machine_name(&id, &m)));
                         tab.with(|t| t.as_ref().map_or(machine.clone(), |t| format!("{} · {machine}", label(t))))
                     }})
                     .text_size(px(12.0))

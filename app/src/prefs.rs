@@ -26,6 +26,7 @@ pub struct Prefs {
     pub colors: Signal<std::collections::BTreeMap<String, usize>>,
     /// Agents by priority, else grouped by space.
     pub grouped: Signal<bool>,
+    aliases: Signal<std::collections::BTreeMap<String, String>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -39,23 +40,37 @@ struct Kept {
     folded: Vec<String>,
     colors: std::collections::BTreeMap<String, usize>,
     grouped: bool,
+    aliases: std::collections::BTreeMap<String, String>,
 }
 
 impl Default for Kept {
     fn default() -> Self {
-        Kept { font: 12.0, fit: true, notify: true, language: Language::System, keys: crate::keybar::at_first(), folded: Vec::new(), colors: Default::default(), grouped: false }
+        Kept { font: 12.0, fit: true, notify: true, language: Language::System, keys: crate::keybar::at_first(), folded: Vec::new(), colors: Default::default(), grouped: false, aliases: Default::default() }
     }
 }
 
 impl Prefs {
+    pub fn machine_name(self, computer: &str, machine: &str) -> String {
+        let key = format!("{computer}\0{machine}");
+        self.aliases.with(|a| a.get(&key).cloned()).unwrap_or_else(|| crate::link::host_label(machine).unwrap_or(t!("Machine")).into())
+    }
+
+    pub async fn rename_machine(self, live: &crate::live::Live, machine: &str) {
+        let id = live.computer.id();
+        let prompt = crate::ui::name_prompt(self.machine_name(&id, machine));
+        if let Some(name) = live.words(prompt).await && !name.trim().is_empty() {
+            self.aliases.update(|a| { a.insert(format!("{id}\0{machine}"), name.trim().into()); });
+        }
+    }
+
     /// Loads them, and keeps them as they change.
     pub fn provide() -> Prefs {
         let kept: Kept = Storage::get_item(PREFS).and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
         let language = i18n::chosen();
         language.set(kept.language);
-        let prefs = Prefs { font: signal(kept.font), fit: signal(kept.fit), notify: signal(kept.notify), language, keys: signal(kept.keys), folded: signal(kept.folded), colors: signal(kept.colors), grouped: signal(kept.grouped) };
+        let prefs = Prefs { font: signal(kept.font), fit: signal(kept.fit), notify: signal(kept.notify), language, keys: signal(kept.keys), folded: signal(kept.folded), colors: signal(kept.colors), grouped: signal(kept.grouped), aliases: signal(kept.aliases) };
         effect(move || {
-            let kept = Kept { font: prefs.font.get(), fit: prefs.fit.get(), notify: prefs.notify.get(), language: prefs.language.get(), keys: prefs.keys.get(), folded: prefs.folded.get(), colors: prefs.colors.get(), grouped: prefs.grouped.get() };
+            let kept = Kept { font: prefs.font.get(), fit: prefs.fit.get(), notify: prefs.notify.get(), language: prefs.language.get(), keys: prefs.keys.get(), folded: prefs.folded.get(), colors: prefs.colors.get(), grouped: prefs.grouped.get(), aliases: prefs.aliases.get() };
             let _ = Storage::set_item(PREFS, serde_json::to_string(&kept).unwrap_or_default());
         });
         provide_context(prefs);

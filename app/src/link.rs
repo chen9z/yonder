@@ -81,8 +81,25 @@ impl Computer {
     }
 }
 
+pub(crate) fn host_label(host: &str) -> Option<&str> {
+    let host = host.trim();
+    let target = host.rsplit('@').next().unwrap_or(host);
+    let bare = target.trim_matches(['[', ']']).split('%').next().unwrap_or(target);
+    (!host.is_empty() && bare.parse::<std::net::IpAddr>().is_err() && target.parse::<std::net::SocketAddr>().is_err()).then_some(host)
+}
+
 pub fn computers() -> Vec<Computer> {
-    Storage::get_item(COMPUTERS).and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+    let mut all: Vec<Computer> = Storage::get_item(COMPUTERS).and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+    // Old versions used the literal address (optionally with a session suffix).
+    for computer in &mut all {
+        let automatic = computer.session.as_ref().map_or_else(|| computer.host.clone(), |s| format!("{} · {s}", computer.host));
+        if computer.name == automatic && host_label(&computer.host).is_none() {
+            let cached = seen(&computer.id()).and_then(|s| s.view.machines.into_iter().find(|m| m.name.is_none())?.host);
+            let name = cached.as_deref().and_then(host_label).unwrap_or(t!("Computer"));
+            computer.name = computer.session.as_ref().map_or_else(|| name.to_owned(), |s| format!("{name} · {s}"));
+        }
+    }
+    all
 }
 
 /// Keeps `computer` first (the one opened last), replacing its old entry.

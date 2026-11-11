@@ -39,6 +39,7 @@ fn adds_a_computer_then_works_there() {
     app.wait_for("text:Connect").unwrap();
 
     // The way in: the host key is shown to compare, then the password goes.
+    app.type_text("id:display name", "Studio").unwrap();
     app.type_text("id:computer", "127.0.0.1").unwrap();
     app.type_text("id:user", "me").unwrap();
     app.clear("id:port").unwrap();
@@ -131,11 +132,11 @@ fn adds_a_computer_then_works_there() {
 
     // A swipe across goes between tabs: right to the one before, left to the next.
     app.press("label:New tab").unwrap();
-    app.wait_for_within("text:2 · 127.0.0.1", SLOW).unwrap();
+    app.wait_for_within("text:2 · Studio", SLOW).unwrap();
     app.drag("id:terminal", point(px(200.0), px(0.0))).unwrap();
-    app.wait_for_within("text:1 · 127.0.0.1", SLOW).unwrap();
+    app.wait_for_within("text:1 · Studio", SLOW).unwrap();
     app.drag("id:terminal", point(px(-200.0), px(0.0))).unwrap();
-    app.wait_for_within("text:2 · 127.0.0.1", SLOW).unwrap();
+    app.wait_for_within("text:2 · Studio", SLOW).unwrap();
 
     // Files shows the folder the shell is in.
     app.press("label:More").unwrap();
@@ -289,7 +290,7 @@ fn a_password_refused_is_asked_for_again_not_tried_again() {
 fn what_a_computer_showed_last_is_drawn_while_it_is_not_there() {
     // Nobody answers on its port.
     let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-    let computer = serde_json::json!({ "name": "desk", "host": "127.0.0.1", "port": port, "user": "me", "fingerprint": "SHA256:x" });
+    let computer = serde_json::json!({ "name": "127.0.0.1", "host": "127.0.0.1", "port": port, "user": "me", "fingerprint": "SHA256:x" });
     let id = format!("me@127.0.0.1:{port}");
     let root = serde_json::to_value(herdc_model::model::Tab::new("tab", "1", "p1", "t1").root).unwrap();
     let space = |id: &str, name: &str, status: Option<&str>, active: bool| {
@@ -325,13 +326,27 @@ fn what_a_computer_showed_last_is_drawn_while_it_is_not_there() {
     app.wait_for("label:notes").unwrap();
     assert!(app.screen().texts().iter().any(|t| t.contains("10m ago")), "{:?}", app.screen().texts());
 
+    answer(&mut app, "Rename", "Forget");
+    app.long_press("label:desk").unwrap();
+    app.wait_for("id:prompt").unwrap();
+    app.clear("id:prompt").unwrap();
+    app.type_text("id:prompt", "Studio desk").unwrap();
+    app.press("text:OK").unwrap();
+    app.wait_for("text:Studio desk").unwrap();
+    assert!(!app.screen().texts().iter().any(|t| t.contains("127.0.0.1")));
+
     // Opened at one, it is drawn before the computer answers (it won't).
     app.press("label:notes").unwrap();
     app.wait_for_within("text:proj", SLOW).unwrap();
     // Said to be on that machine, reached through the computer.
-    app.wait_for("text:1 · gpu · desk").unwrap();
+    app.wait_for("text:1 · gpu · Studio desk").unwrap();
     app.press("label:Spaces and agents").unwrap();
     app.wait_for_within("text:notes", SLOW).unwrap();
+    app.long_press("label:Fold or unfold gpu").unwrap();
+    app.clear("id:prompt").unwrap();
+    app.type_text("id:prompt", "GPU server").unwrap();
+    app.press("text:OK").unwrap();
+    app.wait_for("label:Fold or unfold GPU server").unwrap();
 }
 
 #[test]
@@ -344,6 +359,7 @@ fn another_session_is_a_computer_of_its_own() {
     config.storage = Some(storage.clone());
     let mut app = Headless::start(config).unwrap();
     app.wait_for("text:Connect").unwrap();
+    app.type_text("id:display name", "Studio · two").unwrap();
     app.type_text("id:computer", "127.0.0.1").unwrap();
     app.type_text("id:user", "me").unwrap();
     app.clear("id:port").unwrap();
@@ -393,7 +409,7 @@ fn another_session_is_a_computer_of_its_own() {
 
     // At home, a space's handle drags it below the next.
     app.press("label:New tab").unwrap();
-    app.wait_for_within("text:2 · 127.0.0.1 · two", SLOW).unwrap();
+    app.wait_for_within("text:2 · Studio · two", SLOW).unwrap();
     app.press("label:Spaces and agents").unwrap();
     answer(&mut app, "Rename", "Rename");
     app.long_press("text:home").unwrap();
@@ -442,7 +458,7 @@ fn another_session_is_a_computer_of_its_own() {
     // What it showed last is drawn first: looked at once the computer has answered.
     std::thread::sleep(Duration::from_secs(5));
     // Its workspace: the space's name over its tab and the computer.
-    app.wait_until("open on first space", SLOW, |s| s.texts().windows(2).any(|w| w[0] == "first space" && w[1].ends_with(" · 127.0.0.1 · two"))).unwrap();
+    app.wait_until("open on first space", SLOW, |s| s.texts().windows(2).any(|w| w[0] == "first space" && w[1].ends_with(" · Studio · two"))).unwrap();
 }
 
 /// How many terminals session `name` of the test computer has.

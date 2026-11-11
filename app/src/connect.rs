@@ -34,7 +34,9 @@ pub fn computers_page() -> impl IntoElement {
 }
 
 fn computer_list(known: Signal<Vec<Computer>>) -> impl IntoElement {
-    scroll().flex_1().child(
+    let editing = stored(None::<Computer>);
+    let asking = signal(None::<ui::Prompt>);
+    view().flex_1().child(scroll().flex_1().child(
         view()
             .pb(move || px(safe_area().bottom.0 + 16.0))
             .child(ui::heading(|| t!("COMPUTERS").to_owned()))
@@ -48,7 +50,7 @@ fn computer_list(known: Signal<Vec<Computer>>) -> impl IntoElement {
                     let status = spaces.iter().map(|s| s.status).max_by_key(|s| priority(*s)).flatten();
                     let then = seen.map(|s| t!("{} ago", ago(now() - s.at as i64)));
                     view()
-                        .child(computer_row(c, status, then, known))
+                        .child(computer_row(c, status, then, known, editing, asking))
                         .children(spaces.into_iter().map(move |s| {
                             let id = s.id.clone();
                             seen_space(&s).on_press(move || live::open_at(c.get_untracked(), id.clone()))
@@ -56,13 +58,23 @@ fn computer_list(known: Signal<Vec<Computer>>) -> impl IntoElement {
                 },
             ))
             .child(
-                text(t!("Long-press a computer to forget it."))
+                text(t!("Long-press a computer to rename or forget it."))
                     .px(px(16.0))
                     .pt(px(12.0))
                     .text_size(px(13.0))
                     .text_color(theme::DIM),
             ),
-    )
+    )).child(ui::prompt_dialog(asking, move |answer| {
+        if let (Some(mut computer), Some(name)) = (editing.replace(None), answer)
+            && !name.trim().is_empty()
+        {
+            computer.name = name.trim().to_owned();
+            match link::update(&computer) {
+                Ok(()) => known.set(link::computers()),
+                Err(e) => link::storage_error(e),
+            }
+        }
+    }))
 }
 
 fn now() -> i64 {
@@ -70,13 +82,24 @@ fn now() -> i64 {
 }
 
 /// A computer: its name and address, how its agents were when last seen.
-fn computer_row(c: ReadSignal<Computer>, status: Option<&'static str>, then: Option<String>, known: Signal<Vec<Computer>>) -> View {
-    ui::row(move || c.with(|c| c.name.clone()), move || c.with(|c| then.as_ref().map_or_else(|| c.id(), |then| format!("{} · {then}", c.id()))))
+fn computer_row(c: ReadSignal<Computer>, status: Option<&'static str>, then: Option<String>, known: Signal<Vec<Computer>>, editing: Stored<Option<Computer>>, asking: Signal<Option<ui::Prompt>>) -> View {
+    ui::row(move || c.with(|c| c.name.clone()), move || then.clone().unwrap_or_default())
         .child(ui::dot(move || status))
         .on_press(move || live::open(c.get_untracked(), None))
+        .label(move || c.with(|c| c.name.clone()))
         .on_long_press(move || {
             let computer = c.get_untracked();
             spawn(async move {
+                match ui::choose(&computer.name, &[("rename", t!("Rename")), ("forget", t!("Forget"))]).await.as_deref() {
+                    Some("rename") => {
+                        let prompt = ui::name_prompt(computer.name.clone());
+                        editing.replace(Some(computer));
+                        asking.set(Some(prompt));
+                        return;
+                    }
+                    Some("forget") => {}
+                    _ => return,
+                }
                 let title = t!("Forget {}?", computer.name);
                 if ui::confirm(&title, t!("Its key stays trusted nowhere else; adding it again asks for the password."), t!("Forget")).await {
                     link::forget(&computer.id());
@@ -116,6 +139,7 @@ enum Step {
 
 fn add_form(adding: Signal<bool>, known: Signal<Vec<Computer>>) -> impl IntoElement {
     let (host, port, user, password) = (signal(String::new()), signal("22".to_owned()), signal(String::new()), signal(String::new()));
+    let name = signal(String::new());
     let session = signal(String::new());
     let step = signal(Step::Form);
     let greeted: Rc<RefCell<Option<Greeted>>> = Rc::default();
@@ -127,8 +151,8 @@ fn add_form(adding: Signal<bool>, known: Signal<Vec<Computer>>) -> impl IntoElem
         let session = Some(session.get_untracked().trim().to_owned()).filter(|s| !s.is_empty());
         let host_name = host.get_untracked().trim().to_owned();
         let computer = Computer {
-            name: session.as_ref().map_or_else(|| host_name.clone(), |s| format!("{host_name} · {s}")),
-            host: host.get_untracked().trim().to_owned(),
+            name: name.get_untracked().trim().to_owned(),
+            host: host_name,
             port: port.get_untracked().trim().parse().unwrap_or(22),
             user: user.get_untracked().trim().to_owned(),
             fingerprint: None,
@@ -174,12 +198,17 @@ fn add_form(adding: Signal<bool>, known: Signal<Vec<Computer>>) -> impl IntoElem
             let made = background(async move {
                 let session = hello.login(&user, &Credential::Password(secret.clone())).await.map_err(|e| e.to_string())?;
                 // Herdr answers before the computer is remembered.
-                drop(session.connect_core(&pipe).await.map_err(|e| e.to_string())?);
-                Ok::<_, String>((session, Some(secret)))
+                let core = session.connect_core(&pipe).await.map_err(|e| e.to_string())?;
+                let reported = core.hello().pointer("/core/name").and_then(|v| v.as_str()).map(str::to_owned);
+                Ok::<_, String>((session, Some(secret), reported))
             })
             .await;
             match made {
-                Ok(Ok((session, kept))) => {
+                Ok(Ok((session, kept, reported))) => {
+                    if computer.name.is_empty() {
+                        let name = reported.as_deref().and_then(link::host_label).or_else(|| link::host_label(&computer.host)).unwrap_or(t!("Computer"));
+                        computer.name = computer.session.as_ref().map_or_else(|| name.to_owned(), |s| format!("{name} · {s}"));
+                    }
                     computer.password = kept;
                     known.set(link::computers());
                     adding.set(false);
@@ -200,6 +229,7 @@ fn add_form(adding: Signal<bool>, known: Signal<Vec<Computer>>) -> impl IntoElem
                     .text_size(px(14.0))
                     .text_color(theme::MUTED),
             )
+            .child(ui::field(t!("Display name"), name, KeyboardType::Default))
             .child(ui::field(t!("Computer"), host, KeyboardType::Url).label(t!("Computer")))
             .child(
                 view()

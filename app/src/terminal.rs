@@ -19,6 +19,9 @@ use nsh_core::prelude::*;
 use std::rc::Rc;
 use std::sync::Arc;
 
+pub(crate) const INSET_X: f32 = 8.0;
+pub(crate) const INSET_Y: f32 = 6.0;
+
 /// The font sizes a pinch (and the settings) go between, in points.
 pub const FONT: (f32, f32) = (7.0, 24.0);
 
@@ -270,6 +273,8 @@ pub fn terminal(engine: Engine, address: String, swipes: Swipes) -> impl IntoEle
             view()
                 .flex_1()
                 .overflow_hidden()
+                .mx(px(INSET_X))
+                .my(px(INSET_Y))
                 .on_layout(move |b: &Bounds<Points>| area.set((b.size.width.0, b.size.height.0)))
                 .claim_touches(TouchClaim::on_start())
                 .test_id("terminal")
