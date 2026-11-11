@@ -509,8 +509,7 @@ fn empty(live: Live) -> impl IntoElement {
 }
 
 /// Toasts over the page: newest at the bottom; a tap runs what they offer.
-/// An agent that needs you stays while it waits, with what it asks and
-/// its answers; not while it's the one shown.
+/// A waiting agent has a reminder until it is shown or no longer blocked.
 pub fn notes(live: Live) -> impl IntoElement {
     let (all, world) = (live.notes, live.view);
     let notes = computed(move || {
@@ -573,10 +572,6 @@ pub fn notes(live: Live) -> impl IntoElement {
                                 .mr(px(-8.0))
                             }),
                     )
-                    .child(match waits_on(&n.get_untracked().1) {
-                        Some(address) => crate::agents::question_card(live.clone(), address).into_element(),
-                        None => view().into_element(),
-                    })
             },
         ))
 }

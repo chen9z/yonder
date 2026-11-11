@@ -2,14 +2,13 @@
 //! herdr-app's agents list orders them, each with the sub-agents it
 //! started. A tap shows one; a long press pins or stops it. A sub-agent
 //! without a pane is peeked at, as the desktop's peek overlay does.
-//! One that waits for you shows what it asks, answered right here.
+//! A waiting agent is marked Needs you; tap its row to open its terminal.
 
-use crate::live::{off, Live};
+use crate::live::Live;
 use crate::nav::{self, Route};
 use crate::i18n::tr;
 use crate::theme;
-use crate::ui::{self, Prompt};
-use herdc_engine::tools::agents::{self as asking, Choice, Question};
+use crate::ui;
 use herdc_engine::AgentView;
 use nsh_core::prelude::*;
 use serde_json::{json, Value};
@@ -340,16 +339,14 @@ fn heading(l: ReadSignal<Line>, fold: impl Fn(String) + Copy + 'static) -> impl 
 
 /// An agent's row: what runs, its name, its machine, how long since its
 /// status changed and that status. A tap shows it; a long press pins or
-/// stops it. One that waits for you shows what it asks under it.
+/// stops it.
 fn agent_row(live: Live, l: ReadSignal<Line>, now: Signal<u64>, inline: bool, fold: impl Fn(String) + Copy + 'static) -> impl IntoElement {
     let agent = move || l.with(|l| match l { Line::Agent { agent, .. } => Some((**agent).clone()), _ => None });
     let row = computed(move || match l.get() {
         Line::Agent { agent, name, more, machine, subs, open, compact } => Some((agent.address, agent.status, agent.focused, agent.pinned, name, more, machine, subs, open, compact)),
         _ => None,
     });
-    let (press, hold, ask) = (live.clone(), live.clone(), live.clone());
-    // A blocked agent, again each time it blocks.
-    let waits = computed(move || agent().filter(|a| a.status == "blocked").map(|a| (a.address, a.seq)));
+    let (press, hold) = (live.clone(), live);
     view()
         .mx(px(8.0))
         .child(
@@ -424,121 +421,6 @@ fn agent_row(live: Live, l: ReadSignal<Line>, now: Signal<u64>, inline: bool, fo
                 .child(when(move || row.with(|r| r.as_ref().is_some_and(|r| r.3)), || ui::glyph("pin", 13.0, theme::DIM)))
                 .child(ui::status_mark(move || row.with(|r| r.as_ref().map(|r| r.1)), move || row.with(|r| r.as_ref().is_some_and(|r| r.9)))),
         )
-        .child(dynamic(move || match waits.get() {
-            Some((address, _)) => view().mx(px(8.0)).mb(px(10.0)).child(question_card(ask.clone(), address)).into_element(),
-            None => view().into_element(),
-        }))
-}
-
-/// What a blocked agent asks, and its answers: the choices its menu offers
-/// (else Enter and Esc), or words.
-pub fn question_card(live: Live, address: String) -> impl IntoElement {
-    let asked = signal(None::<Question>);
-    let sent = signal(false);
-    {
-        let (live, address) = (live.clone(), address.clone());
-        spawn(async move {
-            let Some(core) = live.engine.client() else { return };
-            if let Some(Ok(q)) = off(async move { asking::asked(&core, &address).await }).await {
-                asked.set(Some(q));
-            }
-        });
-    }
-    let answer = {
-        let (live, address) = (live.clone(), address.clone());
-        move |key: Option<String>| {
-            let menu = asked.with_untracked(|q| q.as_ref().is_some_and(|q| !q.choices.is_empty()));
-            let (live, address) = (live.clone(), address.clone());
-            spawn(async move {
-                let words = match key {
-                    Some(_) => None,
-                    None => {
-                        let prompt = Prompt { title: t!("Reply").into(), placeholder: t!("Tell it what to do").into(), value: String::new(), done: t!("Send"), masked: false };
-                        match live.words(prompt).await {
-                            Some(w) if !w.trim().is_empty() => Some(w),
-                            _ => return,
-                        }
-                    }
-                };
-                let Some(core) = live.engine.client() else { return live.say(herdc_engine::Note::error(t!("Not sent"), t!("Not connected"))) };
-                sent.set(true);
-                let done = off(async move {
-                    match (key, words) {
-                        (Some(key), _) => asking::press(&core, &address, &key).await,
-                        (None, Some(words)) => asking::reply(&core, &address, &words, menu).await,
-                        _ => Ok(()),
-                    }
-                })
-                .await;
-                if let Some(Err(e)) = done {
-                    sent.set(false);
-                    live.say(herdc_engine::Note::error(t!("Not sent"), e));
-                }
-            });
-        }
-    };
-    let choices = computed(move || {
-        asked.with(|q| match q {
-            Some(q) if !q.choices.is_empty() => q.choices.clone(),
-            Some(_) => vec![Choice { label: "Enter".into(), key: "enter".into() }, Choice { label: "Esc".into(), key: "esc".into() }],
-            None => Vec::new(),
-        })
-    });
-    let reply = answer.clone();
-    view()
-        .p(px(12.0))
-        .gap(px(10.0))
-        .rounded(px(12.0))
-        .bg(theme::RAISED)
-        .opacity(move || if sent.get() { 0.5f32 } else { 1.0 })
-        .child(
-            text(move || asked.with(|q| q.as_ref().map(|q| q.lines.join("\n")).unwrap_or_else(|| t!("Reading what it asks…").into())))
-                .font_family(theme::MONO)
-                .text_size(px(12.0))
-                .line_height(px(17.0))
-                .text_color(theme::MUTED)
-                .number_of_lines(8),
-        )
-        .child(
-            view()
-                .flex_row()
-                .flex_wrap()
-                .gap(px(8.0))
-                .child(each(move || choices.get(), |c: &Choice| format!("{} {}", c.key, c.label), move |c, at| {
-                    let answer = answer.clone();
-                    let c = c.get_untracked();
-                    let first = at.get_untracked() == 0;
-                    chip(c.label.clone(), first, move || {
-                        if !sent.get_untracked() {
-                            answer(Some(c.key.clone()));
-                        }
-                    })
-                }))
-                .child(chip(t!("Reply…").into(), false, move || {
-                    if !sent.get_untracked() {
-                        reply(None);
-                    }
-                })),
-        )
-}
-
-/// An answer to tap: the first (what Enter would pick) stands out.
-fn chip(label: String, first: bool, press: impl Fn() + 'static) -> impl IntoElement {
-    view()
-        .min_h(px(36.0))
-        .max_w(percentage(1.0))
-        .px(px(12.0))
-        .py(px(6.0))
-        .rounded(px(10.0))
-        .justify_center()
-        .border_1()
-        .border_color(if first { theme::ACCENT } else { theme::BORDER })
-        .bg(if first { theme::SELECTED } else { theme::BACKGROUND })
-        .active(|s| s.bg(theme::HOVER))
-        .role(AccessibilityRole::Button)
-        .label(label.clone())
-        .on_press(press)
-        .child(text(label).text_size(px(14.0)).text_color(theme::FOREGROUND).number_of_lines(2))
 }
 
 /// A sub-agent under its agent, on the tree's lines: a tap shows its
