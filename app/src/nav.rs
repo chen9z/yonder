@@ -11,6 +11,7 @@ pub enum Route {
     /// The shown space's tabs and panes.
     Workspace,
     Settings,
+    EditConnection,
     Commands,
     /// A folder's tree.
     Files(Place),

@@ -243,21 +243,9 @@ pub fn agent_list(live: Live) -> impl IntoElement {
     scroll().flex_1().bg(theme::CANVAS).child(agents_section(live, true))
 }
 
-/// The agents section: its heading, with the sort, and the list.
-/// `inline`: in a pane, where showing one stays on the page.
-pub fn agents_section(live: Live, inline: bool) -> impl IntoElement {
-    let world = live.view;
+pub fn sort_button() -> impl IntoElement {
     let grouped = use_context::<crate::prefs::Prefs>().unwrap().grouped;
-    let folded = signal(Vec::<String>::new());
-    let held = stored(None::<(String, u8)>);
-    let now = signal(now_ms());
-    set_interval(std::time::Duration::from_secs(30), move || now.set(now_ms()));
-    let lines = computed(move || {
-        let (grouped, folded) = (grouped.get(), folded.get());
-        world.with(|v| held.with(|held| lines(v, grouped, &folded, held)))
-    });
-    let fold = move |id: String| folded.update(|set| if set.contains(&id) { set.retain(|k| k != &id) } else { set.push(id) });
-    let sort = view()
+    view()
         .w(px(40.0))
         .h(px(40.0))
         .rounded(px(10.0))
@@ -279,9 +267,25 @@ pub fn agents_section(live: Live, inline: bool) -> impl IntoElement {
                 }
             });
         })
-        .child(dynamic(move || ui::glyph(if grouped.get() { "layers" } else { "clock" }, 16.0, theme::DIM).into_element()));
+        .child(dynamic(move || ui::glyph(if grouped.get() { "layers" } else { "clock" }, 16.0, theme::DIM).into_element()))
+}
+
+/// The agents section: its heading, with the sort, and the list.
+/// `inline`: in a pane, where showing one stays on the page.
+pub fn agents_section(live: Live, inline: bool) -> impl IntoElement {
+    let world = live.view;
+    let grouped = use_context::<crate::prefs::Prefs>().unwrap().grouped;
+    let folded = signal(Vec::<String>::new());
+    let held = stored(None::<(String, u8)>);
+    let now = signal(now_ms());
+    set_interval(std::time::Duration::from_secs(30), move || now.set(now_ms()));
+    let lines = computed(move || {
+        let (grouped, folded) = (grouped.get(), folded.get());
+        world.with(|v| held.with(|held| lines(v, grouped, &folded, held)))
+    });
+    let fold = move |id: String| folded.update(|set| if set.contains(&id) { set.retain(|k| k != &id) } else { set.push(id) });
     view()
-        .child(crate::home::section(t!("Agents"), sort))
+        .child(when(move || inline, || crate::home::section(t!("Agents"), sort_button())))
         .child(when(move || lines.with(Vec::is_empty), || {
             text(t!("No agent status yet. Agents show up here when they report their status. Older versions and agents inside tmux may not."))
                 .px(px(16.0))

@@ -56,7 +56,7 @@ pub struct Fed {
     pub copied: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Style {
     pub fg: Rgb,
     /// None: the screen's background.
@@ -68,7 +68,7 @@ pub struct Style {
 }
 
 /// Cells in one row drawn as one piece of text.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Run {
     pub col: u16,
     /// Cells it covers (a wide character covers two).
@@ -77,7 +77,7 @@ pub struct Run {
     pub style: Style,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Row {
     pub runs: Vec<Run>,
 }
@@ -307,21 +307,23 @@ impl Screen {
                 underline: cell.flags.intersects(Flags::ALL_UNDERLINES),
                 strike: cell.flags.contains(Flags::STRIKEOUT),
             };
-            let mut text = String::new();
-            text.push(if hidden { ' ' } else { cell.c });
-            if let Some(extra) = cell.zerowidth() {
-                text.extend(extra);
-            }
             // ASCII shares a run; anything else stands alone at its own cell,
             // so fonts with other advances can't push the grid out of line.
             let simple = !wide && cell.c.is_ascii() && cell.zerowidth().is_none();
             let width = if wide { 2 } else { 1 };
             match line.runs.last_mut() {
                 Some(run) if simple && run.style == style && run.col + run.width == col && run.text.is_ascii() && run.width as usize == run.text.len() => {
-                    run.text.push_str(&text);
+                    run.text.push(if hidden { ' ' } else { cell.c });
                     run.width += 1;
                 }
-                _ => line.runs.push(Run { col, width, text, style }),
+                _ => {
+                    let mut text = String::new();
+                    text.push(if hidden { ' ' } else { cell.c });
+                    if let Some(extra) = cell.zerowidth() {
+                        text.extend(extra);
+                    }
+                    line.runs.push(Run { col, width, text, style });
+                }
             }
         }
         // Blank default cells draw nothing.

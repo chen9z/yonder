@@ -62,6 +62,7 @@ pub fn settings_page(live: Live) -> nsh_core::element::Screen {
                 )
                 .child(ui::heading(|| t!("COMPUTER").into()))
                 .child(setting(move || live.computer.name.clone(), move || core.get()))
+                .child(view().px(px(16.0)).child(ui::ghost_button(t!("Edit connection"), || nav::push(Route::EditConnection))))
                 .child(view().px(px(16.0)).pt(px(8.0)).child(ui::ghost_button(t!("Leave this computer"), live::close)))
                 .child(ui::heading(|| t!("THIS PHONE'S KEY").into()))
                 .child(

@@ -141,11 +141,14 @@ pub fn terminal(engine: Engine, address: String, swipes: Swipes) -> impl IntoEle
                 // One paint a frame, whatever arrived meanwhile, and at most
                 // every PAINT: a flood is drawn at half the cost. A scroll
                 // or a key just made is drawn every frame.
-                let early = PAINT.saturating_sub(painted.elapsed());
-                if !early.is_zero() && viewer.idle() > ANSWERING {
-                    crate::live::off(tokio::time::sleep(early)).await;
+                // Recheck interaction on each vsync: a timer here cannot be
+                // interrupted by a touch, and adds another frame after waking.
+                loop {
+                    next_frame().await;
+                    if painted.elapsed() >= PAINT || viewer.idle() <= ANSWERING {
+                        break;
+                    }
                 }
-                next_frame().await;
                 painted = std::time::Instant::now();
                 changes.borrow_and_update();
                 snapshot.set(Arc::new(viewer.snapshot()));
@@ -261,6 +264,9 @@ pub fn terminal(engine: Engine, address: String, swipes: Swipes) -> impl IntoEle
                 let col = (e.location.x.0 / (c.width * s)) as u16;
                 let row = (e.location.y.0 / (c.height * s)) as u16;
                 viewer.wheel(turn, col, row);
+                // The gesture already runs on the UI frame. Waiting for the
+                // change watcher adds another frame of latency to every move.
+                snapshot.set(Arc::new(viewer.snapshot()));
             }
         }
     };
@@ -305,7 +311,7 @@ pub fn terminal(engine: Engine, address: String, swipes: Swipes) -> impl IntoEle
                     let d = e.gesture.delta;
                     let pinched = pinching.replace(false) || e.gesture.active_touches > 1;
                     if axis.get() == Axis::Along && !pinched && e.gesture.vy.abs() > FLING_LEAST * 4.0 {
-                        fling(flinger.clone(), flung, e.gesture.vy, e.location, cell.get_untracked(), scale.get_untracked());
+                        fling(flinger.clone(), snapshot, flung, e.gesture.vy, e.location, cell.get_untracked(), scale.get_untracked());
                     }
                     if !held.replace(false) && !pinched && d.x.0.abs() < 8.0 && d.y.0.abs() < 8.0 {
                         tap();
@@ -318,13 +324,7 @@ pub fn terminal(engine: Engine, address: String, swipes: Swipes) -> impl IntoEle
                     }
                 })
                 .child(
-                    canvas(move || {
-                        let s = scale.get();
-                        snapshot.with(|snap| paint(snap, cell.get(), s, theme::rgb_of(theme::palette().cursor)))
-                    })
-                    .w(move || px(snapshot.with(|s| s.cols as f32) * cell.get().width * scale.get()))
-                    .h(move || px(snapshot.with(|s| s.rows as f32) * cell.get().height * scale.get()))
-                    .bind_scale(&zoom),
+                    terminal_rows(snapshot, cell, scale).bind_scale(&zoom),
                 )
                 .child(status(info))
                 .child(latest(viewer.clone(), snapshot))
@@ -339,9 +339,56 @@ pub fn terminal(engine: Engine, address: String, swipes: Swipes) -> impl IntoEle
         }))
 }
 
+/// Keep the native display list of an unchanged line when scrolling moves it.
+/// Duplicate lines get distinct keys, so empty/repeated rows cannot disappear.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct LineKey {
+    row: herdc_term::Row,
+    occurrence: usize,
+}
+
+fn line_keys(s: &Snapshot) -> Vec<LineKey> {
+    let mut counts = std::collections::HashMap::new();
+    s.lines.iter().map(|row| {
+        let occurrence = counts.entry(row).or_insert(0);
+        let key = LineKey { row: row.clone(), occurrence: *occurrence };
+        *occurrence += 1;
+        key
+    }).collect()
+}
+
+fn terminal_rows(snapshot: Signal<Arc<Snapshot>>, cell: Memo<Cell>, scale: Memo<f32>) -> View {
+    let grid = computed(move || snapshot.with(|s| (s.cols, s.rows, s.background, s.foreground)));
+    view()
+        .w(move || px(grid.get().0 as f32 * cell.get().width * scale.get()))
+        .h(move || px(grid.get().1 as f32 * cell.get().height * scale.get()))
+        .child(each(
+            move || snapshot.with(|s| line_keys(s)),
+            |line| line.clone(),
+            move |line, index| {
+                let cursor = computed(move || snapshot.with(|s| {
+                    s.cursor.filter(|c| c.row as usize == index.get()).map(|mut c| { c.row = 0; c })
+                }));
+                canvas(move || {
+                    let (cols, _, background, foreground) = grid.get();
+                    let row = Snapshot {
+                        cols, rows: 1, lines: vec![line.get().row], cursor: cursor.get(),
+                        scrolled: 0, history: 0, background, foreground,
+                    };
+                    paint(&row, cell.get(), scale.get(), theme::rgb_of(theme::palette().cursor))
+                })
+                .absolute()
+                .left(px(0.0))
+                .top(move || px(index.get() as f32 * cell.get().height * scale.get()))
+                .w(move || px(grid.get().0 as f32 * cell.get().width * scale.get()))
+                .h(move || px(cell.get().height * scale.get()))
+            },
+        ))
+}
+
 /// A swipe let go at `vy` points a second goes on, slowing, a line at a
 /// time, until it stops or another touch begins.
-fn fling(viewer: Rc<Viewer>, flung: Stored<u32>, vy: f32, at: Point<Points>, cell: Cell, scale: f32) {
+fn fling(viewer: Rc<Viewer>, snapshot: Signal<Arc<Snapshot>>, flung: Stored<u32>, vy: f32, at: Point<Points>, cell: Cell, scale: f32) {
     let this = flung.get().wrapping_add(1);
     flung.replace(this);
     let line = cell.height * scale;
@@ -357,6 +404,7 @@ fn fling(viewer: Rc<Viewer>, flung: Stored<u32>, vy: f32, at: Point<Points>, cel
             let turn = lines.trunc() as i32;
             if turn != 0 {
                 viewer.wheel(turn, col, row);
+                snapshot.set(Arc::new(viewer.snapshot()));
                 lines -= turn as f32;
             }
             v *= FLING_DECAY.powf(dt);
@@ -503,7 +551,7 @@ fn keyboard_field(viewer: Rc<Viewer>, field: ElementRef, focused: Signal<bool>, 
         .auto_correct(false)
         .auto_capitalize(AutoCapitalize::None)
         .submit_behavior(SubmitBehavior::Submit)
-        .return_key_type(ReturnKeyType::Send)
+        .return_key_type(ReturnKeyType::Default)
         .value(move || holds.get())
         .on_focus({
             let viewer = viewer.clone();
@@ -594,12 +642,16 @@ pub fn text_page(live: crate::live::Live, words: Arc<String>) -> nsh_core::eleme
 
 /// The keys a phone keyboard lacks.
 fn key_bar(viewer: Rc<Viewer>, latch: Latch) -> impl IntoElement {
+    let enter_viewer = viewer.clone();
     let keys = use_context::<Prefs>().expect("prefs").keys;
     view()
+        .flex_row()
         .h(px(40.0))
         .bg(theme::CHROME)
         .border_t_1()
         .border_color(theme::BORDER)
+        // Always visible, including with an existing customized key bar.
+        .child(bar_key("↵", move || enter_viewer.key(Key::Enter, latch.take())))
         .child(
             // Its keys are pressed with the keyboard up (a scroll view's
             // tap would otherwise only dismiss it).
@@ -720,7 +772,22 @@ fn paint(s: &Snapshot, cell: Cell, scale: f32, cursor: Hsla) -> Painter {
 
 #[cfg(test)]
 mod tests {
-    use super::typed;
+    use super::{typed, line_keys};
+
+    #[test]
+    fn scrolling_reuses_lines_without_collapsing_duplicates() {
+        let mut screen = herdc_term::Screen::new(20, 4, herdc_term::Palette::default());
+        screen.feed(b"one\r\ntwo\r\nthree\r\nfour\r\nfive");
+        let before = line_keys(&screen.snapshot());
+        screen.scroll(1);
+        let after = line_keys(&screen.snapshot());
+        assert_eq!(&before[..3], &after[1..]);
+        screen.feed(b"\x1b[2J");
+        screen.scroll_to_bottom();
+        let blank = line_keys(&screen.snapshot());
+        assert_eq!(blank.iter().collect::<std::collections::HashSet<_>>().len(), 4);
+    }
+
 
     #[test]
     fn typing_is_the_difference() {

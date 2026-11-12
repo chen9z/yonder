@@ -26,6 +26,7 @@ pub struct Prefs {
     pub colors: Signal<std::collections::BTreeMap<String, usize>>,
     /// Agents by priority, else grouped by space.
     pub grouped: Signal<bool>,
+    pub home_spaces: Signal<bool>,
     aliases: Signal<std::collections::BTreeMap<String, String>>,
 }
 
@@ -40,12 +41,13 @@ struct Kept {
     folded: Vec<String>,
     colors: std::collections::BTreeMap<String, usize>,
     grouped: bool,
+    home_spaces: bool,
     aliases: std::collections::BTreeMap<String, String>,
 }
 
 impl Default for Kept {
     fn default() -> Self {
-        Kept { font: 12.0, fit: true, notify: true, language: Language::System, keys: crate::keybar::at_first(), folded: Vec::new(), colors: Default::default(), grouped: false, aliases: Default::default() }
+        Kept { font: 12.0, fit: true, notify: true, language: Language::System, keys: crate::keybar::at_first(), folded: Vec::new(), colors: Default::default(), grouped: false, home_spaces: false, aliases: Default::default() }
     }
 }
 
@@ -68,9 +70,9 @@ impl Prefs {
         let kept: Kept = Storage::get_item(PREFS).and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
         let language = i18n::chosen();
         language.set(kept.language);
-        let prefs = Prefs { font: signal(kept.font), fit: signal(kept.fit), notify: signal(kept.notify), language, keys: signal(kept.keys), folded: signal(kept.folded), colors: signal(kept.colors), grouped: signal(kept.grouped), aliases: signal(kept.aliases) };
+        let prefs = Prefs { font: signal(kept.font), fit: signal(kept.fit), notify: signal(kept.notify), language, keys: signal(kept.keys), folded: signal(kept.folded), colors: signal(kept.colors), grouped: signal(kept.grouped), home_spaces: signal(kept.home_spaces), aliases: signal(kept.aliases) };
         effect(move || {
-            let kept = Kept { font: prefs.font.get(), fit: prefs.fit.get(), notify: prefs.notify.get(), language: prefs.language.get(), keys: prefs.keys.get(), folded: prefs.folded.get(), colors: prefs.colors.get(), grouped: prefs.grouped.get(), aliases: prefs.aliases.get() };
+            let kept = Kept { font: prefs.font.get(), fit: prefs.fit.get(), notify: prefs.notify.get(), language: prefs.language.get(), keys: prefs.keys.get(), folded: prefs.folded.get(), colors: prefs.colors.get(), grouped: prefs.grouped.get(), home_spaces: prefs.home_spaces.get(), aliases: prefs.aliases.get() };
             let _ = Storage::set_item(PREFS, serde_json::to_string(&kept).unwrap_or_default());
         });
         provide_context(prefs);

@@ -48,6 +48,8 @@ fn adds_a_computer_then_works_there() {
     let fingerprint = Box::leak(served.fingerprint.clone().into_boxed_str());
     answer(&mut app, "Trust", fingerprint);
     app.press("text:Connect").unwrap();
+    app.wait_for_within("label:Spaces", SLOW).unwrap();
+    app.press("label:Spaces").unwrap();
     app.wait_for_within("text:No spaces yet", SLOW).unwrap();
     // Nothing is left on the computer: the password is kept (sealed on a
     // phone; off one, as it is).
@@ -73,6 +75,12 @@ fn adds_a_computer_then_works_there() {
         let screen = session.hc(&["read", &t]);
         panic!("{e}\nits screen:\n{}{}", String::from_utf8_lossy(&screen.stdout), String::from_utf8_lossy(&screen.stderr));
     }
+
+    // Enter on the bar executes the command without relying on the IME action.
+    app.type_text("id:terminal-input", "touch entered-on-the-phone").unwrap();
+    assert!(!session.path("entered-on-the-phone").exists());
+    app.press("label:Enter").unwrap();
+    app.wait_until("the command submitted with Enter", SLOW, |_| session.path("entered-on-the-phone").exists()).unwrap();
 
     // The key bar's Ctrl holds for the next key, with the keyboard still up.
     app.type_text("id:terminal-input", "sleep 100\n").unwrap();
@@ -161,7 +169,9 @@ fn adds_a_computer_then_works_there() {
 
     // Back home: the spaces, and no agents yet; a space opens again.
     app.press("label:Spaces and agents").unwrap();
+    app.press("label:Agents").unwrap();
     app.wait_for_within("text:No agent status yet. Agents show up here when they report their status. Older versions and agents inside tmux may not.", SLOW).unwrap();
+    app.press("label:Spaces").unwrap();
     app.press("text:home").unwrap();
     app.wait_for_within("label:New tab", SLOW).unwrap();
 
@@ -217,6 +227,7 @@ fn adds_a_computer_then_works_there() {
     app.back().unwrap();
     app.type_text("id:terminal-input", "").unwrap();
     app.wait_for_within("text:F5", SLOW).unwrap();
+    app.wait_for("label:Enter").unwrap();
     assert!(!app.screen().texts().contains(&"Esc"), "{:?}", app.screen().texts());
 
     // What it shows is kept, to draw first next time.
@@ -254,6 +265,8 @@ fn opens_again_on_the_computer_it_was_on_in_its_language() {
     let mut app = Headless::start(config).unwrap();
 
     // Straight into the computer, in Chinese.
+    app.wait_for_within("label:空间", SLOW).unwrap();
+    app.press("label:空间").unwrap();
     app.wait_for_within("text:还没有空间", SLOW).unwrap();
     // Its menu: leaving goes back to the computers, and stays there.
     answer(&mut app, "断开", "设置");
@@ -281,6 +294,8 @@ fn a_password_refused_is_asked_for_again_not_tried_again() {
     app.press("label:Enter the password").unwrap();
     app.type_text("id:prompt", "open sesame").unwrap();
     app.press("text:Connect").unwrap();
+    app.wait_for_within("label:Spaces", SLOW).unwrap();
+    app.press("label:Spaces").unwrap();
     app.wait_for_within("text:No spaces yet", SLOW).unwrap();
     // The new one is kept.
     assert!(format!("{:?}", storage.entries()).contains("open sesame"), "{:?}", storage.entries());
@@ -341,12 +356,77 @@ fn what_a_computer_showed_last_is_drawn_while_it_is_not_there() {
     // Said to be on that machine, reached through the computer.
     app.wait_for("text:1 · gpu · Studio desk").unwrap();
     app.press("label:Spaces and agents").unwrap();
+    app.press("label:Spaces").unwrap();
     app.wait_for_within("text:notes", SLOW).unwrap();
     app.long_press("label:Fold or unfold gpu").unwrap();
     app.clear("id:prompt").unwrap();
     app.type_text("id:prompt", "GPU server").unwrap();
     app.press("text:OK").unwrap();
     app.wait_for("label:Fold or unfold GPU server").unwrap();
+}
+
+#[test]
+fn edits_a_saved_connection_only_after_it_works() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let session = Session::new();
+    let served = runtime.block_on(computer::serve(&session, Options::default())).unwrap();
+    let original = serde_json::json!({
+        "name": "Studio", "host": "127.0.0.1", "port": 1, "user": "me",
+        "fingerprint": served.fingerprint, "password": "open sesame",
+    });
+    let storage = MemoryStorage::new(vec![("computers".into(), serde_json::json!([original]).to_string())]);
+    let saved = || {
+        let raw = storage.entries().into_iter().find(|(k, _)| k == "computers").unwrap().1;
+        serde_json::from_str::<Vec<serde_json::Value>>(&raw).unwrap()
+    };
+    let mut config = EngineConfig::new(Root::of::<herdc_app::App>());
+    config.storage = Some(storage.clone());
+    let mut app = Headless::start(config).unwrap();
+    app.wait_for("label:Studio").unwrap();
+    answer(&mut app, "Edit connection", "Forget");
+    app.long_press("label:Studio").unwrap();
+    app.clear("id:port").unwrap();
+    app.type_text("id:port", "65536").unwrap();
+    app.press("text:Test and save").unwrap();
+    app.wait_for("text:Enter a port from 1 to 65535.").unwrap();
+    assert_eq!(saved(), vec![original.clone()]);
+    app.clear("id:port").unwrap();
+    app.type_text("id:port", &served.port.to_string()).unwrap();
+    app.type_text("id:password", "incorrect").unwrap();
+    app.press("text:Test and save").unwrap();
+    app.wait_for_within("text:Wrong user name or password.", SLOW).unwrap();
+    assert_eq!(saved(), vec![original]);
+    app.clear("id:password").unwrap();
+    app.press("text:Test and save").unwrap();
+    app.wait_for_within("label:Studio", SLOW).unwrap();
+    let entries = saved();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["port"], served.port);
+    assert_eq!(entries[0]["password"], "open sesame");
+    assert_eq!(entries[0]["fingerprint"], served.fingerprint);
+
+    app.press("label:Studio").unwrap();
+    app.wait_for_within("label:Menu", SLOW).unwrap();
+    answer(&mut app, "Edit connection", "Settings");
+    app.press("label:Menu").unwrap();
+    app.clear("id:display name").unwrap();
+    app.type_text("id:display name", "Mini").unwrap();
+    app.press("text:Test and save").unwrap();
+    app.wait_for_within("text:Mini", SLOW).unwrap();
+    assert_eq!(saved()[0]["name"], "Mini");
+    app.press("label:Spaces").unwrap();
+    app.press("label:New space").unwrap();
+    app.wait_for_within("label:More", SLOW).unwrap();
+    app.press("label:More").unwrap();
+    app.press("label:Edit connection").unwrap();
+    app.type_text("id:password", "incorrect").unwrap();
+    app.press("text:Test and save").unwrap();
+    app.wait_for_within("text:Wrong user name or password.", SLOW).unwrap();
+    app.press("text:Cancel").unwrap();
+    app.wait_for_within("id:terminal-input", SLOW).unwrap();
+    app.type_text("id:terminal-input", "touch still-connected\n").unwrap();
+    app.wait_until("original terminal still accepts input", SLOW, |_| session.path("still-connected").exists()).unwrap();
+
 }
 
 #[test]
@@ -398,6 +478,8 @@ fn another_session_is_a_computer_of_its_own() {
     app.clear("id:password").unwrap();
     app.type_text("id:password", "open sesame").unwrap();
     app.press("text:Connect").unwrap();
+    app.wait_for_within("label:Spaces", SLOW).unwrap();
+    app.press("label:Spaces").unwrap();
     app.wait_for_within("text:No spaces yet", SLOW).unwrap();
     app.press("role:button[New space]").unwrap();
     app.wait_for_within("label:New tab", SLOW).unwrap();
@@ -554,6 +636,8 @@ fn home_makes_no_space_before_the_computer_has_said_its_layout() {
     let mut app = Headless::start(config).unwrap();
     // Home says it's loading, not that there are no spaces, and its New
     // space takes no press: one made now would go nowhere.
+    app.wait_for("label:Sort agents: Priority").unwrap();
+    app.press("label:Spaces").unwrap();
     app.wait_for("text:Loading…").unwrap();
     let texts = app.screen().texts();
     assert!(!texts.contains(&"No spaces yet"), "{texts:?}");

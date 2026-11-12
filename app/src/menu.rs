@@ -15,7 +15,7 @@ type Action = (&'static str, &'static str, &'static str);
 
 const PANE: [Action; 4] = [("terminal", "+", "New terminal"), ("right", "◨", "Split right"), ("down", "⬓", "Split down"), ("zoom", "⇱", "Zoom")];
 const HERE: [Action; 4] = [("files", "▤", "Files"), ("changes", "±", "Changes"), ("worktrees", "⎇", "Worktrees"), ("rename", "✎", "Rename tab")];
-const APP: [Action; 3] = [("commands", "⌘", "Commands"), ("settings", "⚙", "Settings"), ("leave", "⏏", "Leave")];
+const APP: [Action; 4] = [("commands", "⌘", "Commands"), ("edit", "✎", "Edit connection"), ("settings", "⚙", "Settings"), ("leave", "⏏", "Leave")];
 
 pub fn more_sheet(live: Live, open: Signal<bool>) -> impl IntoElement {
     let zoomed = {
@@ -118,6 +118,7 @@ async fn act(live: Live, picked: &str) {
             });
         }
         "commands" => nav::push(Route::Commands),
+        "edit" => nav::push(Route::EditConnection),
         "settings" => nav::push(Route::Settings),
         "leave" => live::close(),
         _ => {}

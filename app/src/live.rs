@@ -81,36 +81,50 @@ thread_local! {
 /// Opens `computer`: its engine starts dialing, the app shows it, on the
 /// space it showed last.
 pub fn open(computer: Computer, first: Option<Session>) {
+    if let Err(error) = switch_connection(computer, first, None) {
+        link::storage_error(error);
+    }
+}
+
+pub fn switch_connection(computer: Computer, first: Option<Session>, replacing: Option<&str>) -> Result<(), String> {
     let palette = untracked(crate::theme::palette);
     let cell = crate::terminal::Cell::at(12.0);
     // The pane's grid, near enough: the window below the header and tabs.
     let (w, h) = untracked(|| (window().width.0, window().height.0 - safe_area().top.0 - safe_area().bottom.0 - 88.0));
     let password: link::Password = Arc::new(std::sync::Mutex::new(computer.password.clone()));
-    let engine = match link::open(&computer, first, link::display(&palette, (cell.width, cell.height)), cell.fit((w - 2.0 * crate::terminal::INSET_X, h - 2.0 * crate::terminal::INSET_Y)), password.clone()) {
-        Ok(engine) => engine,
-        Err(error) => { link::storage_error(error); return; }
+    let engine = link::open(&computer, first, link::display(&palette, (cell.width, cell.height)), cell.fit((w - 2.0 * crate::terminal::INSET_X, h - 2.0 * crate::terminal::INSET_Y)), password.clone())?;
+    let previous = live();
+    if let Some(old) = &previous { old.keep(); }
+    let prior_view = previous.as_ref().filter(|old| {
+        replacing.is_some() && old.computer.id() != computer.id()
+            && computer.fingerprint.is_some() && computer.fingerprint == old.computer.fingerprint
+            && computer.session == old.computer.session && computer.user == old.computer.user
+    }).and_then(|old| link::seen(&old.computer.id()));
+    let saved = match replacing {
+        Some(id) => link::replace(id, &computer),
+        None => link::remember(&computer),
     };
-    if let Err(error) = link::remember(&computer) {
+    if let Err(error) = saved {
         engine.close();
-        link::storage_error(error);
-        return;
+        return Err(error);
     }
-    if let Some(previous) = live() {
-        previous.keep();
+    if let Some(previous) = previous {
         previous.engine.close();
         previous.owner.dispose();
     }
     link::set_open(Some(&computer.id()));
     let id = computer.id();
     // Drawn until the computer is known: what it showed last.
-    let seen = link::seen(&id);
+    let seen = prior_view.or_else(|| link::seen(&id));
     // The phone's terminals before it stopped are still its own.
     engine.adopt(seen.iter().flat_map(|s| s.started.clone()));
     let mut stale = seen.map(|s| s.view);
     // Opened again where it was: the space it showed last, unless told.
     let at = AT.with(|a| a.take()).or_else(|| stale.as_ref()?.spaces.iter().find(|s| s.active).map(|s| s.id.clone()));
     // On a space before, it opens on its workspace; else on the home page.
-    let reopened = at.is_some();
+    let reopened = if replacing.is_some() {
+        crate::nav::routes().with_untracked(|r| r.0.contains(&crate::nav::Route::Workspace))
+    } else { at.is_some() };
     let drawn = move |stale: &Option<View>, fresh: Arc<View>| match stale {
         Some(old) => Arc::new(View { link: fresh.link.clone(), ..old.clone() }),
         None => fresh,
@@ -192,6 +206,7 @@ pub fn open(computer: Computer, first: Option<Session>) {
     debug_assert_eq!(owner, live.owner);
     crate::nav::routes().set(crate::nav::Routes(if reopened { vec![crate::nav::Route::Workspace] } else { Vec::new() }));
     current().set(Current(Some(live)));
+    Ok(())
 }
 
 /// Leaves the computer: its engine stops once nothing holds it. The app

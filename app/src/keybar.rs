@@ -1,5 +1,5 @@
 //! The key bar's keys: which, in what order (Settings, Key bar). The
-//! terminal shows them as chosen; Hide keyboard is always last.
+//! terminal shows them as chosen, between Enter and Hide keyboard.
 
 use crate::prefs::Prefs;
 use crate::{theme, ui};
@@ -85,6 +85,7 @@ pub fn find(id: &str) -> Option<(&'static str, Does)> {
 /// What a reader says for a key that shows a sign (and the list calls it).
 pub fn spoken(shows: &'static str) -> &'static str {
     match shows {
+        "↵" => t!("Enter"),
         "←" => t!("Left"),
         "↓" => t!("Down"),
         "↑" => t!("Up"),

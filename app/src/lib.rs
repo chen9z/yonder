@@ -110,6 +110,7 @@ fn connected(live: Live) -> impl IntoElement {
 fn page(live: Live, route: Route) -> Screen {
     match route {
         Route::Workspace => nav_page().title(live.computer.name.clone()).header_visible(false).child(workspace::workspace_page(live)),
+        Route::EditConnection => connect::edit_current_page(live),
         Route::Settings => settings::settings_page(live),
         Route::KeyBar => keybar::keybar_page(),
         Route::Commands => palette::commands_page(live),

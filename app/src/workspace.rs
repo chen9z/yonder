@@ -28,7 +28,6 @@ pub fn workspace_page(live: Live) -> impl IntoElement {
         .pr(move || safe_area().right)
         .child(header(live.clone(), space, tab, more_open))
         .child(link_banner(live.clone()))
-        .child(tab_strip(live.clone()))
         .child(
             // Above the keyboard: a terminal typed in fits what is left.
             view().flex_1().pb(ui::bottom_inset).child(
@@ -79,6 +78,23 @@ fn header(
                 .flex_1()
                 .gap(px(1.0))
                 .on_press(nav::home)
+                .on_long_press({
+                    let live = live.clone();
+                    move || {
+                        let Some(id) = tab.with(|t| t.as_ref().map(|t| t.id.clone())) else { return };
+                        let live = live.clone();
+                        spawn(async move {
+                            let picked = ui::choose(t!("Tab"), &[("rename", t!("Rename")), ("settle", t!("Put away")), ("close", t!("Close"))]).await;
+                            let command = match picked.as_deref() {
+                                Some("rename") => "tab.rename",
+                                Some("settle") => "tab.settle",
+                                Some("close") => "tab.close",
+                                _ => return,
+                            };
+                            live.run(command, serde_json::json!({ "id": id }));
+                        });
+                    }
+                })
                 .child(
                     view()
                         .flex_row()
@@ -108,6 +124,7 @@ fn header(
                     .number_of_lines(1),
                 ),
         )
+        .child(ui::icon_button("+", t!("New tab"), move || live.run("tab.new", serde_json::json!({}))))
         .child(ui::icon_button("⋯", t!("More"), move || {
             dismiss_keyboard();
             more_open.set(true)
@@ -148,89 +165,11 @@ pub fn link_banner(live: Live) -> impl IntoElement {
     })
 }
 
-/// The shown space's tabs, the shown one marked, and a new one.
-fn tab_strip(live: Live) -> impl IntoElement {
-    let world = live.view;
-    let tabs = computed(move || {
-        world.with(|v| {
-            v.active_space()
-                .map(|s| s.tabs.iter().filter(|t| !t.settled || t.active).map(|t| (t.id.clone(), if t.zoomed.is_some() { format!("{} Z", label(t)) } else { label(t) }, t.active, t.status, program(t))).collect::<Vec<_>>())
-                .unwrap_or_default()
-        })
-    });
-    let new_tab = {
-        let live = live.clone();
-        move || live.run("tab.new", serde_json::json!({}))
-    };
-    when(move || !tabs.with(Vec::is_empty), move || {
-        let live = live.clone();
-        let new_tab = new_tab.clone();
-        view()
-            .h(px(40.0))
-            .bg(theme::CHROME)
-            .border_b_1()
-            .border_color(theme::BORDER)
-            .flex_row()
-            .child(
-                scroll().horizontal().flex_1().scrollbar(false).child(
-                    view().flex_row().items_center().px(px(6.0)).gap(px(4.0)).child(each(
-                        move || tabs.get(),
-                        |t| t.0.clone(),
-                        move |t, _| {
-                            let live = live.clone();
-                            let (open, settle) = (live.clone(), live.clone());
-                            view()
-                                .flex_row()
-                                .items_center()
-                                .gap(px(6.0))
-                                .h(px(30.0))
-                                .px(px(12.0))
-                                .rounded(px(8.0))
-                                .bg(move || if t.with(|t| t.2) { theme::now(theme::SELECTED) } else { Hsla::transparent_black() })
-                                .active(|s| s.bg(theme::HOVER))
-                                .on_press(move || open.run("tab.select", serde_json::json!({ "id": t.get_untracked().0 })))
-                                .on_long_press(move || {
-                                    let (live, id) = (settle.clone(), t.get_untracked().0);
-                                    spawn(async move {
-                                        let picked = ui::choose(t!("Tab"), &[("rename", t!("Rename")), ("settle", t!("Put away")), ("close", t!("Close"))]).await;
-                                        match picked.as_deref() {
-                                            Some("rename") => live.run("tab.rename", serde_json::json!({ "id": id })),
-                                            Some("settle") => live.run("tab.settle", serde_json::json!({ "id": id })),
-                                            Some("close") => live.run("tab.close", serde_json::json!({ "id": id })),
-                                            _ => {}
-                                        }
-                                    });
-                                })
-                                .child(ui::program_icon(move || t.with(|t| t.4.clone()), 15.0))
-                                .child(
-                                    text(move || t.with(|t| t.1.clone()))
-                                        .text_size(px(14.0))
-                                        .text_color(move || if t.with(|t| t.2) { theme::now(theme::FOREGROUND) } else { theme::now(theme::MUTED) })
-                                        .number_of_lines(1)
-                                        .max_w(px(200.0)),
-                                )
-                                .child(ui::tab_status(move || t.with(|t| t.3)))
-                        },
-                    )),
-                ),
-            )
-            .child(ui::icon_button("+", t!("New tab"), new_tab.clone()).h(px(40.0)))
-    })
-}
-
 /// What a tab is called on a phone: its name if it was given one, else
 /// what its agent works on (a number says little among several).
 fn label(t: &TabView) -> String {
     let agent = || t.panes.iter().find(|p| p.status.is_some()).map(|p| ui::title(&p.title)).filter(|s| !s.is_empty());
     if t.named { t.name.clone() } else { agent().unwrap_or_else(|| t.name.clone()) }
-}
-
-/// What a tab runs, as its icon says: its agent's program, else its
-/// first pane's.
-// Adapted from herdr-app defaults/mods/tabs/main.js, Apache-2.0.
-fn program(t: &TabView) -> serde_json::Value {
-    let agent = t.panes.iter().find(|p| p.program["agent"].as_bool().unwrap_or(false));
-    agent.or(t.panes.first()).map(|p| p.program.clone()).unwrap_or_default()
 }
 
 /// The pane shown on a phone: the zoomed one, else the focused one.

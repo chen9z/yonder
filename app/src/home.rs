@@ -1,7 +1,4 @@
-//! The home page: what the desktop's sidebar shows, the spaces by machine
-//! above and the agents below. A tap on either opens the workspace on it;
-//! a long press on a space renames or closes it, its handle drags it up
-//! or down among its machine's.
+//! Home navigation between agents and spaces grouped by machine.
 
 use crate::live::{self, Live};
 use crate::nav::{self, Route};
@@ -25,35 +22,67 @@ struct Group {
 }
 
 pub fn home_page(live: Live) -> impl IntoElement {
+    let show_spaces = use_context::<crate::prefs::Prefs>().unwrap().home_spaces;
+    let world = live.view;
+    let blocked = computed(move || world.with(|v| v.agents.iter().filter(|a| a.status == "blocked").count()));
+    let spaces_live = live.clone();
     view()
         .flex_1()
         .bg(theme::CHROME)
         .pl(move || safe_area().left)
         .pr(move || safe_area().right)
-        .child(top_bar(live.clone()))
+        .child(top_bar(live.clone(), show_spaces))
         .child(workspace::link_banner(live.clone()))
+        .child(when(move || show_spaces.get(), move || {
+            scroll().flex_1().child(view().pb(px(8.0)).child(spaces(spaces_live.clone())))
+        }).otherwise(move || {
+            scroll().flex_1().child(view().pb(px(8.0)).child(agents::agents_section(live.clone(), false)))
+        }))
         .child(
-            scroll().flex_1().child(
-                view()
-                    .pb(move || px(safe_area().bottom.0 + 16.0))
-                    .child(spaces(live.clone()))
-                    .child(agents::agents_section(live, false)),
+            view().items_center().pt(px(4.0)).pb(move || ui::bottom_inset() + px(6.0)).child(
+                view().flex_row().p(px(4.0)).rounded(px(32.0)).bg(theme::RAISED)
+                    .border_1().border_color(theme::BORDER)
+                    .child(home_tab(t!("Agents"), "inbox", show_spaces, false, Some(blocked)))
+                    .child(home_tab(t!("Spaces"), "spaces", show_spaces, true, None)),
             ),
         )
 }
 
-fn top_bar(live: Live) -> impl IntoElement {
+fn home_tab(label: &'static str, icon: &'static str, show_spaces: Signal<bool>, spaces: bool, badge: Option<Memo<usize>>) -> impl IntoElement {
+    let active = move || show_spaces.get() == spaces;
+    let ink = move || if active() { theme::ACCENT } else { theme::MUTED };
+    let count = move || badge.map_or(0, |b| b.get());
+    view().w(px(88.0)).h(px(50.0)).rounded(px(25.0))
+        .items_center().justify_center().gap(px(2.0))
+        .role(AccessibilityRole::Tab)
+        .label(move || if count() == 0 { label.to_owned() } else { format!("{label} · {}", count()) })
+        .accessibility_state(move || AccessibilityState { selected: active(), ..Default::default() })
+        .bg(move || if active() { theme::now(theme::CHROME) } else { Hsla::transparent_black() })
+        .on_press(move || show_spaces.set(spaces))
+        .child(dynamic(move || ui::glyph(icon, 22.0, ink()).into_element()))
+        .child(text(label).text_size(px(11.0)).font_weight(FontWeight::MEDIUM).text_color(move || theme::now(ink())))
+        .child(when(move || count() > 0, move || {
+            view().absolute().left(px(53.0)).top(px(1.0)).rounded(px(9.0)).min_w(px(16.0)).h(px(16.0))
+                .px(px(3.0)).items_center().justify_center().bg(theme::BLOCKED).pointer_events(PointerEvents::None)
+                .child(text(move || count().to_string()).text_size(px(10.0)).text_color(theme::SOLID_FOREGROUND))
+        }))
+}
+
+fn top_bar(live: Live, show_spaces: Signal<bool>) -> impl IntoElement {
     let name = live.computer.name.clone();
+    let new_space = live.clone();
     ui::top_bar()
         .border_b(px(0.0))
         .child(text(name).flex_1().pl(px(12.0)).text_size(px(20.0)).font_weight(FontWeight::BOLD).text_color(theme::FOREGROUND).number_of_lines(1))
+        .child(when(move || show_spaces.get(), move || new_space_button(new_space.clone())).otherwise(agents::sort_button))
         .child(ui::icon_button("⋯", t!("Menu"), move || {
             let live = live.clone();
             spawn(async move {
-                let actions = [("commands", t!("Commands")), ("machine", t!("Add a machine…")), ("settings", t!("Settings")), ("leave", t!("Leave"))];
+                let actions = [("commands", t!("Commands")), ("machine", t!("Add a machine…")), ("edit", t!("Edit connection")), ("settings", t!("Settings")), ("leave", t!("Leave"))];
                 match ui::choose(&live.computer.name, &actions).await.as_deref() {
                     Some("commands") => nav::push(Route::Commands),
                     Some("machine") => nav::push(Route::AddMachine),
+                    Some("edit") => nav::push(Route::EditConnection),
                     Some("settings") => nav::push(Route::Settings),
                     Some("leave") => live::close(),
                     _ => {}
@@ -73,6 +102,16 @@ pub fn section(title: &'static str, right: impl IntoElement) -> View {
         .h(px(44.0))
         .child(text(title).flex_1().text_size(px(13.0)).font_weight(FontWeight::MEDIUM).text_color(theme::DIM))
         .child(right)
+}
+
+fn new_space_button(live: Live) -> impl IntoElement {
+    let world = live.view;
+    ui::icon_button("+", t!("New space"), move || {
+        live.run("space.new", json!({}));
+        nav::workspace();
+    })
+    .disabled(move || world.with(|v| !v.connected() || !v.machines.iter().any(|m| m.name.is_none() && m.layout == "ready")))
+    .disabled_style(|s| s.opacity(0.4))
 }
 
 fn spaces(live: Live) -> impl IntoElement {
@@ -127,16 +166,7 @@ fn spaces(live: Live) -> impl IntoElement {
         });
     });
     let several = computed(move || groups.with(|g| g.len() > 1));
-    // Spaces can be made once its own machine's layout is read.
-    let ready = computed(move || world.with(|v| v.connected() && v.machines.iter().any(|m| m.name.is_none() && m.layout == "ready")));
-    let new_space = live.clone();
     view()
-        .child(section(t!("Spaces"), ui::icon_button("+", t!("New space"), move || {
-            new_space.run("space.new", json!({}));
-            nav::workspace();
-        })
-        .disabled(move || !ready.get())
-        .disabled_style(|s| s.opacity(0.4))))
         .child(each(
             move || groups.get(),
             |g| g.name.clone(),

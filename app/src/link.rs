@@ -290,8 +290,22 @@ mod tests {
 
 /// Keeps `computer` as it is now, where it is in the list.
 pub fn update(computer: &Computer) -> Result<(), String> {
-    let all: Vec<Computer> = computers().into_iter().map(|c| if c.id() == computer.id() { computer.clone() } else { c }).collect();
-    keep(&all)
+    replace(&computer.id(), computer)
+}
+
+pub fn replace(previous: &str, computer: &Computer) -> Result<(), String> {
+    let mut all = computers();
+    let id = computer.id();
+    if previous != id && all.iter().any(|c| c.id() == id) {
+        return Err(t!("This connection is already saved.").into());
+    }
+    let entry = all.iter_mut().find(|c| c.id() == previous).ok_or(t!("Connection not found."))?;
+    *entry = computer.clone();
+    keep(&all)?;
+    if previous != id {
+        Storage::remove_item(&format!("{SEEN}{previous}"));
+    }
+    Ok(())
 }
 
 
