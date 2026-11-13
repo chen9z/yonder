@@ -612,8 +612,15 @@ fn another_session_is_a_computer_of_its_own() {
         (texts.iter().rposition(|t| *t == "first space"), texts.iter().rposition(|t| *t == "home"))
     };
     app.wait_until("both spaces listed", SLOW, |s| matches!(order(s), (Some(a), Some(b)) if a < b)).unwrap();
+    // Handles only show while reordering, from a space's menu.
+    assert_eq!(app.screen().count("label:Move first space"), Ok(0));
+    app.long_press("text:first space").unwrap();
+    pick(&mut app, "reorder");
+    app.wait_for("label:Done").unwrap();
     app.drag("label:Move first space", point(px(0.0), px(80.0))).unwrap();
     app.wait_until("the first space below the second", SLOW, |s| matches!(order(s), (Some(a), Some(b)) if a > b)).unwrap();
+    app.press("label:Done").unwrap();
+    app.wait_for("label:New space").unwrap();
 
     // Held, a space renames: home and the computer have the new name.
     app.long_press("text:home").unwrap();

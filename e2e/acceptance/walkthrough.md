@@ -76,12 +76,15 @@ it with the screenshot's name and go on.
    "Add"; a field `user@host` below. Back, then tap the space to return.
 6. Settings (in More): its rows sit on rounded cards under small headings
    (COMPUTER, TERMINAL, GENERAL, THIS PHONE'S KEY, ABOUT), each row with a
-   line icon. COMPUTER has the computer (a green dot), Edit connection,
-   Add a machine…, Commands and Leave this computer (red); GENERAL has
-   Language and Sort agents (Priority). "Fit terminals to the phone"
-   shows a switch, on. The font size − and + change the size shown; the
-   terminal's text follows when back. Put it back as it was. "Copy" under
-   the key shows a note "Copied" saying where the key goes.
+   line icon, and Leave this computer (red) alone on the last card.
+   COMPUTER has the computer (a green dot, "herdr-core" and its version),
+   Edit connection, Add a machine… and Commands; GENERAL has Language and
+   Sort agents (Priority). "Fit terminals to the phone" shows a switch,
+   on, and small words under the card say what it does. The font size −
+   and + change the size shown; the terminal's text follows when back.
+   Put it back as it was. The key is one row, "Copy the public key" over
+   `ssh-ed25519 …` and its last letters; pressed, a note "Copied" says
+   where the key goes.
 6a. Settings → Key bar: at the bottom, under YOUR OWN, a field ("Words it
    types, like /compact"), a + and "Then press Enter", on. Type
    `echo own-key` in the field and press + (once, with the keyboard

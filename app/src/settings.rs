@@ -18,7 +18,7 @@ pub fn settings_page(live: Live) -> nsh_core::element::Screen {
     let about = live.clone();
     let core = computed(move || {
         world.with(|v| match &v.link {
-            Link::Connected { core, version } => format!("{core} · herdr-core {version}"),
+            Link::Connected { version, .. } => format!("herdr-core {version}"),
             Link::Connecting => t!("Connecting…").into(),
             Link::Lost { error } => link::Lost::of(error).said(&live.computer.host),
         })
@@ -42,7 +42,6 @@ pub fn settings_page(live: Live) -> nsh_core::element::Screen {
                     action("plug", t!("Edit connection"), Act::Go, || nav::push(Route::EditConnection)),
                     action("server", t!("Add a machine…"), Act::Go, || nav::push(Route::AddMachine)),
                     action("command", t!("Commands"), Act::Go, || nav::push(Route::Commands)),
-                    action("log-out", t!("Leave this computer"), Act::Lose, live::close),
                 ]))
                 .child(ui::card_heading(t!("TERMINAL")))
                 .child(ui::card(vec![
@@ -57,10 +56,10 @@ pub fn settings_page(live: Live) -> nsh_core::element::Screen {
                             .child(view().w(px(1.0)).h(px(16.0)).bg(theme::BORDER))
                             .child(step("plus", t!("Larger text"), move || prefs.font.update(|f| *f = (*f + 1.0).min(crate::terminal::FONT.1)))),
                     ),
-                    setting("smartphone", || t!("Fit terminals to the phone").into(), || t!("Else they keep the desktop's size, drawn smaller").into())
-                        .child(ui::toggle(prefs.fit, t!("Fit terminals to the phone"))),
+                    setting("smartphone", || t!("Fit terminals to the phone").into(), String::new).child(ui::toggle(prefs.fit, t!("Fit terminals to the phone"))),
                     leads(setting("keyboard", || t!("Key bar").into(), move || t!("{} keys", prefs.keys.with(Vec::len))), || nav::push(Route::KeyBar)),
                 ]))
+                .child(ui::card_footer(t!("Fitted, the terminal you look at takes the phone's rows and columns; else it keeps the desktop's size, drawn smaller.")))
                 .child(ui::card_heading(t!("GENERAL")))
                 .child(ui::card(vec![
                     leads(
@@ -108,20 +107,11 @@ pub fn settings_page(live: Live) -> nsh_core::element::Screen {
                     ),
                 ]))
                 .child(ui::card_heading(t!("THIS PHONE'S KEY")))
-                .child(ui::card(vec![
-                    view().px(px(16.0)).py(px(14.0)).child(
-                        text(public.clone())
-                            .font_family(theme::MONO)
-                            .text_size(px(12.0))
-                            .line_height(px(18.0))
-                            .text_color(theme::MUTED)
-                            .selectable(true),
-                    ),
-                    action("copy", t!("Copy"), Act::Do, move || {
-                        set_clipboard(public.clone());
-                        copied.say(herdc_engine::Note::info(t!("Copied"), t!("Add it to ~/.ssh/authorized_keys on the computer.")));
-                    }),
-                ]))
+                .child(ui::card(vec![action_saying("copy", t!("Copy the public key"), short_key(&public), Act::Do, move || {
+                    set_clipboard(public.clone());
+                    copied.say(herdc_engine::Note::info(t!("Copied"), t!("Add it to ~/.ssh/authorized_keys on the computer.")));
+                })]))
+                .child(ui::card_footer(t!("On a computer, in ~/.ssh/authorized_keys, it logs the phone in without the password.")))
                 .child(ui::card_heading(t!("ABOUT")))
                 .child(ui::card(vec![
                     setting("info", || "Yonder".into(), version),
@@ -129,7 +119,10 @@ pub fn settings_page(live: Live) -> nsh_core::element::Screen {
                         set_clipboard(diagnostics(&about, prefs));
                         about.say(herdc_engine::Note::info(t!("Copied"), t!("Paste it where you tell what went wrong.")));
                     }),
-                ])),
+                ]))
+                // Leaving, last and alone, as losing something goes.
+                .child(view().h(px(28.0)))
+                .child(ui::card(vec![action("log-out", t!("Leave this computer"), Act::Lose, live::close)])),
         ),
     )
 }
@@ -142,6 +135,11 @@ fn leads(row: View, press: impl Fn() + 'static) -> View {
 /// A row that does something: its glyph and words in the color of what
 /// it does, a chevron where it leads to a page.
 fn action(icon: &'static str, title: &'static str, act: Act, press: impl Fn() + 'static) -> View {
+    action_saying(icon, title, String::new(), act, press)
+}
+
+/// An action's row with what it works on under its words, when `said`.
+fn action_saying(icon: &'static str, title: &'static str, said: String, act: Act, press: impl Fn() + 'static) -> View {
     let ink = match act {
         Act::Go => theme::FOREGROUND,
         Act::Do => theme::ACCENT,
@@ -158,8 +156,24 @@ fn action(icon: &'static str, title: &'static str, act: Act, press: impl Fn() + 
         .label(title)
         .on_press(press)
         .child(ui::glyph(icon, 20.0, if act == Act::Go { theme::MUTED } else { ink }))
-        .child(text(title).flex_1().text_size(px(15.0)).text_color(ink).number_of_lines(1))
+        .child(
+            view()
+                .flex_1()
+                .gap(px(2.0))
+                .child(text(title).text_size(px(15.0)).text_color(ink).number_of_lines(1))
+                .children((!said.is_empty()).then(|| text(said).text_size(px(12.0)).text_color(theme::MUTED).number_of_lines(1))),
+        )
         .children((act == Act::Go).then(|| ui::glyph("chevron-right", 16.0, theme::DIM)))
+}
+
+/// The phone's key, short: its kind and its end (`ssh-ed25519 …/v/Nlz`);
+/// words that aren't a key (why it couldn't be loaded) as they are.
+fn short_key(public: &str) -> String {
+    let mut parts = public.split_whitespace();
+    match (parts.next(), parts.next()) {
+        (Some(kind), Some(key)) if kind.starts_with("ssh-") && key.len() > 8 => format!("{kind} …{}", &key[key.len() - 8..]),
+        _ => public.to_owned(),
+    }
 }
 
 /// The app's release build number and source revision (`apk.sh`).
@@ -208,8 +222,8 @@ fn step(icon: &'static str, label: &'static str, press: impl Fn() + 'static) -> 
         .child(ui::glyph(icon, 16.0, theme::FOREGROUND))
 }
 
-/// A setting's row: its glyph, what it is, what it is now, and its
-/// controls after.
+/// A setting's row: its glyph, what it is, what it is now (when it says
+/// something), and its controls after.
 fn setting(icon: &'static str, title: impl Fn() -> String + 'static, now: impl Fn() -> String + 'static) -> View {
     view()
         .flex_row()
@@ -224,6 +238,9 @@ fn setting(icon: &'static str, title: impl Fn() -> String + 'static, now: impl F
                 .flex_1()
                 .gap(px(2.0))
                 .child(text(title).text_size(px(15.0)).text_color(theme::FOREGROUND))
-                .child(text(now).text_size(px(12.0)).text_color(theme::MUTED)),
+                .child(dynamic(move || {
+                    let now = now();
+                    if now.is_empty() { view().into_element() } else { text(now).text_size(px(12.0)).text_color(theme::MUTED).into_element() }
+                })),
         )
 }

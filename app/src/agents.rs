@@ -34,6 +34,9 @@ fn section(rank: u8) -> (&'static str, Option<&'static str>) {
     }
 }
 
+/// Idle agents shown before Show all, by priority.
+const IDLE_SHOWN: usize = 5;
+
 /// The agents with rows of their own: a kept sub-agent is under its
 /// agent instead, unless it's pinned.
 pub fn listed(agents: &[AgentView], terminals: &[Value]) -> Vec<AgentView> {
@@ -49,6 +52,8 @@ enum Line {
     Heading { id: String, label: String, word: Option<&'static str>, status: Option<&'static str>, count: usize, open: bool, top: Option<&'static str>, priority: bool },
     Agent { agent: Box<AgentView>, name: String, more: Option<String>, machine: Option<String>, subs: usize, open: bool, compact: bool, edge: Edge },
     Sub { sub: Sub, last: bool, compact: bool, edge: Edge },
+    /// Under the first idle ones: Show all `count`, or (`open`) Show less.
+    More { count: usize, open: bool, edge: Edge },
 }
 
 /// Where a row is on its group's card: its first, its last (or both).
@@ -64,6 +69,7 @@ impl Line {
             Line::Heading { id, .. } => format!("h {id}"),
             Line::Agent { agent, .. } => format!("a {}", agent.address),
             Line::Sub { sub, .. } => format!("s {}", sub.address),
+            Line::More { .. } => "more".into(),
         }
     }
 }
@@ -71,10 +77,11 @@ impl Line {
 /// The list as the desktop's agents mod orders it: pinned first, then by
 /// priority (an agent ranks as its most urgent sub-agent, the latest
 /// change first) under section headings, or grouped by space. `folded`:
-/// the groups and agents folded; `held`: the agent shown and the rank it
-/// had, so a done one looked at stays with Done until left.
+/// the groups and agents folded; `all`: every idle one, else the first
+/// few; `held`: the agent shown and the rank it had, so a done one looked
+/// at stays with Done until left.
 // Adapted from herdr-app defaults/mods/agents/main.js, Apache-2.0.
-fn lines(v: &herdc_engine::View, grouped: bool, folded: &[String], held: &mut Option<(String, u8)>) -> Vec<Line> {
+fn lines(v: &herdc_engine::View, grouped: bool, folded: &[String], all: bool, held: &mut Option<(String, u8)>) -> Vec<Line> {
     let listed = listed(&v.agents, &v.terminals);
     let shown = v.agents.iter().find(|a| a.focused);
     let same = shown.zip(held.as_ref()).is_some_and(|(s, h)| s.address == h.0);
@@ -117,7 +124,10 @@ fn lines(v: &herdc_engine::View, grouped: bool, folded: &[String], held: &mut Op
         if !open {
             continue;
         }
-        for a in members {
+        // Many idle ones: the first few, and the way to the rest.
+        let count = members.len();
+        let more = id_is_idle(&out, grouped) && count > IDLE_SHOWN + 1;
+        for a in members.into_iter().take(if more && !all { IDLE_SHOWN } else { usize::MAX }) {
             let (name, more) = parts(a, v, &listed, !grouped || a.pinned);
             let subs = &kids[a.address.as_str()];
             let open = !folded.contains(&a.address);
@@ -131,16 +141,24 @@ fn lines(v: &herdc_engine::View, grouped: bool, folded: &[String], held: &mut Op
                 }
             }
         }
+        if more {
+            out.push(Line::More { count, open: all, edge: Edge::default() });
+        }
     }
     // A group's rows make one card: under its heading, until the next.
     let heading = |l: Option<&Line>| l.is_none_or(|l| matches!(l, Line::Heading { .. }));
     for at in 0..out.len() {
         let (top, bottom) = (heading(at.checked_sub(1).and_then(|b| out.get(b))), heading(out.get(at + 1)));
-        if let Line::Agent { edge, .. } | Line::Sub { edge, .. } = &mut out[at] {
+        if let Line::Agent { edge, .. } | Line::Sub { edge, .. } | Line::More { edge, .. } = &mut out[at] {
             *edge = Edge { top, bottom };
         }
     }
     out
+}
+
+/// Whether the group just headed in `out` is Idle, by priority.
+fn id_is_idle(out: &[Line], grouped: bool) -> bool {
+    !grouped && matches!(out.last(), Some(Line::Heading { id, .. }) if id == "sec-1")
 }
 
 /// A sub-agent: its depth under the agent, address, name and status word.
@@ -199,6 +217,8 @@ fn row_detail(a: &AgentView, view: &herdc_engine::View, listed: &[AgentView]) ->
     let program_name = program["name"].as_str().filter(|s| !s.is_empty()).or(app.as_deref()).unwrap_or_default();
     let title = ui::title(title);
     let live = title.trim_start_matches(|c: char| !c.is_alphanumeric()).trim();
+    // Pi's own title, `π - <its folder>`, says no more than Pi.
+    let live = if title.starts_with("π - ") { "" } else { live };
     let telling = !live.is_empty() && live != program_name && !title.starts_with(['~', '/']) && !live.contains('@') && !live.contains(":\\") && !program["key"].as_str().is_some_and(|k| live.eq_ignore_ascii_case(k));
     let named = tab.is_some_and(|t| t.named) && !many;
     if (!named || a.tab_name == program_name) && telling { live.into() } else if live.is_empty() && !named && !program_name.is_empty() { program_name.into() } else { a.tab_name.clone() }
@@ -268,11 +288,12 @@ pub fn agents_section(live: Live, inline: bool) -> impl IntoElement {
     let grouped = use_context::<crate::prefs::Prefs>().unwrap().grouped;
     let folded = signal(Vec::<String>::new());
     let held = stored(None::<(String, u8)>);
+    let all = signal(false);
     let now = signal(now_ms());
     set_interval(std::time::Duration::from_secs(30), move || now.set(now_ms()));
     let lines = computed(move || {
-        let (grouped, folded) = (grouped.get(), folded.get());
-        world.with(|v| held.with(|held| lines(v, grouped, &folded, held)))
+        let (grouped, folded, all) = (grouped.get(), folded.get(), all.get());
+        world.with(|v| held.with(|held| lines(v, grouped, &folded, all, held)))
     });
     let fold = move |id: String| folded.update(|set| if set.contains(&id) { set.retain(|k| k != &id) } else { set.push(id) });
     view()
@@ -288,6 +309,7 @@ pub fn agents_section(live: Live, inline: bool) -> impl IntoElement {
             Line::Heading { .. } => heading(l, fold).into_element(),
             Line::Agent { .. } => agent_row(live.clone(), l, now, inline, fold).into_element(),
             Line::Sub { .. } => sub_row(live.clone(), l, inline).into_element(),
+            Line::More { .. } => more_row(l, all).into_element(),
         }))
         .child(view().h(px(if inline { 8.0 } else { 0.0 })))
 }
@@ -457,6 +479,27 @@ fn agent_row(live: Live, l: ReadSignal<Line>, now: Signal<u64>, inline: bool, fo
         )
 }
 
+/// Show all the idle ones, or Show less, in line with the rows' words.
+fn more_row(l: ReadSignal<Line>, all: Signal<bool>) -> impl IntoElement {
+    let more = computed(move || match l.get() {
+        Line::More { count, open, edge } => (count, open, edge),
+        _ => Default::default(),
+    });
+    let said = move || more.with(|m| if m.1 { t!("Show less").to_owned() } else { t!("Show all {}", m.0) });
+    on_card(move || more.with(|m| m.2), true).child(
+        view()
+            .flex_row()
+            .items_center()
+            .pl(px(46.0))
+            .h(px(44.0))
+            .active(|s| s.bg(theme::HOVER))
+            .role(AccessibilityRole::Button)
+            .label(said)
+            .on_press(move || all.update(|a| *a = !*a))
+            .child(text(said).text_size(px(14.0)).text_color(theme::ACCENT)),
+    )
+}
+
 /// A sub-agent under its agent, on the tree's lines: a tap shows its
 /// pane, or peeks at it.
 fn sub_row(live: Live, l: ReadSignal<Line>, inline: bool) -> impl IntoElement {
@@ -601,23 +644,46 @@ mod tests {
         (a.space_name, a.title, a.program) = ("nova".into(), "π - nova".into(), json!({"name": "Pi"}));
         let mut b = a.clone();
         (b.address, b.title) = ("t2".into(), "Fix the build | nova".into());
-        let view = herdc_engine::View { agents: vec![a, b], ..Default::default() };
+        let mut c = a.clone();
+        (c.address, c.space, c.space_name, c.title) = ("t3".into(), "s2".into(), "graph".into(), "π - yonder".into());
+        let view = herdc_engine::View { agents: vec![a, b, c], ..Default::default() };
         assert_eq!(super::label(&view.agents[0], &view), "nova · Pi");
         assert_eq!(super::label(&view.agents[1], &view), "nova · Fix the build");
+        // Pi in another folder: still Pi.
+        assert_eq!(super::label(&view.agents[2], &view), "graph · Pi");
     }
 
     /// The list's lines, shortened: headings as `# label count`, agents
     /// by address, sub-agents as `- address`.
     fn shown(view: &herdc_engine::View, grouped: bool, folded: &[&str], held: &mut Option<(String, u8)>) -> Vec<String> {
         let folded: Vec<String> = folded.iter().map(|s| s.to_string()).collect();
-        super::lines(view, grouped, &folded, held)
+        super::lines(view, grouped, &folded, false, held)
             .into_iter()
             .map(|l| match l {
                 super::Line::Heading { label, word, count, .. } => format!("# {} {count}", word.map_or(label, str::to_owned)),
                 super::Line::Agent { agent, .. } => agent.address.clone(),
                 super::Line::Sub { sub, .. } => format!("- {}", sub.address),
+                super::Line::More { count, open, .. } => format!("+ {count} {open}"),
             })
             .collect()
+    }
+
+    #[test]
+    fn many_idle_agents_show_the_first_few_then_all() {
+        let idle = |n: u64| at(&format!("t{n}"), "A", "idle", n, n);
+        let view = herdc_engine::View { agents: (1..=8).map(idle).collect(), ..Default::default() };
+        let addresses = |all: bool| super::lines(&view, false, &[], all, &mut None).into_iter().map(|l| match l {
+            super::Line::Agent { agent, .. } => agent.address.clone(),
+            super::Line::More { count, open, edge } => format!("+ {count} {open} {}", edge.bottom),
+            _ => "#".into(),
+        }).collect::<Vec<_>>();
+        assert_eq!(addresses(false), ["#", "t8", "t7", "t6", "t5", "t4", "+ 8 false true"]);
+        assert_eq!(addresses(true).len(), 10);
+        // One past the few shows too; grouped by space, all show.
+        let view = herdc_engine::View { agents: (1..=6).map(idle).collect(), ..Default::default() };
+        assert_eq!(super::lines(&view, false, &[], false, &mut None).len(), 7);
+        let view = herdc_engine::View { agents: (1..=8).map(idle).collect(), ..Default::default() };
+        assert_eq!(super::lines(&view, true, &[], false, &mut None).len(), 9);
     }
 
     fn at(address: &str, space: &str, status: &'static str, since: u64, seq: u64) -> herdc_engine::AgentView {

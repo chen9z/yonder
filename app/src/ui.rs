@@ -190,9 +190,9 @@ pub fn status_mark(status: impl Fn() -> Option<&'static str> + 'static, compact:
             .justify_center()
             .child(text(t!("Needs you")).text_size(px(10.5)).font_weight(FontWeight::SEMIBOLD).text_color(theme::BLOCKED))
             .into_element(),
-        (Some("idle"), _) => view().w(px(7.0)).h(px(7.0)).mx(px(3.0)).rounded(px(3.5)).border(px(1.5)).border_color(theme::IDLE).into_element(),
+        // Idle is the usual: nothing to say, as on the tabs and spaces.
+        (Some("idle") | None, _) => view().w(px(7.0)).h(px(7.0)).mx(px(3.0)).into_element(),
         (Some(word), _) => view().w(px(7.0)).h(px(7.0)).mx(px(3.0)).rounded(px(3.5)).bg(theme::status(word)).into_element(),
-        (None, _) => view().w(px(7.0)).h(px(7.0)).mx(px(3.0)).into_element(),
     })
 }
 
@@ -304,6 +304,11 @@ pub fn row(title: impl Fn() -> String + 'static, detail: impl Fn() -> String + '
                 .child(text(title).text_size(px(16.0)).text_color(theme::FOREGROUND).number_of_lines(1))
                 .child(text(detail).text_size(px(13.0)).text_color(theme::MUTED).number_of_lines(1)),
         )
+}
+
+/// What a card's rows need said, under it in small words.
+pub fn card_footer(said: &'static str) -> View {
+    view().px(px(32.0)).pt(px(8.0)).child(text(said).text_size(px(12.0)).line_height(px(17.0)).text_color(theme::DIM))
 }
 
 /// A card's heading, in line with its rows' words.

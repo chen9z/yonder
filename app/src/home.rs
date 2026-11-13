@@ -33,15 +33,18 @@ pub fn home_page(live: Live) -> impl IntoElement {
         })
     });
     let spaces_live = live.clone();
+    // Reordering the spaces: their handles show, and Done ends it.
+    let reorder = signal(false);
+    effect(move || if !show_spaces.get() { reorder.set(false) });
     view()
         .flex_1()
         .bg(theme::CHROME)
         .pl(move || safe_area().left)
         .pr(move || safe_area().right)
-        .child(top_bar(live.clone(), show_spaces))
+        .child(top_bar(live.clone(), show_spaces, reorder))
         .child(workspace::link_banner(live.clone()))
         .child(when(move || show_spaces.get(), move || {
-            scroll().flex_1().child(view().pb(px(8.0)).child(spaces(spaces_live.clone())))
+            scroll().flex_1().child(view().pb(px(8.0)).child(spaces(spaces_live.clone(), reorder)))
         }).otherwise(move || {
             scroll().flex_1().child(view().pb(px(8.0)).child(agents::agents_section(live.clone(), false)))
         }))
@@ -76,17 +79,30 @@ fn home_tab(label: &'static str, icon: &'static str, show_spaces: Signal<bool>, 
         }))
 }
 
-fn top_bar(live: Live, show_spaces: Signal<bool>) -> impl IntoElement {
+fn top_bar(live: Live, show_spaces: Signal<bool>, reorder: Signal<bool>) -> impl IntoElement {
     let name = live.computer.name.clone();
     let new_space = live.clone();
     ui::top_bar()
         .border_b(px(0.0))
         .child(text(name).flex_1().pl(px(12.0)).text_size(px(20.0)).font_weight(FontWeight::BOLD).text_color(theme::FOREGROUND).number_of_lines(1))
-        .child(ui::icon_button("search", t!("Jump to a terminal"), || nav::push(Route::Search)))
+        .child(when(move || !reorder.get(), || ui::icon_button("search", t!("Jump to a terminal"), || nav::push(Route::Search))))
         // New space where the spaces are; the rest (the agents' sort, the
         // computer's connection, machines, commands, leaving) in Settings.
-        .child(when(move || show_spaces.get(), move || new_space_button(new_space.clone())))
-        .child(ui::icon_button("settings", t!("Settings"), || nav::push(Route::Settings)))
+        .child(when(move || show_spaces.get() && !reorder.get(), move || new_space_button(new_space.clone())))
+        .child(when(move || !reorder.get(), || ui::icon_button("settings", t!("Settings"), || nav::push(Route::Settings))))
+        .child(when(move || reorder.get(), move || {
+            view()
+                .px(px(14.0))
+                .h(px(40.0))
+                .rounded(px(20.0))
+                .items_center()
+                .justify_center()
+                .active(|s| s.bg(theme::HOVER))
+                .role(AccessibilityRole::Button)
+                .label(t!("Done"))
+                .on_press(move || reorder.set(false))
+                .child(text(t!("Done")).text_size(px(15.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::ACCENT))
+        }))
 }
 
 /// A section's heading, with what it offers on the right.
@@ -112,7 +128,7 @@ fn new_space_button(live: Live) -> impl IntoElement {
     .disabled_style(|s| s.opacity(0.4))
 }
 
-fn spaces(live: Live) -> impl IntoElement {
+fn spaces(live: Live, reorder: Signal<bool>) -> impl IntoElement {
     let world = live.view;
     let prefs = use_context::<crate::prefs::Prefs>().unwrap();
     let (folded, colors) = (prefs.folded, prefs.colors);
@@ -182,7 +198,7 @@ fn spaces(live: Live) -> impl IntoElement {
                         |s| s.id.clone(),
                         move |s, _| {
                             let key = format!("{computer}\u{0}{}", s.with_untracked(|s| s.id.clone()));
-                            space_row(live.clone(), s, g, drag, move || colors.with(|c| c.get(&key).copied().unwrap_or(0)))
+                            space_row(live.clone(), s, g, drag, reorder, move || colors.with(|c| c.get(&key).copied().unwrap_or(0)))
                         },
                     ))
                     // A machine without spaces: loading them, else the way to make one.
@@ -265,8 +281,10 @@ fn machine_heading(live: Live, g: ReadSignal<Group>, folded: Signal<Vec<String>>
         }))
 }
 
-fn space_row(live: Live, s: ReadSignal<SpaceView>, g: ReadSignal<Group>, drag: Signal<Option<(String, isize)>>, color: impl Fn() -> usize + 'static) -> impl IntoElement {
-    let (press, hold) = (live.clone(), live.clone());
+/// A space's row: a tap opens it, a long press its menu (where reordering
+/// starts: then each row has a handle to drag).
+fn space_row(live: Live, s: ReadSignal<SpaceView>, g: ReadSignal<Group>, drag: Signal<Option<(String, isize)>>, reorder: Signal<bool>, color: impl Fn() -> usize + 'static) -> impl IntoElement {
+    let (press, hold, mover) = (live.clone(), live.clone(), live);
     // How far its handle is dragged, and a row's height to count rows by.
     let dragged = signal(0.0f32);
     let tall = stored(48.0f32);
@@ -294,6 +312,7 @@ fn space_row(live: Live, s: ReadSignal<SpaceView>, g: ReadSignal<Group>, drag: S
         .gap(px(10.0))
         .mx(px(8.0))
         .pl(px(10.0))
+        .pr(move || px(if reorder.get() { 0.0 } else { 12.0 }))
         .h(px(48.0))
         .rounded(px(10.0))
         .bg(move || if dragged.get() != 0.0 { theme::now(theme::HOVER) } else if s.with(|s| s.active) { theme::now(theme::SELECTED) } else { Hsla::transparent_black() })
@@ -329,6 +348,9 @@ fn space_row(live: Live, s: ReadSignal<SpaceView>, g: ReadSignal<Group>, drag: S
                     }
                 };
                 let mut items = vec![Item::glyph("rename", t!("Rename"), "pencil"), Item::glyph("tab", t!("New tab here"), "terminal")];
+                if g.with_untracked(|g| g.spaces.len() > 1) {
+                    items.push(Item::glyph("reorder", t!("Reorder spaces"), "grip-vertical"));
+                }
                 let (files, changes) = (Item::glyph("files", t!("Files"), "folder"), Item::glyph("changes", t!("Changes"), "file-diff"));
                 match known {
                     Some(Some(linked)) => {
@@ -348,6 +370,7 @@ fn space_row(live: Live, s: ReadSignal<SpaceView>, g: ReadSignal<Group>, drag: S
                         live.run("tab.new", json!({ "space": id }));
                         nav::workspace();
                     }
+                    Some("reorder") => reorder.set(true),
                     Some("new") => worktrees::new_worktree(live, place).await,
                     Some("open") => nav::push(Route::Worktrees(place)),
                     Some("remove") => worktrees::remove_worktree(live, id, place).await,
@@ -362,7 +385,8 @@ fn space_row(live: Live, s: ReadSignal<SpaceView>, g: ReadSignal<Group>, drag: S
         .child(text(move || s.with(|s| s.name.clone())).flex_shrink(0.0).max_w(percentage(0.55)).text_size(px(15.0)).text_color(theme::FOREGROUND).number_of_lines(1))
         .child(text(move || s.with(|s| branch(s).unwrap_or_default().to_owned())).flex_1().text_right().text_size(px(12.0)).text_color(theme::DIM).number_of_lines(1))
         .child(ui::tab_status(move || s.with(|s| s.status)))
-        .child(
+        .child(when(move || reorder.get(), move || {
+            let live = mover.clone();
             view()
                 .w(px(40.0))
                 .h_full()
@@ -396,8 +420,8 @@ fn space_row(live: Live, s: ReadSignal<SpaceView>, g: ReadSignal<Group>, drag: S
                     if let Some(index) = to {
                         live.run("space.move", json!({ "id": id, "index": index }));
                     }
-                }),
-        )
+                })
+        }))
 }
 
 /// Only a branch that adds something to the space's name.
