@@ -491,7 +491,10 @@ fn one_pane(live: Live, tab: Memo<Option<TabView>>) -> impl IntoElement {
         tab.with(|t| {
             t.as_ref()
                 .filter(|t| t.panes.len() > 1 && t.zoomed.is_none())
-                .map(|t| t.panes.iter().map(|p| Chip { pane: p.pane.clone(), title: ui::title(&p.title), focused: p.focused, status: p.status, program: p.program.clone() }).collect::<Vec<_>>())
+                .map(|t| {
+                    let titles = chip_titles(t.panes.iter().map(|p| p.title.as_str()));
+                    t.panes.iter().zip(titles).map(|(p, title)| Chip { pane: p.pane.clone(), title, focused: p.focused, status: p.status, program: p.program.clone() }).collect::<Vec<_>>()
+                })
                 .unwrap_or_default()
         })
     });
@@ -507,6 +510,23 @@ fn one_pane(live: Live, tab: Memo<Option<TabView>>) -> impl IntoElement {
             Some((_, Shows::Mod(name))) => mod_pane(live.clone(), name).into_element(),
             _ => view().into_element(),
         }))
+}
+
+/// The strip's names of panes titled `raw`: a shell's `me@host:~/a/b` as
+/// its folder (`b`), and a name more than one has numbered by where it is.
+fn chip_titles<'a>(raw: impl Iterator<Item = &'a str>) -> Vec<String> {
+    let short: Vec<String> = raw
+        .map(|raw| {
+            let title = ui::title(raw);
+            match title.split_once(':') {
+                Some((who, path)) if who.contains('@') && !who.contains(' ') && !path.is_empty() => {
+                    path.trim_end_matches('/').rsplit('/').next().filter(|f| !f.is_empty()).unwrap_or(path).to_owned()
+                }
+                _ => title,
+            }
+        })
+        .collect();
+    short.iter().enumerate().map(|(at, t)| if short.iter().filter(|o| *o == t).count() > 1 { format!("{t} {}", at + 1) } else { t.clone() }).collect()
 }
 
 /// A pane as the strip names it.
@@ -543,7 +563,7 @@ fn pane_strip(live: Live, panes: Memo<Vec<Chip>>) -> impl IntoElement {
                     .accessibility_state(move || AccessibilityState { selected: p.with(|p| p.focused), ..Default::default() })
                     .on_press(move || live.run("pane.focus", serde_json::json!({ "pane": p.get_untracked().pane })))
                     .child(ui::program_icon(move || p.with(|p| p.program.clone()), 14.0))
-                    .child(text(move || p.with(|p| p.title.clone())).text_size(px(13.0)).text_color(theme::FOREGROUND).number_of_lines(1).max_w(px(160.0)))
+                    .child(text(move || p.with(|p| p.title.clone())).text_size(px(13.0)).text_color(theme::FOREGROUND).number_of_lines(1).max_w(px(120.0)))
                     .child(ui::tab_status(move || p.with(|p| p.status)))
             },
         )),
@@ -829,4 +849,15 @@ fn note(live: Live, n: ReadSignal<(u64, herdc_engine::Note)>) -> impl IntoElemen
                     .mr(px(-8.0))
                 }),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn panes_on_the_strip_are_told_apart() {
+        let named = |raw: &[&str]| super::chip_titles(raw.iter().copied());
+        assert_eq!(named(&["me@pc:~/workspace/nova", "me@pc:~/workspace/nova"]), ["nova 1", "nova 2"]);
+        assert_eq!(named(&["me@pc:~", "me@pc:/", "Fix the build"]), ["~", "/", "Fix the build"]);
+        assert_eq!(named(&["see: this", "me@pc:~/a/b/"]), ["see: this", "b"]);
+    }
 }

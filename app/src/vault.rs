@@ -80,19 +80,9 @@ mod aside {
 
     const FILE: &str = "herdc.vault";
 
-    /// The app's `no_backup` folder: `/data/user/<user>/<package>/no_backup`.
-    #[cfg(target_os = "android")]
+    /// The app's `no_backup` folder.
     pub fn folder() -> Option<PathBuf> {
-        let line = std::fs::read("/proc/self/cmdline").ok()?;
-        let package = String::from_utf8(line.split(|b| *b == 0).next()?.to_vec()).ok()?;
-        let package = package.split(':').next()?;
-        let user = unsafe { libc::getuid() } / 100_000;
-        Some(PathBuf::from(format!("/data/user/{user}/{package}/no_backup")))
-    }
-
-    #[cfg(not(target_os = "android"))]
-    pub fn folder() -> Option<PathBuf> {
-        None
+        crate::app_folder("no_backup")
     }
 
     fn key(dir: &Path) -> Result<LessSafeKey, String> {

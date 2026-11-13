@@ -33,6 +33,23 @@ use nsh_base::{nav_page, nav_stack};
 use nsh_core::element::Screen;
 use nsh_core::prelude::*;
 
+/// A folder of the app's own on the phone, `under` its data folder:
+/// `/data/user/<user>/<package>/<under>` (`files/views`, `no_backup`).
+#[cfg(target_os = "android")]
+pub(crate) fn app_folder(under: &str) -> Option<std::path::PathBuf> {
+    let line = std::fs::read("/proc/self/cmdline").ok()?;
+    let package = String::from_utf8(line.split(|b| *b == 0).next()?.to_vec()).ok()?;
+    let package = package.split(':').next()?;
+    let user = unsafe { libc::getuid() } / 100_000;
+    Some(std::path::PathBuf::from(format!("/data/user/{user}/{package}/{under}")))
+}
+
+/// Off a phone (the tests), none.
+#[cfg(not(target_os = "android"))]
+pub(crate) fn app_folder(_under: &str) -> Option<std::path::PathBuf> {
+    None
+}
+
 /// The app's UI set (`nsh.json` `"rust"`).
 #[native_module("app/native")]
 fn native(registry: &mut Registry) {

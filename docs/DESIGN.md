@@ -45,7 +45,7 @@ core 能力和内置 mods 的功能全部复刻，界面按手机重新设计；
 |---|---|
 | spaces mod（侧栏、按机器分组、拖动排序） | 首页：按机器分组的 space 列表，状态点，长按重命名/关闭/移动 |
 | tabs mod / terminals-bar | 顶栏下的 tab 条（空间有两个以上 tab，或有收起的 tab 时）：状态、名字，点一下切换，长按重命名 / 收起 / 关闭；最后是“收起 N 个”，点开选一个放回来（`tab.select` 会取消收起）；点顶栏标题切换空间 |
-| 分屏树（row/column/stack） | 平板：真实分屏；手机：一次一个 pane + pane 切换条，缩放即全屏 |
+| 分屏树（row/column/stack） | 平板：真实分屏；手机：一次一个 pane + pane 切换条（和 tab 一样高，描边不填色以区分两条；shell 的 `me@host:~/a/b` 标题只写 `b`，重名的按位置加序号），缩放即全屏 |
 | agents mod（working/blocked/done/idle，子 agent） | Agents 页：跨 space 列表，排序同桌面，不止一组时按 置顶 / 等你处理 / 完成 / 工作中 / 空闲 加小标题；点进 peek。blocked 的 agent 直接显示它问的最后几行和菜单选项（Codex / Claude Code 的编号菜单），点选项即发对应按键；“回复…”先按 Esc 离开菜单再发文字（菜单上直接回车会选中高亮的“是”）。工作区里，别处的 agent 等你时弹出同样的问题卡片，一直留到它不再等（正看着它时不显示），可点 ✕ 先放下 |
 | peek（无 pane 的 worker） | Agents 页里子 agent 挂在父 agent 下；无 pane 的点开是 Peek 页，可 keep 成 tab 或跳到所在 pane |
 | toast / 声音提醒 | 应用内 toast（blocked / done）。系统通知要等 NSH 发布通知 API（0.4.0 没有），后台常驻需要前台服务（打包的 APK 不能加 Java） |
@@ -102,7 +102,7 @@ core 能力和内置 mods 的功能全部复刻，界面按手机重新设计；
 - **拖动分屏**：宽屏（≥ 720 pt）时，两个按权重分的窗格之间有一条可拖的分界线（`herdc_engine::seams`）。松手后两边按新位置重新分权重（`layout.resize`），每边至少一成；固定 px 的窗格不动。
 - **先画上次的样子**：每台电脑连上并读完布局后，把它的 View 存起来（`seen.<id>`，有变化时最多 10 s 后存一次，进后台、断开时也存；超过 256 KiB 就不存 terminals）。
   再打开时先画这份，线路状态用实时的，读完新的就换成新的。电脑列表在每台电脑下列出它上次的 spaces，圆点是当时最需要关注的状态；点一个 space，连上后直接到那里；直接打开时回到上次看的 space。
-- **手机自己的选择**：每个 space 看的是哪个 tab、焦点、缩放、收起的 tab、哪些提醒看过，由 engine 存进每台电脑一个文件（`Options.store`，像桌面的 `view.json`），在 app 的 `files/views/<id 的十六进制>.json`（`link::view_file`）。重启后先画 `seen.<id>`，engine 读完布局再按这份恢复。删电脑时删掉；编辑连接改了 id 时，同一把主机密钥、用户和 session 才跟过去，否则删掉。
+- **手机自己的选择**：每个 space 看的是哪个 tab、焦点、缩放、收起的 tab、哪些提醒看过，由 engine 存进每台电脑一个文件（`Options.store`，像桌面的 `view.json`），在 app 的 `files/views/<id 的十六进制>.json`（`link::view_file`）。重启后先画 `seen.<id>`，engine 读完布局再按这份恢复。删电脑时删掉；编辑连接改了 id 时，同一把主机密钥、用户和 session 才跟过去，否则删掉（`carry_view_in` / `forget_view_in` 按目录单测；release 包不能 `run-as`，手机上看不到这个目录）。app 私有目录统一由 `app_folder(子目录)` 求出（`files/views`、vault 的 `no_backup`）。
 - **多个 session**：添加电脑时可以填 `HC_SESSION`（只允许字母、数字和 `._-/`，因为要拼进远端 shell），同一台电脑的不同 session 是不同的条目（`id` 末尾加 `/session`）。
 - **首页空间列表**：本机用电脑自己的名字，保留机器名大小写，本机在前、远程机器按名字排序。机器标题是“箭头 + 名字 …… +”（没连上时 `+` 换成状态的字），组之间留空；箭头可折叠整组空间，按电脑和机器存在 prefs，重启后保留；当前空间所在机器也允许折叠，选中空间不会自动展开。空间不显示标签页数量，只有非 main/master、不同于空间名及仓库目录名的分支才显示第二行，没内容就只画一行。行尾是空间里最要紧的 agent 状态（运行中转圈、等你红点、完成蓝点，空闲不画）。
 - **Agents 列表**：「Needs you」只做状态提醒，点击可打开对应终端；列表与提醒浮层不读取终端问题，也不代发按键或回复。子 agent 已在别人的后代树中时不再占顶层行，置顶例外；已保留的后代优先取 AgentView 的状态，done 仍归 idle。主文字按桌面 Priority 视图显示空间加有意义的标签页或 agent 标题，数字自动名仅在重名时补上；空标题回退程序/app 名，远程行追加机器名。状态旁显示变化距今的 <1m / Nm / Nh / Nd，每 30 s 刷新。时间用 core 记录的 `status_ms`（电脑上状态变化的那一刻，不是手机连上的时刻），没有时才用引擎自己看到变化的时间；旧缓存缺失时默认为 0（暂不显示时间）。

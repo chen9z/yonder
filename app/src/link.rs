@@ -132,25 +132,19 @@ pub fn forget(id: &str) {
         return;
     }
     Storage::remove_item(&format!("{SEEN}{id}"));
-    if let Some(path) = view_file(id) {
-        let _ = std::fs::remove_file(path);
+    if let Some(dir) = views_folder() {
+        forget_view_in(&dir, id);
     }
 }
 
-/// The folder the engines keep this phone's own choices in.
-#[cfg(target_os = "android")]
-fn views_folder() -> Option<std::path::PathBuf> {
-    let line = std::fs::read("/proc/self/cmdline").ok()?;
-    let package = String::from_utf8(line.split(|b| *b == 0).next()?.to_vec()).ok()?;
-    let package = package.split(':').next()?;
-    let user = unsafe { libc::getuid() } / 100_000;
-    Some(std::path::PathBuf::from(format!("/data/user/{user}/{package}/files/views")))
+fn forget_view_in(dir: &std::path::Path, id: &str) {
+    let _ = std::fs::remove_file(dir.join(view_name(id)));
 }
 
-/// Off a phone (the tests), nowhere: each run starts with the layout's own.
-#[cfg(not(target_os = "android"))]
+/// The folder the engines keep this phone's own choices in (off a phone,
+/// none: each test starts with the layout's own).
 fn views_folder() -> Option<std::path::PathBuf> {
-    None
+    crate::app_folder("files/views")
 }
 
 /// Where computer `id`'s engine keeps this phone's own choices, as the
@@ -168,8 +162,14 @@ fn view_name(id: &str) -> String {
 /// A computer saved again under another id: its choices go with it when
 /// it is the same one (its key, user and session), else they go.
 pub fn carry_view(previous: &Computer, now: &Computer) {
+    if let Some(dir) = views_folder() {
+        carry_view_in(&dir, previous, now);
+    }
+}
+
+fn carry_view_in(dir: &std::path::Path, previous: &Computer, now: &Computer) {
     let (from, to) = (previous.id(), now.id());
-    let (Some(old), Some(new)) = (view_file(&from), view_file(&to)) else { return };
+    let (old, new) = (dir.join(view_name(&from)), dir.join(view_name(&to)));
     if from == to || !old.exists() {
         return;
     }
@@ -329,6 +329,35 @@ mod tests {
     fn each_computer_has_a_view_file_of_its_own() {
         assert_eq!(super::view_name("me@h:22"), "6d6540683a3232.json");
         assert_ne!(super::view_name("me@h:22/a"), super::view_name("me@h:22/b"));
+    }
+
+    #[test]
+    fn a_computer_s_choices_go_with_it_or_go() {
+        let dir = std::env::temp_dir().join(format!("yonder-views-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pc = super::Computer { name: "pc".into(), host: "10.0.0.2".into(), port: 22, user: "me".into(), fingerprint: Some("SHA256:a".into()), password: None, windows: false, session: None };
+        let file = |c: &super::Computer| dir.join(super::view_name(&c.id()));
+        let kept = |c: &super::Computer| std::fs::write(file(c), "{}").unwrap();
+        // Reached at another address, the same computer: its choices move.
+        kept(&pc);
+        let moved = super::Computer { host: "pc.local".into(), ..pc.clone() };
+        assert_ne!(pc.id(), moved.id());
+        super::carry_view_in(&dir, &pc, &moved);
+        assert!(!file(&pc).exists() && file(&moved).exists());
+        // Another computer there (another key), or another user: they go.
+        let other = super::Computer { host: "10.0.0.3".into(), fingerprint: Some("SHA256:b".into()), ..moved.clone() };
+        super::carry_view_in(&dir, &moved, &other);
+        assert!(!file(&moved).exists() && !file(&other).exists());
+        kept(&pc);
+        let them = super::Computer { user: "you".into(), ..pc.clone() };
+        super::carry_view_in(&dir, &pc, &them);
+        assert!(!file(&pc).exists() && !file(&them).exists());
+        // Forgotten, its file goes, and no other's.
+        kept(&pc);
+        kept(&moved);
+        super::forget_view_in(&dir, &pc.id());
+        assert!(!file(&pc).exists() && file(&moved).exists());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
