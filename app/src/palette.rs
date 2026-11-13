@@ -4,6 +4,7 @@
 use crate::live::{off, Live};
 use crate::ui::{self, Prompt};
 use crate::i18n::tr;
+use crate::pick::{self, Icon, Item, Section};
 use crate::{nav, theme};
 use herdc_engine::{shown_title, COMMANDS};
 use herdc_engine::tools::agents;
@@ -162,15 +163,16 @@ pub async fn new_terminal(live: Live) {
     let on = place.as_ref().and_then(|p| p.on.clone());
     let known = known_agents(&live, on).await;
     let installed: Vec<&agents::Known> = known.iter().filter(|k| k.installed).collect();
-    let mut actions: Vec<(String, String)> = vec![("terminal".into(), t!("Terminal").into())];
-    actions.extend(installed.iter().map(|k| (format!("agent:{}", k.key()), k.name().to_owned())));
-    actions.push(("space".into(), t!("New space").into()));
+    // What runs in the space, then other places to run it.
+    let mut here = vec![Item::new("terminal", t!("Terminal"), Icon::Glyph("terminal"))];
+    here.extend(installed.iter().map(|k| Item::new(format!("agent:{}", k.key()), k.name(), Icon::Program(k.program.clone()))));
+    let mut elsewhere = vec![Item::new("space", t!("New space"), Icon::Glyph("layout-grid"))];
     if space.is_some() {
-        actions.push(("worktree".into(), t!("New worktree…").into()));
-        actions.push(("worktrees".into(), t!("Open worktree…").into()));
+        elsewhere.push(Item::new("worktree", t!("New worktree…"), Icon::Glyph("branch")));
+        elsewhere.push(Item::new("worktrees", t!("Open worktree…"), Icon::Glyph("folder")));
     }
-    let shown: Vec<(&str, &str)> = actions.iter().map(|(k, n)| (k.as_str(), n.as_str())).collect();
-    let Some(picked) = ui::choose(t!("New"), &shown).await else { return };
+    let sections = vec![Section { title: None, items: here }, Section { title: None, items: elsewhere }];
+    let Some(picked) = pick::menu(t!("New"), sections).await else { return };
     match (picked.as_str(), picked.strip_prefix("agent:")) {
         (_, Some(key)) => {
             let Some(k) = installed.iter().find(|k| k.key() == key) else { return };

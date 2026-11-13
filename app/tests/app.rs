@@ -24,6 +24,13 @@ fn shows_tab(app: &mut Headless, n: usize) {
     app.wait_until(&format!("tab {n} shown"), SLOW, |screen| screen.selected(&tab) == Ok(true)).unwrap();
 }
 
+/// Picks `label` from the app's sheet of choices, once it shows.
+fn choose(app: &mut Headless, label: &str) {
+    let row = format!("label:{label}");
+    app.wait_for_within(&row, SLOW).unwrap();
+    app.press(&row).unwrap();
+}
+
 /// Answers the next dialog by pressing `button`, checking it says `says`.
 fn answer(app: &mut Headless, button: &'static str, says: &'static str) {
     app.on_dialog(move |d| {
@@ -168,8 +175,8 @@ fn adds_a_computer_then_works_there() {
 
     // A swipe across goes between tabs: right to the one before, left to the next.
     // (`+` offers a terminal, the agents installed, a space or a worktree.)
-    answer(&mut app, "Terminal", "New space");
     app.press("label:New").unwrap();
+    choose(&mut app, "Terminal");
     shows_tab(&mut app, 2);
     // The tabs are on a strip, the shown one selected; a tap shows another.
     app.press("role:tab[1]").unwrap();
@@ -539,8 +546,8 @@ fn another_session_is_a_computer_of_its_own() {
     assert!(stored.contains(&format!("me@127.0.0.1:{}/two", served.port)), "{stored}");
 
     // At home, a space's handle drags it below the next.
-    answer(&mut app, "Terminal", "New space");
     app.press("label:New").unwrap();
+    choose(&mut app, "Terminal");
     shows_tab(&mut app, 2);
     app.press("label:Spaces and agents").unwrap();
     answer(&mut app, "Rename", "Rename");

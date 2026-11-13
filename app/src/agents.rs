@@ -256,11 +256,13 @@ pub fn sort_button() -> impl IntoElement {
         .label(move || if grouped.get() { t!("Sort agents: Grouped by space") } else { t!("Sort agents: Priority") })
         .on_press(move || {
             spawn(async move {
-                let mark = |on: bool, label: &str| if on { format!("{label} ✓") } else { label.to_owned() };
+                use crate::pick::{Icon, Item, Section};
                 let on = grouped.get_untracked();
-                let priority = mark(!on, t!("Priority"));
-                let by_space = mark(on, t!("Grouped by space"));
-                match ui::choose(t!("Sort agents"), &[("priority", &priority), ("grouped", &by_space)]).await.as_deref() {
+                let items = vec![
+                    Item { checked: !on, ..Item::new("priority", t!("Priority"), Icon::Glyph("clock")) },
+                    Item { checked: on, ..Item::new("grouped", t!("Grouped by space"), Icon::Glyph("layers")) },
+                ];
+                match crate::pick::menu(t!("Sort agents"), vec![Section { title: None, items }]).await.as_deref() {
                     Some("priority") => grouped.set(false),
                     Some("grouped") => grouped.set(true),
                     _ => {}
@@ -341,8 +343,8 @@ fn heading(l: ReadSignal<Line>, fold: impl Fn(String) + Copy + 'static) -> impl 
         }))
 }
 
-/// An agent's row: what runs, its name, its machine, how long since its
-/// status changed and that status. A tap shows it; a long press pins or
+/// An agent's row: what runs, its name over what it does and its
+/// machine, how long since its status changed and that status. A tap shows it; a long press pins or
 /// stops it.
 fn agent_row(live: Live, l: ReadSignal<Line>, now: Signal<u64>, inline: bool, fold: impl Fn(String) + Copy + 'static) -> impl IntoElement {
     let agent = move || l.with(|l| match l { Line::Agent { agent, .. } => Some((**agent).clone()), _ => None });
@@ -361,7 +363,8 @@ fn agent_row(live: Live, l: ReadSignal<Line>, now: Signal<u64>, inline: bool, fo
                 .items_center()
                 .gap(px(10.0))
                 .px(px(10.0))
-                .min_h(px(48.0))
+                .min_h(px(52.0))
+                .py(px(6.0))
                 .rounded(px(10.0))
                 .bg(move || if row.with(|r| r.as_ref().is_some_and(|r| r.2)) { theme::now(theme::SELECTED) } else { Hsla::transparent_black() })
                 .active(|s| s.bg(theme::HOVER))
@@ -392,21 +395,29 @@ fn agent_row(live: Live, l: ReadSignal<Line>, now: Signal<u64>, inline: bool, fo
                 .child(
                     view()
                         .flex_1()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(5.0))
+                        .gap(px(2.0))
                         .child(
                             text(move || row.with(|r| r.as_ref().map(|r| r.4.clone()).unwrap_or_default()))
-                                .flex_shrink(0.0)
-                                .max_w(move || percentage(if row.with(|r| r.as_ref().is_some_and(|r| r.5.is_some())) { 0.5 } else { 1.0 }))
                                 .text_size(px(15.0))
                                 // An idle agent not shown is quieter.
                                 .text_color(move || if row.with(|r| r.as_ref().is_some_and(|r| r.1 == "idle" && !r.2)) { theme::now(theme::MUTED) } else { theme::now(theme::FOREGROUND) })
                                 .number_of_lines(1),
                         )
-                        .child(text(move || row.with(|r| r.as_ref().and_then(|r| r.5.as_ref()).map(|m| format!("· {m}")).unwrap_or_default())).flex_1().text_size(px(15.0)).text_color(theme::DIM).number_of_lines(1)),
+                        // What it does and where, quieter, under it (when there is any).
+                        .child(when(move || row.with(|r| r.as_ref().is_some_and(|r| r.5.is_some() || r.6.is_some())), move || {
+                            let computer = computer.clone();
+                            text(move || {
+                                row.with(|r| {
+                                    let Some(r) = r else { return String::new() };
+                                    let machine = r.6.as_ref().map(|m| prefs.machine_name(&computer, m));
+                                    [r.5.clone(), machine].into_iter().flatten().collect::<Vec<_>>().join(" · ")
+                                })
+                            })
+                            .text_size(px(12.0))
+                            .text_color(theme::DIM)
+                            .number_of_lines(1)
+                        })),
                 )
-                .child(text(move || row.with(|r| r.as_ref().and_then(|r| r.6.as_ref()).map(|m| prefs.machine_name(&computer, m)).unwrap_or_default())).text_size(px(11.0)).text_color(theme::DIM))
                 .child(when(move || row.with(|r| r.as_ref().is_some_and(|r| r.7 > 0)), move || {
                     // The sub-agents' fold; folded, how many.
                     view()

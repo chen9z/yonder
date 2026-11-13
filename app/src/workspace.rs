@@ -194,28 +194,32 @@ fn tab_menu(live: Live, id: String) {
     });
 }
 
-/// The spaces to go to, from the title: this computer's first, the shown
-/// one checked; or all of them, at home.
+/// The spaces to go to, from the title, as home lists them: by machine,
+/// this computer's first, each in its color with its status, the shown one
+/// checked; or all of them, at home.
 fn switch_space(live: Live, prefs: crate::prefs::Prefs) {
+    use crate::pick::{Icon, Item, Section};
     let computer = live.computer.id();
-    let mut spaces: Vec<(bool, String, String, String)> = live.view.with_untracked(|v| {
-        v.spaces
-            .iter()
-            .map(|s| {
-                let machine = s.machine.as_deref().map(|m| prefs.machine_name(&computer, m)).unwrap_or_default();
-                let mut name = if machine.is_empty() { s.name.clone() } else { format!("{} · {machine}", s.name) };
-                if s.active {
-                    name.push_str(" ✓");
-                }
-                (s.machine.is_some(), machine, s.id.clone(), name)
-            })
-            .collect()
+    let mut sections: Vec<(bool, String, Section)> = Vec::new();
+    live.view.with_untracked(|v| {
+        for s in &v.spaces {
+            let machine = s.machine.as_deref().map_or_else(|| live.computer.name.clone(), |m| prefs.machine_name(&computer, m));
+            let color = prefs.colors.with_untracked(|c| c.get(&format!("{computer}\u{0}{}", s.id)).copied().unwrap_or(0));
+            let item = Item { status: s.status, checked: s.active, ..Item::new(s.id.clone(), s.name.clone(), Icon::Space(s.name.clone(), color)) };
+            match sections.iter_mut().find(|(_, m, _)| *m == machine) {
+                Some((_, _, section)) => section.items.push(item),
+                None => sections.push((s.machine.is_some(), machine.clone(), Section { title: Some(machine), items: vec![item] })),
+            }
+        }
     });
-    spaces.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
+    sections.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
+    let mut sections: Vec<Section> = sections.into_iter().map(|(_, _, s)| s).collect();
+    if let [only] = sections.as_mut_slice() {
+        only.title = None;
+    }
+    sections.push(Section { title: None, items: vec![Item::new("\0home", t!("All spaces and agents"), Icon::Glyph("layout-grid"))] });
     spawn(async move {
-        let mut actions: Vec<(&str, &str)> = spaces.iter().map(|(_, _, id, name)| (id.as_str(), name.as_str())).collect();
-        actions.push(("\0home", t!("All spaces and agents")));
-        match ui::choose(t!("Spaces"), &actions).await.as_deref() {
+        match crate::pick::menu(t!("Spaces"), sections).await.as_deref() {
             Some("\0home") => nav::home(),
             Some(id) => live.run("space.select", serde_json::json!({ "id": id })),
             None => {}

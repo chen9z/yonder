@@ -133,16 +133,15 @@ pub fn files_page(live: Live, place: Place) -> Screen {
                                 nav::push(Route::File { place: place.clone(), path: r.path });
                             }
                         })
-                        .child(
-                            text(move || match row() {
-                                Some(Row { dir: true, open: true, .. }) => "▾",
-                                Some(Row { dir: true, .. }) => "▸",
-                                _ => " ",
-                            })
-                            .w(px(14.0))
-                            .text_size(px(14.0))
-                            .text_color(theme::MUTED),
-                        )
+                        // A folder's chevron (a file's room for one), then what it is.
+                        .child(dynamic(move || match row() {
+                            Some(Row { dir: true, open, .. }) => ui::glyph(if open { "chevron-down" } else { "chevron-right" }, 12.0, theme::DIM).mx(px(1.0)).into_element(),
+                            _ => view().w(px(14.0)).into_element(),
+                        }))
+                        .child(dynamic(move || match row() {
+                            Some(Row { dir: true, open, .. }) => ui::glyph(if open { "folder-open" } else { "folder" }, 17.0, theme::MUTED).mr(px(4.0)).into_element(),
+                            _ => ui::glyph("file", 17.0, theme::DIM).mr(px(4.0)).into_element(),
+                        }))
                         .child(
                             text(move || row().map(|r| r.name).unwrap_or_default())
                                 .flex_1()
