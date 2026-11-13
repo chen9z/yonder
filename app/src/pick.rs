@@ -75,8 +75,10 @@ thread_local! {
 }
 
 /// Asks for one of `sections`' choices: its id, or None when the sheet
-/// is let go (or there is nowhere to show it).
+/// is let go (or there is nowhere to show it). The keyboard goes first:
+/// the sheet rises from the bottom, where it would be under it.
 pub async fn menu(title: &str, sections: Vec<Section>) -> Option<String> {
+    dismiss_keyboard();
     let (tx, rx) = tokio::sync::oneshot::channel();
     let shown = HOST.with(|h| {
         let h = h.borrow();

@@ -1,9 +1,12 @@
 #!/bin/sh
 # The acceptance run on a real phone, in one go: a test computer (SSH on
 # the LAN, an isolated herdr-core behind it, never the user's), the app
-# built and installed with its data cleared, the computer added on the
-# phone, then codex walking through acceptance/walkthrough.md with adb and
-# writing what it found. The phone's settings are put back however it ends.
+# built and installed over the one there (its data kept: the person's
+# computers, key and choices), the test computer added beside theirs as
+# `e2e-test`, then codex walking through acceptance/walkthrough.md with adb
+# and writing what it found. Then the test computer is forgotten and the
+# one the app was on opened again. The phone's settings are put back
+# however it ends.
 #
 #   e2e/device.sh [--no-build]
 #
@@ -31,11 +34,19 @@ lan=$(ipconfig getifaddr en0 || ipconfig getifaddr en1)
 ime=$(adb shell settings get secure default_input_method | tr -d '\r')
 stay=$(adb shell settings get global stay_on_while_plugged_in | tr -d '\r')
 rotate=$(adb shell settings get system accelerometer_rotation | tr -d '\r')
+# Still, so the UI can be read (a turning status keeps uiautomator waiting).
+scales="window_animation_scale transition_animation_scale animator_duration_scale"
+was_scales=$(for k in $scales; do adb shell settings get global "$k" | tr -d '\r'; done | tr '\n' ' ')
 computer=""
 restore() {
   adb shell ime set "$ime" >/dev/null 2>&1 || true
   adb shell settings put global stay_on_while_plugged_in "$stay" || true
   adb shell settings put system accelerometer_rotation "$rotate" || true
+  set -- $was_scales
+  for k in $scales; do
+    case "$1" in null|"") adb shell settings delete global "$k" >/dev/null || true ;; *) adb shell settings put global "$k" "$1" || true ;; esac
+    shift
+  done
   adb shell svc wifi enable || true
   [ -n "$computer" ] && kill -INT "$computer" 2>/dev/null || true
 }
@@ -60,16 +71,31 @@ mkdir -p "$home/proj" "$home/.ssh" "$home/.codex"
 printf 'Host vps\n  HostName 10.0.0.7\n  User can\n' > "$home/.ssh/config"
 cp "${CODEX_HOME:-$HOME/.codex}/auth.json" "$home/.codex/auth.json"
 
-# The app, fresh, and the computer added as a person adds it.
+# The app over the one there, and the computer added as a person adds it,
+# beside theirs.
 [ "$1" = --no-build ] || "$root/app/apk.sh" > "$state/apk.log" 2>&1
 adb install -r "$root/app/.nsh/out/Yonder.apk" >/dev/null
-adb shell pm clear "$app" >/dev/null
 adb shell svc power stayon usb
+for k in $scales; do adb shell settings put global "$k" 0; done
 adb shell input keyevent KEYCODE_WAKEUP; adb shell input swipe 720 2400 720 800
 adb shell ime set "$keyboard" >/dev/null
 adb shell am start -W -n "$app/com.longbridge.nsh.AppActivity" >/dev/null
-sleep 2
+wait_for() { for _ in $(seq 60); do "$ui" dump 2>/dev/null | grep -q "$1" && return; sleep 1; done; echo "never saw $1" >&2; exit 1; }
+seen() { "$ui" dump 2>/dev/null | grep -q "$1"; }
+# Back to the computers: left from the workspace (Settings) or from home (its menu).
+for _ in $(seq 30); do seen "'Switch space'\|'Menu'\|'Add a computer'" && break; sleep 1; done
+if seen "'Switch space'"; then
+  "$ui" press More; sleep 1; "$ui" press Settings; sleep 1.5; "$ui" press "Leave this computer"
+elif seen "'Menu'"; then
+  "$ui" press Menu; sleep 1; "$ui" press pick-leave
+fi
+wait_for "'Add a computer'"
+# The computer the app was on: the first under COMPUTERS, opened again at the end.
+was=$("$ui" nodes | awk -F '	' '$1 == "COMPUTERS" { after = 1; next } after && $2 != "" && $2 != "Add a computer" { print $2; exit }')
+echo "was on: ${was:-none}" > "$state/was.txt"
+"$ui" press "Add a computer"; sleep 1
 field() { "$ui" press "$1"; sleep 0.5; }
+field "display name"; "$ui" type e2e-test
 field computer; "$ui" type "$lan"
 field user; "$ui" type me
 field port; adb shell input keyevent KEYCODE_MOVE_END; for _ in 1 2 3 4 5; do adb shell input keyevent KEYCODE_DEL; done; "$ui" type "$port"
@@ -78,10 +104,9 @@ field password; "$ui" type "open sesame"
 "$ui" press Connect; sleep 3
 "$ui" dump | grep -q "$fingerprint" || { echo "the phone was shown another host key" >&2; exit 1; }
 "$ui" press Trust
-wait_for() { for _ in $(seq 60); do "$ui" dump | grep -q "$1" && return; sleep 1; done; echo "never saw $1" >&2; exit 1; }
 wait_for 'No spaces yet'
 "$ui" press 'New space'
-wait_for "1 · $lan"
+wait_for "1 · e2e-test"
 
 # codex drives the phone through the walkthrough.
 cp "$ui" "$here/acceptance/walkthrough.md" "$state/"
@@ -90,3 +115,16 @@ CODEX_HOME="$home/.codex" "$codex" --no-daemon exec -m "$model" -s danger-full-a
   "Follow walkthrough.md in this folder on the phone, step by step, with ./adbui.sh. Screenshots go to $HERDC_SHOTS. At the end, write for each step: Yes or No, and why, with the screenshots' names." \
   > "$state/codex.log" 2>&1
 cat "$state/walkthrough.result.md"
+
+# The test computer forgotten, and the person's opened again.
+adb shell am start -W -n "$app/com.longbridge.nsh.AppActivity" >/dev/null; sleep 2
+if seen "'Switch space'"; then
+  "$ui" press More; sleep 1; "$ui" press Settings; sleep 1.5; "$ui" press "Leave this computer"
+elif seen "'Menu'"; then
+  "$ui" press Menu; sleep 1; "$ui" press pick-leave
+fi
+wait_for "'Add a computer'"
+adb shell input swipe $("$ui" find e2e-test) $("$ui" find e2e-test) 900; sleep 1
+"$ui" press pick-forget; sleep 1; "$ui" press Forget; sleep 1
+if seen "'e2e-test'"; then echo "e2e-test is still on the phone: forget it by hand" >&2; fi
+[ -n "$was" ] && "$ui" press "$was" || echo "open your computer again by hand" >&2

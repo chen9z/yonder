@@ -159,7 +159,6 @@ fn header(
         .child(ui::icon_button("plus", t!("New"), {
             let live = live.clone();
             move || {
-                dismiss_keyboard();
                 spawn(crate::palette::new_terminal(live.clone()));
             }
         }))
