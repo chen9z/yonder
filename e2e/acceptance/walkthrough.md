@@ -47,10 +47,15 @@ it with the screenshot's name and go on.
 3a. Type `echo see https://example.com/pull/7.` and Enter, then hold the
    terminal again: the sheet's first choice is "Open example.com/pull/7"
    (no full stop). Don't press it (it leaves the app): Back.
+3c. Type `echo look at ./big.txt:20` and Enter, then hold the terminal:
+   the sheet offers "Open big.txt:20" with a file icon; press it. A page
+   "big.txt" shows the file with line 20 (`line 20`) marked, near the
+   middle of the screen. Back returns to the terminal.
 3b. `+` (New): a sheet "New" offers "Terminal" (a `>_` icon) and the
    agents installed (their own icons), then "New space" and the
    worktrees. Press "Terminal": a second tab opens, and a strip of two
-   tabs shows under the header (no line between them), the new one
+   tabs shows under the header (no line between the header and the
+   strip; a thin one under the strip, over the terminal), the new one
    selected; the header's second line now says only the computer; a note
    "2/2 · …" shows a moment over the terminal. Tap the first tab on the
    strip: it is selected. Hold the second tab: a sheet "Tab" offers
@@ -75,6 +80,14 @@ it with the screenshot's name and go on.
    shows a switch, on. The font size − and + change the size shown; the
    terminal's text follows when back. Put it back as it was. "Copy" under
    the key shows a note "Copied" saying where the key goes.
+6a. Settings → Key bar: at the bottom, under YOUR OWN, a field ("Words it
+   types, like /compact"), a + and "Then press Enter", on. Type
+   `echo own-key` in the field and press + (once, with the keyboard
+   still up): "echo own-key" and a small Enter icon join the keys on the
+   bar at the list's end. Back to the terminal, tap it: the key bar ends
+   with "echo own-key ↵" (swipe the bar along). Press it: the terminal
+   runs it and prints `own-key`. Then Settings → Key bar again and take
+   it off (its ✕): the Key bar row in Settings says 17 keys again.
 7. Tap the header's title: a sheet "Spaces" lists the space with its
    colored square, checked (a ✓ at the row's end), and "All spaces and
    agents"; press that. On the home page, "Agents" (at the
