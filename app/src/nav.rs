@@ -15,8 +15,9 @@ pub enum Route {
     Commands,
     /// A folder's tree.
     Files(Place),
-    /// A file of it, by its path under the folder.
-    File { place: Place, path: String },
+    /// A file of it, by its path under the folder; at a line (from 1)
+    /// when one was said with it.
+    File { place: Place, path: String, line: Option<u32> },
     /// The changes of the repo a folder is in.
     Changes(Place),
     /// One changed file's diff.

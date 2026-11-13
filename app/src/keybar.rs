@@ -4,6 +4,7 @@
 use crate::prefs::Prefs;
 use crate::{theme, ui};
 use herdc_term::keys::Key;
+use nsh_base::input;
 use nsh_core::prelude::*;
 
 /// What a key of the bar does.
@@ -82,9 +83,39 @@ pub fn find(id: &str) -> Option<(&'static str, Does)> {
     KEYS.iter().find(|(k, ..)| *k == id).map(|(_, shows, does)| (*shows, *does))
 }
 
+/// A key of the person's own: the words it types, a line's end after
+/// them for Enter (`say:/compact\n`).
+pub fn said(id: &str) -> Option<&str> {
+    id.strip_prefix("say:")
+}
+
+/// What key `id` shows: one of [`KEYS`], or the words of one's own (↵
+/// after them when it presses Enter too).
+pub fn face(id: &str) -> Option<String> {
+    match said(id) {
+        Some(words) => Some(match words.strip_suffix('\n') {
+            Some(words) => format!("{words} ↵"),
+            None => words.to_owned(),
+        }),
+        None => find(id).map(|(shows, _)| shows.to_owned()),
+    }
+}
+
+/// The words of a key that shows them, and whether Enter follows (a ↵
+/// drawn after them).
+pub fn words(shows: &str) -> (&str, bool) {
+    match shows.strip_suffix(" ↵") {
+        Some(words) => (words, true),
+        None => (shows, false),
+    }
+}
+
 /// What a reader says for a key that shows a sign (and the list calls it).
-pub fn spoken(shows: &'static str) -> &'static str {
-    match shows {
+pub fn spoken(shows: &str) -> String {
+    if let (words, true) = words(shows) {
+        return t!("{}, then Enter", words);
+    }
+    let said = match shows {
         "↵" => t!("Enter"),
         "←" => t!("Left"),
         "↓" => t!("Down"),
@@ -97,7 +128,8 @@ pub fn spoken(shows: &'static str) -> &'static str {
         "Paste" => t!("Paste"),
         "⌄" => t!("Hide keyboard"),
         _ => shows,
-    }
+    };
+    said.to_owned()
 }
 
 /// Settings, Key bar: the keys on it, to move or take off, and the others
@@ -107,9 +139,10 @@ pub fn keybar_page() -> nsh_core::element::Screen {
     let keys = prefs.keys;
     let others = computed(move || keys.with(|on| KEYS.iter().map(|(id, ..)| *id).filter(|id| !on.iter().any(|k| k == id)).collect::<Vec<_>>()));
     ui::page(t!("Key bar")).child(
-        scroll().flex_1().bg(theme::CANVAS).child(
+        // With the keyboard up (one's own key typed), + adds at the first tap.
+        scroll().flex_1().bg(theme::CANVAS).keyboard_taps(KeyboardTaps::Handled).child(
             view()
-                .pb(move || px(safe_area().bottom.0 + 24.0))
+                .pb(move || ui::bottom_inset() + px(24.0))
                 .child(ui::heading(|| t!("ON THE BAR").into()))
                 .child(each(move || keys.get(), |id| id.clone(), move |id, _| on_bar(keys, id)))
                 .child(ui::heading(|| t!("MORE KEYS").into()))
@@ -137,9 +170,87 @@ pub fn keybar_page() -> nsh_core::element::Screen {
                         },
                     )),
                 )
+                .child(ui::heading(|| t!("YOUR OWN").into()))
+                .child(own_key(keys))
                 .child(ui::action_row(t!("As at first"), ui::Act::Do, move || keys.set(at_first())).mt(px(12.0))),
         ),
     )
+}
+
+/// A key of one's own to put on the bar: words it types (`/compact`, `y`,
+/// `git status`), Enter after them unless said otherwise.
+fn own_key(keys: Signal<Vec<String>>) -> View {
+    let (words, enter) = (signal(String::new()), signal(true));
+    let add = move || {
+        let typed = words.get_untracked();
+        if typed.trim().is_empty() {
+            return;
+        }
+        let id = format!("say:{typed}{}", if enter.get_untracked() { "\n" } else { "" });
+        keys.update(|k| {
+            if !k.contains(&id) {
+                k.push(id);
+            }
+        });
+        words.set(String::new());
+    };
+    let none = move || words.with(|w| w.trim().is_empty());
+    view()
+        .px(px(12.0))
+        .gap(px(4.0))
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap(px(8.0))
+                .child(
+                    input()
+                        .test_id("own-key")
+                        .flex_1()
+                        .value(move || words.get())
+                        .on_change(move |t: &str| words.set(t.to_owned()))
+                        .on_submit(move |_: &str| add())
+                        .placeholder(t!("Words it types, like /compact"))
+                        .placeholder_color(move || theme::now(theme::DIM))
+                        .auto_correct(false)
+                        .auto_capitalize(AutoCapitalize::None)
+                        .return_key_type(ReturnKeyType::Done)
+                        .rounded(px(10.0))
+                        .border_1()
+                        .border_color(theme::INPUT)
+                        .bg(theme::BACKGROUND)
+                        .px(px(12.0))
+                        .h(px(44.0))
+                        .font_family(theme::MONO)
+                        .text_size(px(15.0))
+                        .text_color(theme::FOREGROUND),
+                )
+                .child(
+                    view()
+                        .w(px(44.0))
+                        .h(px(44.0))
+                        .rounded(px(10.0))
+                        .items_center()
+                        .justify_center()
+                        .bg(theme::SOLID)
+                        .active(|s| s.opacity(0.7))
+                        .role(AccessibilityRole::Button)
+                        .label(t!("Add the key"))
+                        .disabled(none)
+                        .disabled_style(|s| s.opacity(0.3))
+                        .on_press(add)
+                        .child(ui::glyph("plus", 20.0, theme::SOLID_FOREGROUND)),
+                ),
+        )
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .px(px(4.0))
+                .h(px(48.0))
+                .child(text(t!("Then press Enter")).flex_1().text_size(px(15.0)).text_color(theme::FOREGROUND))
+                .child(ui::toggle(enter, t!("Then press Enter"))),
+        )
 }
 
 /// One of a key's quiet controls; nothing to do (the first one up), faint.
@@ -162,7 +273,7 @@ fn control(icon: &'static str, label: String, ink: AdaptiveColor, idle: impl Fn(
 /// A key on the bar: earlier, later, off.
 fn on_bar(keys: Signal<Vec<String>>, id: ReadSignal<String>) -> View {
     let id = id.get_untracked();
-    let shows = find(&id).map_or("?", |(shows, _)| shows);
+    let shows = face(&id).unwrap_or_else(|| "?".to_owned());
     let at = {
         let id = id.clone();
         move |k: &Vec<String>| k.iter().position(|o| *o == id)
@@ -182,16 +293,39 @@ fn on_bar(keys: Signal<Vec<String>>, id: ReadSignal<String>) -> View {
             })
         }
     };
-    let name = spoken(shows);
+    let name = spoken(&shows);
+    let own = said(&id).is_some();
     view()
         .flex_row()
         .items_center()
         .gap(px(4.0))
         .px(px(16.0))
         .min_h(px(48.0))
-        .child(text(shows).font_family(theme::MONO).text_size(px(15.0)).text_color(theme::FOREGROUND).w(px(56.0)))
-        .child(text(if name == shows { String::new() } else { name.to_owned() }).flex_1().text_size(px(13.0)).text_color(theme::MUTED))
+        // One's own key says its words in full, ↵ after them for Enter.
+        .child({
+            let (words, enter) = words(&shows);
+            view()
+                .flex_row()
+                .items_center()
+                .gap(px(6.0))
+                .min_w(px(56.0))
+                .max_w(px(if own { 240.0 } else { 56.0 }))
+                .child(text(words.to_owned()).font_family(theme::MONO).text_size(px(15.0)).text_color(theme::FOREGROUND).number_of_lines(1).flex_shrink(1.0))
+                .children(enter.then(|| ui::glyph("corner-down-left", 14.0, theme::MUTED)))
+        })
+        .child(text(if name == shows || own { String::new() } else { name.clone() }).flex_1().text_size(px(13.0)).text_color(theme::MUTED))
         .child(control("arrow-up", t!("{} earlier", name), theme::MUTED, first, step(-1)))
         .child(control("arrow-down", t!("{} later", name), theme::MUTED, last, step(1)))
         .child(control("x", t!("Take {} off", name), theme::DIM, || false, move || keys.update(|k| k.retain(|o| *o != id))))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn own_keys_show_their_words_and_enter() {
+        assert_eq!(super::face("say:/compact\n").as_deref(), Some("/compact ↵"));
+        assert_eq!(super::face("say:git status").as_deref(), Some("git status"));
+        assert_eq!(super::face("esc").as_deref(), Some("Esc"));
+        assert_eq!(super::face("gone"), None);
+    }
 }

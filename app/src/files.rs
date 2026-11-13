@@ -130,7 +130,7 @@ pub fn files_page(live: Live, place: Place) -> Screen {
                             if r.dir {
                                 toggle(&live, &place, tree, r.path);
                             } else {
-                                nav::push(Route::File { place: place.clone(), path: r.path });
+                                nav::push(Route::File { place: place.clone(), path: r.path, line: None });
                             }
                         })
                         // A folder's chevron (a file's room for one), then what it is.
@@ -262,7 +262,8 @@ fn close(tree: Tree, path: &str) {
 }
 
 /// One file's text; Markdown is shown as it reads (its source a press away).
-pub fn file_page(live: Live, place: Place, path: String) -> Screen {
+/// At `line`, its source opens there, the line marked.
+pub fn file_page(live: Live, place: Place, path: String, line: Option<u32>) -> Screen {
     let shown = signal(None::<Preview>);
     {
         let full = format!("{}/{path}", place.folder);
@@ -284,7 +285,8 @@ pub fn file_page(live: Live, place: Place, path: String) -> Screen {
     // The editor reads the language from the file's name (`main.rs`, `Dockerfile`).
     let language = SharedString::from(name.clone());
     let markdown = [".md", ".markdown"].iter().any(|e| name.to_ascii_lowercase().ends_with(e));
-    let reading = signal(markdown);
+    let reading = signal(markdown && line.is_none());
+    let ed = component_ref::<nsh_base::Editor>();
     ui::page(name)
         .header_right(when(move || markdown && code().is_some(), move || {
             view()
@@ -316,12 +318,20 @@ pub fn file_page(live: Live, place: Place, path: String) -> Screen {
                         .text_color(theme::FOREGROUND),
                 ).into_element();
             }
+            if let Some(line) = line {
+                set_timeout(Duration::from_millis(80), move || {
+                    if let Some(ed) = ed.api::<nsh_base::EditorApi>() {
+                        ed.go_to_line(line - 1);
+                    }
+                });
+            }
             editor()
+                .component_ref(&ed)
                 .default_value(code())
                 .language(Some(language.clone()))
                 .read_only(true)
                 .soft_wrap(true)
-                .active_line(false)
+                .active_line(line.is_some())
                 .scroll_beyond_last_line(EditorScrollBeyond::from(false))
                 .font_family(Some(SharedString::from(theme::MONO)))
                 .font_size(px(font))

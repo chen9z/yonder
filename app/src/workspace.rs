@@ -521,7 +521,9 @@ struct Chip {
 
 fn pane_strip(live: Live, panes: Memo<Vec<Chip>>) -> impl IntoElement {
     scroll().horizontal().scrollbar(false).bg(theme::CANVAS).border_b_1().border_color(theme::BORDER).child(
-        view().flex_row().items_center().px(px(6.0)).py(px(4.0)).gap(px(4.0)).child(each(
+        // As tall as the tabs' chips, for a thumb; outlined, not filled, to
+        // tell the two strips apart.
+        view().flex_row().items_center().px(px(6.0)).py(px(5.0)).gap(px(6.0)).child(each(
             move || panes.get(),
             |p| p.pane.clone(),
             move |p, _| {
@@ -530,12 +532,15 @@ fn pane_strip(live: Live, panes: Memo<Vec<Chip>>) -> impl IntoElement {
                     .flex_row()
                     .items_center()
                     .gap(px(6.0))
-                    .h(px(28.0))
-                    .px(px(10.0))
-                    .rounded(px(7.0))
+                    .h(px(34.0))
+                    .px(px(12.0))
+                    .rounded(px(8.0))
                     .border_1()
                     .border_color(move || if p.with(|p| p.focused) { theme::now(theme::ACCENT) } else { theme::now(theme::BORDER) })
                     .active(|s| s.bg(theme::HOVER))
+                    .role(AccessibilityRole::Button)
+                    .label(move || p.with(|p| p.title.clone()))
+                    .accessibility_state(move || AccessibilityState { selected: p.with(|p| p.focused), ..Default::default() })
                     .on_press(move || live.run("pane.focus", serde_json::json!({ "pane": p.get_untracked().pane })))
                     .child(ui::program_icon(move || p.with(|p| p.program.clone()), 14.0))
                     .child(text(move || p.with(|p| p.title.clone())).text_size(px(13.0)).text_color(theme::FOREGROUND).number_of_lines(1).max_w(px(160.0)))

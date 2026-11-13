@@ -220,6 +220,21 @@ fn adds_a_computer_then_works_there() {
     app.back().unwrap();
     app.back().unwrap();
 
+    // Held, the terminal opens a file it names, from the shell's folder.
+    app.type_text("id:terminal-input", "echo error at ./hello.rs:2:5\n").unwrap();
+    app.wait_until("the path on screen", SLOW, |_| {
+        hc_terminals(&session).iter().any(|t| {
+            String::from_utf8_lossy(&session.hc(&["read", t["address"].as_str().unwrap_or_default()]).stdout).lines().any(|l| l.trim() == "error at ./hello.rs:2:5")
+        })
+    })
+    .unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    app.long_press("id:terminal").unwrap();
+    app.wait_for_within("label:Open hello.rs:2:5", SLOW).unwrap();
+    pick(&mut app, "file:0");
+    app.wait_until("the named file's text", SLOW, |s| s.texts().concat().contains("hello from the phone")).unwrap();
+    app.back().unwrap();
+
     // Back home: the spaces, and no agents yet; a space opens again.
     app.press("label:Spaces and agents").unwrap();
     app.press("label:Agents").unwrap();
@@ -279,12 +294,18 @@ fn adds_a_computer_then_works_there() {
     app.press("text:Key bar").unwrap();
     app.press("label:Take Esc off").unwrap();
     app.press("label:Add F5").unwrap();
+    // And one of their own, which types its words and Enter.
+    app.type_text("id:own-key", "touch said-on-the-bar").unwrap();
+    app.press("label:Add the key").unwrap();
+    app.wait_for("label:touch said-on-the-bar, then Enter later").unwrap();
     app.back().unwrap();
     app.back().unwrap();
     app.type_text("id:terminal-input", "").unwrap();
     app.wait_for_within("text:F5", SLOW).unwrap();
     app.wait_for("label:Enter").unwrap();
     assert!(!app.screen().texts().contains(&"Esc"), "{:?}", app.screen().texts());
+    app.press("label:touch said-on-the-bar, then Enter").unwrap();
+    app.wait_until("the own key's command", SLOW, |_| session.path("said-on-the-bar").exists()).unwrap();
 
     // What it shows is kept, to draw first next time.
     assert!(storage.entries().iter().any(|(k, _)| k.starts_with("seen.me@127.0.0.1")), "nothing seen kept");

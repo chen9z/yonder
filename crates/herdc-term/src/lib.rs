@@ -371,6 +371,18 @@ impl Screen {
     /// in the text, wrapped lines joined, and the program's own (OSC 8);
     /// each with the rows it covers, top first, once each.
     pub fn links(&self) -> Vec<Link> {
+        self.found(web_addresses, true)
+    }
+
+    /// The files named on screen as shown (`src/main.rs:42:7`, as a
+    /// compiler or an agent says where), as [`links`](Self::links) are.
+    pub fn file_paths(&self) -> Vec<Link> {
+        self.found(file_paths, false)
+    }
+
+    /// What `find` finds in the screen's lines, wrapped ones joined, and
+    /// with `programs`, the program's own links (OSC 8) too.
+    fn found(&self, find: fn(&str) -> Vec<(usize, usize)>, programs: bool) -> Vec<Link> {
         let grid = self.term.grid();
         let offset = grid.display_offset() as i32;
         let (rows, cols) = (grid.screen_lines(), grid.columns());
@@ -388,14 +400,19 @@ impl Screen {
                 if cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
                     continue;
                 }
-                if let Some(link) = cell.hyperlink() {
+                if let Some(link) = cell.hyperlink().filter(|_| programs) {
                     add(link.uri().to_owned(), row as u16, row as u16);
                 }
                 text.push(cell.c);
                 at.push(row as u16);
             }
-            if !line[Column(cols - 1)].flags.contains(Flags::WRAPLINE) || row + 1 == rows {
-                for (start, end) in web_addresses(&text) {
+            // A line goes on in the next row when it wrapped there, or, as
+            // a screen redrawn row by row says nothing of wrapping, when it
+            // fills its row.
+            let last = &line[Column(cols - 1)];
+            let goes_on = last.flags.contains(Flags::WRAPLINE) || !matches!(last.c, ' ' | '\0');
+            if !goes_on || row + 1 == rows {
+                for (start, end) in find(&text) {
                     let chars = text[..start].chars().count();
                     let len = text[start..end].chars().count();
                     add(text[start..end].to_owned(), at[chars], at[chars + len - 1]);
@@ -457,9 +474,95 @@ pub fn web_addresses(text: &str) -> Vec<(usize, usize)> {
     out
 }
 
+/// Where files are named in `text` (byte ranges): a path with a folder
+/// or a line after it (`src/a.rs`, `a.rs:42`, `./a/b.py:7:3`), its name
+/// with an extension; not a web address, nor one from the home folder
+/// (whose home is the computer's to say).
+pub fn file_paths(text: &str) -> Vec<(usize, usize)> {
+    // Chinese and Japanese prose runs into a name without a space: its
+    // letters end one.
+    let wide = |c: char| matches!(c, '\u{2e80}'..='\u{a4cf}' | '\u{ac00}'..='\u{d7af}' | '\u{f900}'..='\u{faff}' | '\u{ff00}'..='\u{ffef}');
+    let part = |c: char| (c.is_alphanumeric() && !wide(c)) || matches!(c, '_' | '-' | '.' | '/' | '~' | '@' | '+' | ':');
+    let mut out = Vec::new();
+    let mut from = None;
+    // Runs of what a path is made of, each a candidate (a space ends the last).
+    for (end, c) in text.char_indices().chain([(text.len(), ' ')]) {
+        if part(c) {
+            from = from.or(Some(end));
+            continue;
+        }
+        let Some(start) = from.take() else { continue };
+        let run = text[start..end].trim_end_matches(['.', ':']);
+        if run.contains("://") || run.starts_with('~') {
+            continue;
+        }
+        // Then `:line` or `:line:column`, if any.
+        let mut path = run;
+        let mut line = false;
+        for _ in 0..2 {
+            if let Some((before, n)) = path.rsplit_once(':')
+                && !n.is_empty()
+                && n.bytes().all(|b| b.is_ascii_digit())
+            {
+                path = before;
+                line = true;
+            }
+        }
+        let name = path.rsplit('/').next().unwrap_or(path);
+        let named = name.rsplit_once('.').is_some_and(|(stem, ext)| {
+            !stem.trim_start_matches('.').is_empty() && (1..=10).contains(&ext.len()) && ext.starts_with(|c: char| c.is_ascii_alphabetic()) && ext.bytes().all(|b| b.is_ascii_alphanumeric())
+        });
+        if named && !path.contains(':') && (line || path.contains('/')) {
+            out.push((start, start + run.len()));
+        }
+    }
+    out
+}
+
+/// A file named on screen: where under `folder` (or from `/`), and the
+/// line (from 1) said with it.
+pub fn file_place(said: &str) -> (String, Option<u32>) {
+    let mut path = said;
+    let mut numbers = Vec::new();
+    while let Some((before, n)) = path.rsplit_once(':').filter(|(_, n)| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())) {
+        numbers.push(n);
+        path = before;
+    }
+    let line = numbers.last().and_then(|n| n.parse().ok()).filter(|n| *n > 0);
+    (path.trim_start_matches("./").to_owned(), line)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_paths_are_named_with_a_folder_or_a_line() {
+        let found = |t: &str| file_paths(t).into_iter().map(|(a, b)| t[a..b].to_owned()).collect::<Vec<_>>();
+        assert_eq!(found("  --> src/workspace.rs:161:21"), ["src/workspace.rs:161:21"]);
+        assert_eq!(found("see main.rs:42. And ./a/b.py, too"), ["main.rs:42", "./a/b.py"]);
+        assert_eq!(found("Edited /tmp/x/notes.md (3 lines)"), ["/tmp/x/notes.md"]);
+        assert!(found("v0.167.1 example.com e.g. 1.5 ~/workspace/a.rs https://a.b/c.rs main.rs").is_empty(), "{:?}", found("v0.167.1 example.com e.g. 1.5 ~/workspace/a.rs https://a.b/c.rs main.rs"));
+        assert_eq!(found("和 wiki/ubuntu.md重复，改了app/src/main.rs：好"), ["wiki/ubuntu.md", "app/src/main.rs"]);
+        assert_eq!(found("café/menü.rs:3"), ["café/menü.rs:3"]);
+        assert_eq!(file_place("./src/a.rs:42:7"), ("src/a.rs".to_owned(), Some(42)));
+        assert_eq!(file_place("/x/b.py"), ("/x/b.py".to_owned(), None));
+    }
+
+    #[test]
+    fn a_full_row_goes_on_in_the_next() {
+        // As a screen redrawn row by row has it: no wrap marked.
+        let mut s = Screen::new(12, 3, Palette::default());
+        s.feed(b"at /a/bc/def\x1b[2;1Hg.rs:40 ok\x1b[3;1Hhttps://x");
+        assert_eq!(s.file_paths(), [Link { url: "/a/bc/defg.rs:40".into(), rows: (0, 1) }]);
+    }
+
+    #[test]
+    fn file_paths_on_screen_join_wrapped_lines() {
+        let mut s = Screen::new(12, 4, Palette::default());
+        s.feed(b"at crates/term/lib.rs:9 ok\r\n\x1b]8;;https://x.y/z.rs\x1b\\z\x1b]8;;\x1b\\");
+        assert_eq!(s.file_paths(), [Link { url: "crates/term/lib.rs:9".into(), rows: (0, 1) }]);
+    }
 
     #[test]
     fn web_addresses_lose_what_prose_puts_after_them() {

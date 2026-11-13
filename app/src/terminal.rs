@@ -245,15 +245,25 @@ pub fn terminal(engine: Engine, address: String, swipes: Swipes) -> impl IntoEle
         move || {
             let viewer = viewer.clone();
             let links = nearest_links(viewer.with_screen(|s| s.links()), pressed.get());
+            let mut paths = nearest_links(viewer.with_screen(|s| s.file_paths()), pressed.get());
+            paths.truncate(PATHS);
+            let address = address.clone();
             spawn(async move {
                 use crate::pick::{self, Item};
                 let mut items: Vec<Item> = links.iter().enumerate().map(|(i, l)| Item::glyph(format!("link:{i}"), t!("Open {}", short_url(&l.url)), "external-link")).collect();
+                items.extend(paths.iter().enumerate().map(|(i, p)| Item::glyph(format!("file:{i}"), t!("Open {}", short_path(&p.url)), "file")));
                 items.extend([Item::glyph("select", t!("Select text"), "copy"), Item::glyph("paste", t!("Paste"), "clipboard")]);
                 let picked = pick::one(t!("Terminal"), items).await;
                 match picked.as_deref() {
                     Some(link) if link.starts_with("link:") => {
                         if let Some(l) = link[5..].parse::<usize>().ok().and_then(|i| links.get(i)) {
                             let _ = open_url(l.url.clone()).await;
+                        }
+                    }
+                    Some(file) if file.starts_with("file:") => {
+                        let said = file[5..].parse::<usize>().ok().and_then(|i| paths.get(i));
+                        if let Some(route) = said.and_then(|p| file_route(&address, &p.url)) {
+                            nav::push(route);
                         }
                     }
                     Some("select") => {
@@ -384,6 +394,47 @@ fn nearest_links(mut links: Vec<herdc_term::Link>, row: u16) -> Vec<herdc_term::
     links.sort_by_key(|l| away(l));
     links.truncate(LINKS);
     links
+}
+
+/// How many files named on screen a held terminal offers.
+const PATHS: usize = 2;
+
+/// The page of a file the terminal at `address` names: from its pane's
+/// folder (the space's, if it says none), at the line said with it.
+fn file_route(address: &str, said: &str) -> Option<Route> {
+    let live = crate::live::live()?;
+    let (path, line) = herdc_term::file_place(said);
+    let place = live.view.with_untracked(|v| {
+        let space = v.active_space()?;
+        let pane = space.tabs.iter().flat_map(|t| &t.panes).find(|p| [&p.terminal, &p.shown].iter().any(|t| t.as_deref() == Some(address)));
+        let folder = pane.and_then(|p| p.cwd.clone()).filter(|c| !c.is_empty()).unwrap_or_else(|| space.folder.clone());
+        Some(herdc_engine::tools::Place { on: space.machine.clone(), folder })
+    })?;
+    // From `/`, its own folder is the place.
+    Some(match path.strip_prefix('/').and(path.rsplit_once('/')) {
+        Some((folder, name)) => Route::File { place: herdc_engine::tools::Place { folder: folder.to_owned(), ..place }, path: name.to_owned(), line },
+        None => Route::File { place, path, line },
+    })
+}
+
+/// A file as a menu says it: as said, or, too long for a row, its name
+/// and line with as many folders before them as fit.
+fn short_path(said: &str) -> String {
+    const ROOM: usize = 32;
+    let said = said.trim_start_matches("./");
+    if said.chars().count() <= ROOM {
+        return said.to_owned();
+    }
+    let mut kept = String::new();
+    for part in said.rsplit('/') {
+        let longer = if kept.is_empty() { part.to_owned() } else { format!("{part}/{kept}") };
+        if !kept.is_empty() && longer.chars().count() + 2 > ROOM {
+            break;
+        }
+        kept = longer;
+    }
+    let n = kept.chars().count();
+    if n + 2 > ROOM { format!("…{}", kept.chars().skip(n + 1 - ROOM).collect::<String>()) } else { format!("…/{kept}") }
 }
 
 /// A link as a menu says it: no scheme, and not too long.
@@ -734,6 +785,21 @@ fn repeats(key: Key) -> bool {
 
 /// Key `id` of the bar (Settings, Key bar), as it does.
 fn bar_item(id: &str, viewer: Rc<Viewer>, latch: Latch) -> View {
+    // One's own types its words, and Enter a moment after: at once, an
+    // agent's prompt (Codex's) takes it as a pasted line's end.
+    if let Some(words) = keybar::said(id) {
+        let (words, enter) = match words.strip_suffix('\n') {
+            Some(words) => (words.to_owned(), true),
+            None => (words.to_owned(), false),
+        };
+        return bar_key(&keybar::face(id).unwrap_or_default(), move || {
+            send_text(&viewer, latch, &words);
+            if enter {
+                let viewer = viewer.clone();
+                set_timeout(ENTER_AFTER, move || viewer.key(Key::Enter, Mods::NONE));
+            }
+        });
+    }
     let Some((shows, does)) = keybar::find(id) else { return view() };
     match does {
         Does::Key(key) if repeats(key) => repeating_key(shows, move || {
@@ -759,8 +825,11 @@ fn bar_item(id: &str, viewer: Rc<Viewer>, latch: Latch) -> View {
     }
 }
 
+/// How long one's own key waits to press Enter after its words.
+const ENTER_AFTER: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// A key's face: what it shows, in `ink`.
-fn key_face(label: &'static str, ink: impl Fn() -> Hsla + 'static) -> View {
+fn key_face(label: &str, ink: impl Fn() -> Hsla + 'static) -> View {
     view()
         .min_w(px(42.0))
         .h(px(36.0))
@@ -776,11 +845,19 @@ fn key_face(label: &'static str, ink: impl Fn() -> Hsla + 'static) -> View {
         .child(match label {
             "↵" => ui::glyph("corner-down-left", 18.0, theme::FOREGROUND).into_element(),
             "⌄" => ui::glyph("chevron-down", 18.0, theme::FOREGROUND).into_element(),
-            _ => text(label).text_size(px(14.0)).font_family(theme::MONO).text_color(ink).into_element(),
+            // One's own key that presses Enter after its words.
+            _ if keybar::words(label).1 => view()
+                .flex_row()
+                .items_center()
+                .gap(px(4.0))
+                .child(text(keybar::words(label).0.to_owned()).text_size(px(14.0)).font_family(theme::MONO).text_color(ink))
+                .child(ui::glyph("corner-down-left", 13.0, theme::MUTED))
+                .into_element(),
+            _ => text(label.to_owned()).text_size(px(14.0)).font_family(theme::MONO).text_color(ink).into_element(),
         })
 }
 
-fn bar_key(label: &'static str, press: impl Fn() + 'static) -> View {
+fn bar_key(label: &str, press: impl Fn() + 'static) -> View {
     key_face(label, || theme::now(theme::FOREGROUND)).on_press(press)
 }
 
@@ -936,6 +1013,9 @@ mod tests {
         assert_eq!(near, ["http://b", "http://c", "http://a"]);
         assert_eq!(super::short_url("https://github.com/x/"), "github.com/x");
         assert_eq!(super::short_url(&format!("https://{}", "a".repeat(60))).chars().count(), 44);
+        assert_eq!(super::short_path("./src/main.rs:4"), "src/main.rs:4");
+        assert_eq!(super::short_path("/Users/me/workspace/yonder/app/src/terminal.rs:400:5"), "…/app/src/terminal.rs:400:5");
+        assert_eq!(super::short_path(&format!("/a/{}.rs", "b".repeat(40))).chars().count(), 32);
     }
 
     #[test]

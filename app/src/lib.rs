@@ -118,7 +118,7 @@ fn page(live: Live, route: Route) -> Screen {
         Route::KeyBar => keybar::keybar_page(),
         Route::Commands => palette::commands_page(live),
         Route::Files(place) => files::files_page(live, place),
-        Route::File { place, path } => files::file_page(live, place, path),
+        Route::File { place, path, line } => files::file_page(live, place, path, line),
         Route::Changes(place) => changes::changes_page(live, place),
         Route::Diff { place, changes, file } => changes::diff_page(live, place, changes, file),
         Route::Worktrees(place) => worktrees::worktrees_page(live, place),
