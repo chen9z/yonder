@@ -272,6 +272,7 @@ fn zh(en: &str) -> Option<&'static str> {
         "Open {}" => "打开 {}",
         "Copy all" => "全部复制",
         "Copied" => "已复制",
+        "Add it to ~/.ssh/authorized_keys on the computer." => "把它加到电脑的 ~/.ssh/authorized_keys 里。",
         "The terminal's text is on the clipboard." => "终端文字已复制到剪贴板。",
         "What the program copied is on the clipboard." => "程序复制的内容已放到剪贴板。",
         "Paste" => "粘贴",

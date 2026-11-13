@@ -22,87 +22,136 @@ pub fn settings_page(live: Live) -> nsh_core::element::Screen {
             Link::Lost { error } => link::Lost::of(error).said(&live.computer.host),
         })
     });
+    // The line's state, as a dot by the computer's name.
+    let state = computed(move || world.with(|v| match &v.link {
+        Link::Connected { .. } => theme::ADDED,
+        Link::Connecting => theme::WORKING,
+        Link::Lost { .. } => theme::BLOCKED,
+    }));
+    let copied = about.clone();
     ui::page(t!("Settings")).child(
         scroll().flex_1().bg(theme::CANVAS).child(
             view()
+                .pt(px(4.0))
                 .pb(move || px(safe_area().bottom.0 + 24.0))
-                .child(ui::heading(|| t!("TERMINAL").into()))
-                .child(
-                    setting(|| t!("Font size").into(), move || t!("{} pt", prefs.font.get())).child(
+                .child(heading(t!("TERMINAL")))
+                .child(card(vec![
+                    setting("type", || t!("Font size").into(), move || t!("{} pt", prefs.font.get())).child(
                         view()
                             .flex_row()
                             .items_center()
-                            .h(px(36.0))
+                            .h(px(34.0))
                             .rounded(px(10.0))
-                            .border_1()
-                            .border_color(theme::BORDER)
+                            .bg(theme::HOVER)
                             .child(step("minus", t!("Smaller text"), move || prefs.font.update(|f| *f = (*f - 1.0).max(crate::terminal::FONT.0))))
-                            .child(view().w(px(1.0)).h(px(18.0)).bg(theme::BORDER))
+                            .child(view().w(px(1.0)).h(px(16.0)).bg(theme::BORDER))
                             .child(step("plus", t!("Larger text"), move || prefs.font.update(|f| *f = (*f + 1.0).min(crate::terminal::FONT.1)))),
                     ),
-                )
-                .child(
-                    setting(|| t!("Fit terminals to the phone").into(), || t!("Else they keep the desktop's size, drawn smaller").into())
+                    setting("smartphone", || t!("Fit terminals to the phone").into(), || t!("Else they keep the desktop's size, drawn smaller").into())
                         .child(ui::toggle(prefs.fit, t!("Fit terminals to the phone"))),
-                )
-                .child(
-                    setting(|| t!("Key bar").into(), move || t!("{} keys", prefs.keys.with(Vec::len)))
-                        .active(|s| s.bg(theme::HOVER))
-                        .role(AccessibilityRole::Button)
-                        .on_press(|| nav::push(Route::KeyBar))
-                        .child(ui::glyph("chevron-right", 16.0, theme::DIM)),
-                )
-                .child(
-                    setting(|| t!("Language").into(), move || match prefs.language.get() {
-                        Language::System => t!("System").into(),
-                        Language::English => "English".into(),
-                        Language::Chinese => "中文".into(),
-                    })
-                    .active(|s| s.bg(theme::HOVER))
-                    .child(ui::glyph("chevron-right", 16.0, theme::DIM))
-                    .role(AccessibilityRole::Button)
-                    .on_press(move || {
-                        spawn(async move {
-                            use crate::pick::{self, Icon, Item};
-                            let now = prefs.language.get_untracked();
-                            let items = vec![
-                                Item::new("system", t!("System"), Icon::None).checked(now == Language::System),
-                                Item::new("en", "English", Icon::None).checked(now == Language::English),
-                                Item::new("zh", "中文", Icon::None).checked(now == Language::Chinese),
-                            ];
-                            let picked = pick::one(t!("Language"), items).await;
-                            match picked.as_deref() {
-                                Some("system") => prefs.language.set(Language::System),
-                                Some("en") => prefs.language.set(Language::English),
-                                Some("zh") => prefs.language.set(Language::Chinese),
-                                _ => {}
-                            }
-                        });
-                    }),
-                )
-                .child(ui::heading(|| t!("COMPUTER").into()))
-                .child(setting(move || live.computer.name.clone(), move || core.get()))
-                .child(ui::action_row(t!("Edit connection"), Act::Go, || nav::push(Route::EditConnection)))
-                .child(ui::action_row(t!("Leave this computer"), Act::Lose, live::close))
-                .child(ui::heading(|| t!("THIS PHONE'S KEY").into()))
-                .child(
-                    view().px(px(16.0)).gap(px(8.0)).child(
+                    leads(setting("keyboard", || t!("Key bar").into(), move || t!("{} keys", prefs.keys.with(Vec::len))), || nav::push(Route::KeyBar)),
+                    leads(
+                        setting("languages", || t!("Language").into(), move || match prefs.language.get() {
+                            Language::System => t!("System").into(),
+                            Language::English => "English".into(),
+                            Language::Chinese => "中文".into(),
+                        }),
+                        move || {
+                            spawn(async move {
+                                use crate::pick::{self, Icon, Item};
+                                let now = prefs.language.get_untracked();
+                                let items = vec![
+                                    Item::new("system", t!("System"), Icon::None).checked(now == Language::System),
+                                    Item::new("en", "English", Icon::None).checked(now == Language::English),
+                                    Item::new("zh", "中文", Icon::None).checked(now == Language::Chinese),
+                                ];
+                                match pick::one(t!("Language"), items).await.as_deref() {
+                                    Some("system") => prefs.language.set(Language::System),
+                                    Some("en") => prefs.language.set(Language::English),
+                                    Some("zh") => prefs.language.set(Language::Chinese),
+                                    _ => {}
+                                }
+                            });
+                        },
+                    ),
+                ]))
+                .child(heading(t!("COMPUTER")))
+                .child(card(vec![
+                    setting("monitor", move || live.computer.name.clone(), move || core.get())
+                        .child(view().w(px(8.0)).h(px(8.0)).mr(px(4.0)).rounded(px(4.0)).bg(move || theme::now(state.get()))),
+                    action("plug", t!("Edit connection"), Act::Go, || nav::push(Route::EditConnection)),
+                    action("log-out", t!("Leave this computer"), Act::Lose, live::close),
+                ]))
+                .child(heading(t!("THIS PHONE'S KEY")))
+                .child(card(vec![
+                    view().px(px(16.0)).py(px(14.0)).child(
                         text(public.clone())
                             .font_family(theme::MONO)
                             .text_size(px(12.0))
+                            .line_height(px(18.0))
                             .text_color(theme::MUTED)
                             .selectable(true),
                     ),
-                )
-                .child(ui::action_row(t!("Copy"), Act::Do, move || set_clipboard(public.clone())))
-                .child(ui::heading(|| t!("ABOUT").into()))
-                .child(setting(|| "Yonder".into(), version))
-                .child(ui::action_row(t!("Copy diagnostics"), Act::Do, move || {
-                    set_clipboard(diagnostics(&about, prefs));
-                    about.say(herdc_engine::Note::info(t!("Copied"), t!("Paste it where you tell what went wrong.")));
-                })),
+                    action("copy", t!("Copy"), Act::Do, move || {
+                        set_clipboard(public.clone());
+                        copied.say(herdc_engine::Note::info(t!("Copied"), t!("Add it to ~/.ssh/authorized_keys on the computer.")));
+                    }),
+                ]))
+                .child(heading(t!("ABOUT")))
+                .child(card(vec![
+                    setting("info", || "Yonder".into(), version),
+                    action("stethoscope", t!("Copy diagnostics"), Act::Do, move || {
+                        set_clipboard(diagnostics(&about, prefs));
+                        about.say(herdc_engine::Note::info(t!("Copied"), t!("Paste it where you tell what went wrong.")));
+                    }),
+                ])),
         ),
     )
+}
+
+/// A group's heading, in line with its rows' words.
+fn heading(title: &'static str) -> View {
+    view()
+        .px(px(32.0))
+        .pt(px(22.0))
+        .pb(px(8.0))
+        .child(text(title).text_size(px(12.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::DIM))
+}
+
+/// Rows that go together, on a card, a line between each (from their words on).
+fn card(rows: Vec<View>) -> View {
+    let last = rows.len().saturating_sub(1);
+    view().mx(px(16.0)).rounded(px(14.0)).overflow_hidden().bg(theme::POPOVER).children(rows.into_iter().enumerate().map(move |(at, row)| {
+        view().child(row).children((at < last).then(|| view().h(px(1.0)).ml(px(50.0)).bg(theme::BORDER)))
+    }))
+}
+
+/// A setting that leads to a page or a choice: pressed, with a chevron.
+fn leads(row: View, press: impl Fn() + 'static) -> View {
+    row.active(|s| s.bg(theme::HOVER)).role(AccessibilityRole::Button).on_press(press).child(ui::glyph("chevron-right", 16.0, theme::DIM))
+}
+
+/// A row that does something: its glyph and words in the color of what
+/// it does, a chevron where it leads to a page.
+fn action(icon: &'static str, title: &'static str, act: Act, press: impl Fn() + 'static) -> View {
+    let ink = match act {
+        Act::Go => theme::FOREGROUND,
+        Act::Do => theme::ACCENT,
+        Act::Lose => theme::BLOCKED,
+    };
+    view()
+        .flex_row()
+        .items_center()
+        .gap(px(14.0))
+        .px(px(16.0))
+        .h(px(52.0))
+        .active(|s| s.bg(theme::HOVER))
+        .role(AccessibilityRole::Button)
+        .label(title)
+        .on_press(press)
+        .child(ui::glyph(icon, 20.0, if act == Act::Go { theme::MUTED } else { ink }))
+        .child(text(title).flex_1().text_size(px(15.0)).text_color(ink).number_of_lines(1))
+        .children((act == Act::Go).then(|| ui::glyph("chevron-right", 16.0, theme::DIM)))
 }
 
 /// The app's release build number and source revision (`apk.sh`).
@@ -151,15 +200,17 @@ fn step(icon: &'static str, label: &'static str, press: impl Fn() + 'static) -> 
         .child(ui::glyph(icon, 16.0, theme::FOREGROUND))
 }
 
-/// A setting's row: what it is, what it is now, and its controls after.
-fn setting(title: impl Fn() -> String + 'static, now: impl Fn() -> String + 'static) -> View {
+/// A setting's row: its glyph, what it is, what it is now, and its
+/// controls after.
+fn setting(icon: &'static str, title: impl Fn() -> String + 'static, now: impl Fn() -> String + 'static) -> View {
     view()
         .flex_row()
         .items_center()
-        .gap(px(8.0))
+        .gap(px(14.0))
         .px(px(16.0))
         .py(px(10.0))
-        .min_h(px(56.0))
+        .min_h(px(58.0))
+        .child(ui::glyph(icon, 20.0, theme::MUTED))
         .child(
             view()
                 .flex_1()
