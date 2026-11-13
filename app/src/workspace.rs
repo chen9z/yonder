@@ -183,7 +183,9 @@ fn waiting_elsewhere(v: &herdc_engine::View) -> (usize, &'static str) {
 /// A tab's menu, as the desktop's tab bar offers it.
 fn tab_menu(live: Live, id: String) {
     spawn(async move {
-        let picked = ui::choose(t!("Tab"), &[("rename", t!("Rename")), ("settle", t!("Put away")), ("close", t!("Close"))]).await;
+        use crate::pick::{self, Item};
+        let items = vec![Item::glyph("rename", t!("Rename"), "pencil"), Item::glyph("settle", t!("Put away"), "archive"), Item::glyph("close", t!("Close"), "x").danger()];
+        let picked = pick::one(t!("Tab"), items).await;
         let command = match picked.as_deref() {
             Some("rename") => "tab.rename",
             Some("settle") => "tab.settle",
@@ -346,9 +348,9 @@ fn tab_strip(live: Live) -> impl IntoElement {
                     .on_press(move || {
                         let (live, tabs) = (back.clone(), settled.get_untracked());
                         spawn(async move {
-                            let actions: Vec<(&str, &str)> = tabs.iter().map(|(id, label)| (id.as_str(), label.as_str())).collect();
+                            let items = tabs.iter().map(|(id, label)| crate::pick::Item::glyph(id.clone(), label.clone(), "archive")).collect();
                             // Shown, it comes back to the lists.
-                            if let Some(id) = ui::choose(t!("Put away"), &actions).await {
+                            if let Some(id) = crate::pick::one(t!("Put away"), items).await {
                                 live.run("tab.select", serde_json::json!({ "id": id }));
                             }
                         });

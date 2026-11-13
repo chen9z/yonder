@@ -246,10 +246,10 @@ pub fn terminal(engine: Engine, address: String, swipes: Swipes) -> impl IntoEle
             let viewer = viewer.clone();
             let links = nearest_links(viewer.with_screen(|s| s.links()), pressed.get());
             spawn(async move {
-                let shown: Vec<(String, String)> = links.iter().enumerate().map(|(i, l)| (format!("link:{i}"), t!("Open {}", short_url(&l.url)))).collect();
-                let mut actions: Vec<(&str, &str)> = shown.iter().map(|(id, label)| (id.as_str(), label.as_str())).collect();
-                actions.extend([("select", t!("Select text")), ("paste", t!("Paste"))]);
-                let picked = crate::ui::choose(t!("Terminal"), &actions).await;
+                use crate::pick::{self, Item};
+                let mut items: Vec<Item> = links.iter().enumerate().map(|(i, l)| Item::glyph(format!("link:{i}"), t!("Open {}", short_url(&l.url)), "external-link")).collect();
+                items.extend([Item::glyph("select", t!("Select text"), "copy"), Item::glyph("paste", t!("Paste"), "clipboard")]);
+                let picked = pick::one(t!("Terminal"), items).await;
                 match picked.as_deref() {
                     Some(link) if link.starts_with("link:") => {
                         if let Some(l) = link[5..].parse::<usize>().ok().and_then(|i| links.get(i)) {

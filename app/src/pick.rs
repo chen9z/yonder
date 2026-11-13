@@ -12,6 +12,7 @@ use std::rc::Rc;
 /// What is drawn before a choice.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Icon {
+    None,
     /// One of the lists' glyphs (`assets/chrome`).
     Glyph(&'static str),
     /// A program's own (its programs.json entry).
@@ -28,11 +29,26 @@ pub struct Item {
     pub status: Option<&'static str>,
     /// The one shown now.
     pub checked: bool,
+    /// It loses something (closes, forgets, stops): in red.
+    pub danger: bool,
 }
 
 impl Item {
     pub fn new(id: impl Into<String>, label: impl Into<String>, icon: Icon) -> Item {
-        Item { id: id.into(), label: label.into(), icon, status: None, checked: false }
+        Item { id: id.into(), label: label.into(), icon, status: None, checked: false, danger: false }
+    }
+
+    /// With one of the lists' glyphs.
+    pub fn glyph(id: impl Into<String>, label: impl Into<String>, glyph: &'static str) -> Item {
+        Item::new(id, label, Icon::Glyph(glyph))
+    }
+
+    pub fn danger(self) -> Item {
+        Item { danger: true, ..self }
+    }
+
+    pub fn checked(self, checked: bool) -> Item {
+        Item { checked, ..self }
     }
 }
 
@@ -72,6 +88,11 @@ pub async fn menu(title: &str, sections: Vec<Section>) -> Option<String> {
     })?;
     shown.set(Some(Rc::new((title.to_owned(), sections))));
     rx.await.ok().flatten()
+}
+
+/// One of `items`, in a section of their own.
+pub async fn one(title: &str, items: Vec<Item>) -> Option<String> {
+    menu(title, vec![Section { title: None, items }]).await
 }
 
 /// The sheet, over every page.
@@ -130,8 +151,11 @@ pub fn host() -> impl IntoElement {
 
 /// One choice: its icon, its words, then its status and a check.
 fn row(item: Item, press: impl Fn() + 'static) -> impl IntoElement {
+    let ink = if item.danger { theme::BLOCKED } else { theme::FOREGROUND };
+    let has_icon = item.icon != Icon::None;
     let icon = match item.icon {
-        Icon::Glyph(name) => ui::glyph(name, 20.0, theme::FOREGROUND).into_element(),
+        Icon::None => view().into_element(),
+        Icon::Glyph(name) => ui::glyph(name, 20.0, ink).into_element(),
         Icon::Program(program) => ui::program_icon(move || program.clone(), 20.0).into_element(),
         Icon::Space(name, color) => ui::space_mark(move || name.clone(), move || color).into_element(),
     };
@@ -143,17 +167,18 @@ fn row(item: Item, press: impl Fn() + 'static) -> impl IntoElement {
         .px(px(20.0))
         .h(px(52.0))
         .active(|s| s.bg(theme::HOVER))
+        .test_id(&format!("pick-{}", item.id))
         .role(AccessibilityRole::Button)
         .label(item.label.clone())
         .accessibility_state(AccessibilityState { selected: item.checked, ..Default::default() })
         .on_press(press)
-        .child(view().w(px(22.0)).items_center().child(icon))
+        .children(has_icon.then(|| view().w(px(22.0)).items_center().child(icon)))
         .child(
             text(item.label)
                 .flex_shrink(1.0)
                 .text_size(px(16.0))
                 .font_weight(if item.checked { FontWeight::SEMIBOLD } else { FontWeight::NORMAL })
-                .text_color(theme::FOREGROUND)
+                .text_color(ink)
                 .number_of_lines(1),
         )
         .child(view().flex_1())

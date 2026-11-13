@@ -2,6 +2,7 @@
 
 use crate::live::{self, Live};
 use crate::nav::{self, Route};
+use crate::pick::{self, Item};
 use crate::{agents, theme, ui, workspace, worktrees};
 use herdc_engine::tools::Place;
 use herdc_engine::SpaceView;
@@ -85,8 +86,14 @@ fn top_bar(live: Live, show_spaces: Signal<bool>) -> impl IntoElement {
         .child(ui::icon_button("ellipsis", t!("Menu"), move || {
             let live = live.clone();
             spawn(async move {
-                let actions = [("commands", t!("Commands")), ("machine", t!("Add a machine…")), ("edit", t!("Edit connection")), ("settings", t!("Settings")), ("leave", t!("Leave"))];
-                match ui::choose(&live.computer.name, &actions).await.as_deref() {
+                let items = vec![
+                    Item::glyph("commands", t!("Commands"), "command"),
+                    Item::glyph("machine", t!("Add a machine…"), "server"),
+                    Item::glyph("edit", t!("Edit connection"), "plug"),
+                    Item::glyph("settings", t!("Settings"), "settings"),
+                    Item::glyph("leave", t!("Leave"), "log-out").danger(),
+                ];
+                match pick::one(&live.computer.name, items).await.as_deref() {
                     Some("commands") => nav::push(Route::Commands),
                     Some("machine") => nav::push(Route::AddMachine),
                     Some("edit") => nav::push(Route::EditConnection),
@@ -337,20 +344,21 @@ fn space_row(live: Live, s: ReadSignal<SpaceView>, g: ReadSignal<Group>, drag: S
                         found
                     }
                 };
-                let mut actions = vec![("rename", t!("Rename")), ("tab", t!("New tab here"))];
+                let mut items = vec![Item::glyph("rename", t!("Rename"), "pencil"), Item::glyph("tab", t!("New tab here"), "terminal")];
+                let (files, changes) = (Item::glyph("files", t!("Files"), "folder"), Item::glyph("changes", t!("Changes"), "file-diff"));
                 match known {
                     Some(Some(linked)) => {
-                        actions.extend([("new", t!("New worktree…")), ("open", t!("Open worktree…"))]);
+                        items.extend([Item::glyph("new", t!("New worktree…"), "branch"), Item::glyph("open", t!("Open worktree…"), "layers")]);
                         if linked {
-                            actions.push(("remove", t!("Remove worktree…")));
+                            items.push(Item::glyph("remove", t!("Remove worktree…"), "trash-2").danger());
                         }
-                        actions.extend([("files", t!("Files")), ("changes", t!("Changes"))]);
+                        items.extend([files, changes]);
                     }
-                    Some(None) => actions.push(("files", t!("Files"))),
-                    None => actions.extend([("open", t!("Worktrees…")), ("files", t!("Files")), ("changes", t!("Changes"))]),
+                    Some(None) => items.push(files),
+                    None => items.extend([Item::glyph("open", t!("Worktrees…"), "branch"), files, changes]),
                 }
-                actions.push(("close", t!("Close")));
-                match ui::choose(&space.name, &actions).await.as_deref() {
+                items.push(Item::glyph("close", t!("Close"), "x").danger());
+                match pick::one(&space.name, items).await.as_deref() {
                     Some("rename") => live.run("space.rename", json!({ "id": id })),
                     Some("tab") => {
                         live.run("tab.new", json!({ "space": id }));

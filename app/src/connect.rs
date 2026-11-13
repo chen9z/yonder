@@ -6,6 +6,7 @@
 //! a tap on one opens the computer there.
 
 use crate::link::{self, Computer, Lost};
+use crate::pick::{self, Item};
 use crate::{live, theme, ui};
 use herdc_engine::tools::worktree::ago;
 use herdc_engine::SpaceView;
@@ -124,7 +125,12 @@ fn computer_row(c: ReadSignal<Computer>, status: Option<&'static str>, then: imp
         .on_long_press(move || {
             let computer = c.get_untracked();
             spawn(async move {
-                match ui::choose(&computer.name, &[("edit", t!("Edit connection")), ("rename", t!("Rename")), ("forget", t!("Forget"))]).await.as_deref() {
+                let items = vec![
+                    Item::glyph("edit", t!("Edit connection"), "plug"),
+                    Item::glyph("rename", t!("Rename"), "pencil"),
+                    Item::glyph("forget", t!("Forget"), "trash-2").danger(),
+                ];
+                match pick::one(&computer.name, items).await.as_deref() {
                     Some("edit") => return edit(computer),
                     Some("rename") => {
                         let prompt = ui::name_prompt(computer.name.clone());

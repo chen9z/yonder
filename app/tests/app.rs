@@ -24,9 +24,9 @@ fn shows_tab(app: &mut Headless, n: usize) {
     app.wait_until(&format!("tab {n} shown"), SLOW, |screen| screen.selected(&tab) == Ok(true)).unwrap();
 }
 
-/// Picks `label` from the app's sheet of choices, once it shows.
-fn choose(app: &mut Headless, label: &str) {
-    let row = format!("label:{label}");
+/// Picks choice `id` from the app's sheet of choices, once it shows.
+fn pick(app: &mut Headless, id: &str) {
+    let row = format!("id:pick-{id}");
     app.wait_for_within(&row, SLOW).unwrap();
     app.press(&row).unwrap();
 }
@@ -145,13 +145,13 @@ fn adds_a_computer_then_works_there() {
 
     // Held, it pastes what the clipboard has.
     app.set_clipboard(Some("touch pasted-on-the-phone\n".to_owned()));
-    answer(&mut app, "Paste", "Select text");
     app.long_press("id:terminal").unwrap();
+    pick(&mut app, "paste");
     app.wait_until("the pasted command's file", SLOW, |_| session.path("pasted-on-the-phone").exists()).unwrap();
 
     // Or opens the text to select; Copy all copies it.
-    answer(&mut app, "Select text", "Paste");
     app.long_press("id:terminal").unwrap();
+    pick(&mut app, "select");
     app.wait_for_within("label:Copy all", SLOW).unwrap();
     app.press("label:Copy all").unwrap();
     let copied = app.screen().clipboard().map(str::to_owned).unwrap_or_default();
@@ -165,8 +165,9 @@ fn adds_a_computer_then_works_there() {
     })
     .unwrap();
     std::thread::sleep(Duration::from_millis(300));
-    answer(&mut app, "Open example.com/pull/7", "Select text");
     app.long_press("id:terminal").unwrap();
+    app.wait_for_within("label:Open example.com/pull/7", SLOW).unwrap();
+    pick(&mut app, "link:0");
     app.wait_until("the link opened", SLOW, |_| opened.lock().unwrap().contains(&"https://example.com/pull/7".to_owned())).unwrap();
 
     // What a program copies (OSC 52) reaches the phone's clipboard.
@@ -176,7 +177,7 @@ fn adds_a_computer_then_works_there() {
     // A swipe across goes between tabs: right to the one before, left to the next.
     // (`+` offers a terminal, the agents installed, a space or a worktree.)
     app.press("label:New").unwrap();
-    choose(&mut app, "Terminal");
+    pick(&mut app, "terminal");
     shows_tab(&mut app, 2);
     // The tabs are on a strip, the shown one selected; a tap shows another.
     app.press("role:tab[1]").unwrap();
@@ -184,12 +185,13 @@ fn adds_a_computer_then_works_there() {
     app.press("role:tab[2]").unwrap();
     shows_tab(&mut app, 2);
     // Put away, a tab is counted at the strip's end, and comes back from there.
-    answer(&mut app, "Put away", "Rename");
     app.long_press("role:tab[2]").unwrap();
+    pick(&mut app, "settle");
     app.wait_for_within("label:1 put away", SLOW).unwrap();
     shows_tab(&mut app, 1);
-    answer(&mut app, "2", "Put away");
     app.press("label:1 put away").unwrap();
+    app.wait_for_within("label:2", SLOW).unwrap();
+    app.press("label:2").unwrap();
     shows_tab(&mut app, 2);
     app.wait_for_within("role:tab[1]", SLOW).unwrap();
     app.drag("id:terminal", point(px(200.0), px(0.0))).unwrap();
@@ -291,8 +293,8 @@ fn adds_a_computer_then_works_there() {
     std::fs::create_dir_all(session.path(".ssh")).unwrap();
     std::fs::write(session.path(".ssh/config"), "Host vps\n  HostName 10.0.0.7\n  User can\n").unwrap();
     app.press("label:Spaces and agents").unwrap();
-    answer(&mut app, "Add a machine…", "Settings");
     app.press("label:Menu").unwrap();
+    pick(&mut app, "machine");
     app.wait_for_within("text:can@10.0.0.7", SLOW).unwrap();
     app.type_text("id:machine-target", "nobody@127.0.0.1:1").unwrap();
     app.press("label:Add the machine typed").unwrap();
@@ -323,8 +325,9 @@ fn opens_again_on_the_computer_it_was_on_in_its_language() {
     app.press("label:空间").unwrap();
     app.wait_for_within("text:还没有空间", SLOW).unwrap();
     // Its menu: leaving goes back to the computers, and stays there.
-    answer(&mut app, "断开", "设置");
     app.press("label:菜单").unwrap();
+    app.wait_for_within("label:设置", SLOW).unwrap();
+    pick(&mut app, "leave");
     app.wait_for_within("text:电脑", SLOW).unwrap();
 }
 
@@ -395,8 +398,8 @@ fn what_a_computer_showed_last_is_drawn_while_it_is_not_there() {
     app.wait_for("label:notes").unwrap();
     assert!(app.screen().texts().iter().any(|t| t.contains("10m ago")), "{:?}", app.screen().texts());
 
-    answer(&mut app, "Rename", "Forget");
     app.long_press("label:desk").unwrap();
+    pick(&mut app, "rename");
     app.wait_for("id:prompt").unwrap();
     app.clear("id:prompt").unwrap();
     app.type_text("id:prompt", "Studio desk").unwrap();
@@ -437,8 +440,8 @@ fn edits_a_saved_connection_only_after_it_works() {
     config.storage = Some(storage.clone());
     let mut app = Headless::start(config).unwrap();
     app.wait_for("label:Studio").unwrap();
-    answer(&mut app, "Edit connection", "Forget");
     app.long_press("label:Studio").unwrap();
+    pick(&mut app, "edit");
     app.clear("id:port").unwrap();
     app.type_text("id:port", "65536").unwrap();
     app.press("text:Test and save").unwrap();
@@ -461,8 +464,8 @@ fn edits_a_saved_connection_only_after_it_works() {
 
     app.press("label:Studio").unwrap();
     app.wait_for_within("label:Menu", SLOW).unwrap();
-    answer(&mut app, "Edit connection", "Settings");
     app.press("label:Menu").unwrap();
+    pick(&mut app, "edit");
     app.clear("id:display name").unwrap();
     app.type_text("id:display name", "Mini").unwrap();
     app.press("text:Test and save").unwrap();
@@ -547,11 +550,11 @@ fn another_session_is_a_computer_of_its_own() {
 
     // At home, a space's handle drags it below the next.
     app.press("label:New").unwrap();
-    choose(&mut app, "Terminal");
+    pick(&mut app, "terminal");
     shows_tab(&mut app, 2);
     app.press("label:Spaces and agents").unwrap();
-    answer(&mut app, "Rename", "Rename");
     app.long_press("text:home").unwrap();
+    pick(&mut app, "rename");
     app.wait_for_within("text:Rename space", SLOW).unwrap();
     app.type_text("id:prompt", "first space").unwrap();
     app.press("text:OK").unwrap();
@@ -567,8 +570,8 @@ fn another_session_is_a_computer_of_its_own() {
     app.wait_until("the first space below the second", SLOW, |s| matches!(order(s), (Some(a), Some(b)) if a > b)).unwrap();
 
     // Held, a space renames: home and the computer have the new name.
-    answer(&mut app, "Rename", "Rename");
     app.long_press("text:home").unwrap();
+    pick(&mut app, "rename");
     app.wait_for_within("text:Rename space", SLOW).unwrap();
     app.type_text("id:prompt", "named").unwrap();
     app.press("text:OK").unwrap();

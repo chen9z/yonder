@@ -63,7 +63,14 @@ pub fn settings_page(live: Live) -> nsh_core::element::Screen {
                     .role(AccessibilityRole::Button)
                     .on_press(move || {
                         spawn(async move {
-                            let picked = ui::choose(t!("Language"), &[("system", t!("System")), ("en", "English"), ("zh", "中文")]).await;
+                            use crate::pick::{self, Icon, Item};
+                            let now = prefs.language.get_untracked();
+                            let items = vec![
+                                Item::new("system", t!("System"), Icon::None).checked(now == Language::System),
+                                Item::new("en", "English", Icon::None).checked(now == Language::English),
+                                Item::new("zh", "中文", Icon::None).checked(now == Language::Chinese),
+                            ];
+                            let picked = pick::one(t!("Language"), items).await;
                             match picked.as_deref() {
                                 Some("system") => prefs.language.set(Language::System),
                                 Some("en") => prefs.language.set(Language::English),

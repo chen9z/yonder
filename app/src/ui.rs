@@ -347,16 +347,6 @@ pub async fn agree(title: &str, message: &str, yes: &str) -> bool {
     answer.ok().and_then(|a| a.action).is_some_and(|a| a == "yes")
 }
 
-/// Picks one of `actions` (id, label) from a sheet.
-pub async fn choose(title: &str, actions: &[(&str, &str)]) -> Option<String> {
-    let mut sheet = alert_dialog().title(title.to_owned()).action_sheet().cancel("cancel", t!("Cancel"));
-    for (id, label) in actions {
-        sheet = sheet.action(id.to_string(), label.to_string());
-    }
-    let action = sheet.show().await.ok()?.action?;
-    (action != "cancel").then(|| action.to_string())
-}
-
 /// A question that wants words: shown while `asking` holds one.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Prompt {

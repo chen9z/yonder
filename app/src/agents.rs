@@ -380,8 +380,9 @@ fn agent_row(live: Live, l: ReadSignal<Line>, now: Signal<u64>, inline: bool, fo
                     let Some(a) = agent() else { return };
                     let live = hold.clone();
                     spawn(async move {
-                        let pin = if a.pinned { ("unpin", t!("Unpin")) } else { ("pin", t!("Pin to the top")) };
-                        match ui::choose(&ui::title(&a.title), &[pin, ("kill", t!("Stop it"))]).await.as_deref() {
+                        use crate::pick::{self, Item};
+                        let pin = if a.pinned { Item::glyph("unpin", t!("Unpin"), "pin-off") } else { Item::glyph("pin", t!("Pin to the top"), "pin") };
+                        match pick::one(&ui::title(&a.title), vec![pin, Item::glyph("kill", t!("Stop it"), "square").danger()]).await.as_deref() {
                             Some("pin") => live.run("terminal.pin", json!({ "terminal": a.address, "pinned": true })),
                             Some("unpin") => live.run("terminal.pin", json!({ "terminal": a.address, "pinned": false })),
                             Some("kill") if ui::confirm(t!("Stop this agent?"), t!("It ends with its sub-agents."), t!("Stop")).await => {

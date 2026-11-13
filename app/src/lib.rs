@@ -83,6 +83,8 @@ pub fn App() -> impl IntoElement {
                 None => connect::computers_page().into_element(),
             }
         }))
+        // The sheet of choices, over every page (the computers' too).
+        .child(pick::host())
 }
 
 fn connected(live: Live) -> impl IntoElement {
@@ -100,10 +102,8 @@ fn connected(live: Live) -> impl IntoElement {
                     move |route, depth| page(pages.clone(), route.get_untracked()).on_dismiss(move || nav::truncate(depth.get_untracked())),
                 )),
         )
-        // Over every page: toasts, the sheet of choices, and the words a
-        // command asks for.
+        // Over every page: toasts, and the words a command asks for.
         .child(workspace::notes(live.clone()))
-        .child(pick::host())
         .child(ui::prompt_dialog(live.asking, {
             let live = live.clone();
             move |words| live.answered(words)
