@@ -330,8 +330,15 @@ fn adds_a_computer_then_works_there() {
     std::fs::create_dir_all(session.path(".ssh")).unwrap();
     std::fs::write(session.path(".ssh/config"), "Host vps\n  HostName 10.0.0.7\n  User can\n").unwrap();
     app.press("label:Spaces and agents").unwrap();
-    app.press("label:Menu").unwrap();
-    pick(&mut app, "machine");
+    // What home's menu had is in Settings: the sort of the agents too.
+    app.press("label:Settings").unwrap();
+    app.wait_for_within("text:Priority", SLOW).unwrap();
+    app.press("text:Sort agents").unwrap();
+    pick(&mut app, "grouped");
+    app.wait_for_within("text:Grouped by space", SLOW).unwrap();
+    app.press("text:Sort agents").unwrap();
+    pick(&mut app, "priority");
+    app.press("label:Add a machine…").unwrap();
     app.wait_for_within("text:can@10.0.0.7", SLOW).unwrap();
     app.type_text("id:machine-target", "nobody@127.0.0.1:1").unwrap();
     app.press("label:Add the machine typed").unwrap();
@@ -362,9 +369,8 @@ fn opens_again_on_the_computer_it_was_on_in_its_language() {
     app.press("label:空间").unwrap();
     app.wait_for_within("text:还没有空间", SLOW).unwrap();
     // Its menu: leaving goes back to the computers, and stays there.
-    app.press("label:菜单").unwrap();
-    app.wait_for_within("label:设置", SLOW).unwrap();
-    pick(&mut app, "leave");
+    app.press("label:设置").unwrap();
+    app.press("label:断开这台电脑").unwrap();
     app.wait_for_within("text:电脑", SLOW).unwrap();
 }
 
@@ -500,9 +506,9 @@ fn edits_a_saved_connection_only_after_it_works() {
     assert_eq!(entries[0]["fingerprint"], served.fingerprint);
 
     app.press("label:Studio").unwrap();
-    app.wait_for_within("label:Menu", SLOW).unwrap();
-    app.press("label:Menu").unwrap();
-    pick(&mut app, "edit");
+    app.wait_for_within("label:Settings", SLOW).unwrap();
+    app.press("label:Settings").unwrap();
+    app.press("label:Edit connection").unwrap();
     app.clear("id:display name").unwrap();
     app.type_text("id:display name", "Mini").unwrap();
     app.press("text:Test and save").unwrap();
@@ -736,7 +742,7 @@ fn home_makes_no_space_before_the_computer_has_said_its_layout() {
     let mut app = Headless::start(config).unwrap();
     // Home says it's loading, not that there are no spaces, and its New
     // space takes no press: one made now would go nowhere.
-    app.wait_for("label:Sort agents: Priority").unwrap();
+    app.wait_for("label:Settings").unwrap();
     app.press("label:Spaces").unwrap();
     app.wait_for("text:Loading…").unwrap();
     let texts = app.screen().texts();

@@ -261,35 +261,6 @@ pub fn agent_list(live: Live) -> impl IntoElement {
     scroll().flex_1().bg(theme::CANVAS).child(agents_section(live, true))
 }
 
-pub fn sort_button() -> impl IntoElement {
-    let grouped = use_context::<crate::prefs::Prefs>().unwrap().grouped;
-    view()
-        .w(px(40.0))
-        .h(px(40.0))
-        .rounded(px(10.0))
-        .items_center()
-        .justify_center()
-        .active(|s| s.bg(theme::HOVER))
-        .role(AccessibilityRole::Button)
-        .label(move || if grouped.get() { t!("Sort agents: Grouped by space") } else { t!("Sort agents: Priority") })
-        .on_press(move || {
-            spawn(async move {
-                use crate::pick::{Icon, Item, Section};
-                let on = grouped.get_untracked();
-                let items = vec![
-                    Item { checked: !on, ..Item::new("priority", t!("Priority"), Icon::Glyph("clock")) },
-                    Item { checked: on, ..Item::new("grouped", t!("Grouped by space"), Icon::Glyph("layers")) },
-                ];
-                match crate::pick::menu(t!("Sort agents"), vec![Section { title: None, items }]).await.as_deref() {
-                    Some("priority") => grouped.set(false),
-                    Some("grouped") => grouped.set(true),
-                    _ => {}
-                }
-            });
-        })
-        .child(dynamic(move || ui::glyph(if grouped.get() { "layers" } else { "clock" }, 16.0, theme::DIM).into_element()))
-}
-
 /// The agents section: its heading, with the sort, and the list.
 /// `inline`: in a pane, where showing one stays on the page.
 pub fn agents_section(live: Live, inline: bool) -> impl IntoElement {
@@ -305,7 +276,7 @@ pub fn agents_section(live: Live, inline: bool) -> impl IntoElement {
     });
     let fold = move |id: String| folded.update(|set| if set.contains(&id) { set.retain(|k| k != &id) } else { set.push(id) });
     view()
-        .child(when(move || inline, || crate::home::section(t!("Agents"), sort_button())))
+        .child(when(move || inline, || crate::home::section(t!("Agents"), view())))
         .child(when(move || lines.with(Vec::is_empty), || {
             text(t!("No agent status yet. Agents show up here when they report their status. Older versions and agents inside tmux may not."))
                 .px(px(16.0))

@@ -1,6 +1,6 @@
 //! Home navigation between agents and spaces grouped by machine.
 
-use crate::live::{self, Live};
+use crate::live::Live;
 use crate::nav::{self, Route};
 use crate::pick::{self, Item};
 use crate::{agents, theme, ui, workspace, worktrees};
@@ -83,27 +83,10 @@ fn top_bar(live: Live, show_spaces: Signal<bool>) -> impl IntoElement {
         .border_b(px(0.0))
         .child(text(name).flex_1().pl(px(12.0)).text_size(px(20.0)).font_weight(FontWeight::BOLD).text_color(theme::FOREGROUND).number_of_lines(1))
         .child(ui::icon_button("search", t!("Jump to a terminal"), || nav::push(Route::Search)))
-        .child(when(move || show_spaces.get(), move || new_space_button(new_space.clone())).otherwise(agents::sort_button))
-        .child(ui::icon_button("ellipsis", t!("Menu"), move || {
-            let live = live.clone();
-            spawn(async move {
-                let items = vec![
-                    Item::glyph("commands", t!("Commands"), "command"),
-                    Item::glyph("machine", t!("Add a machine…"), "server"),
-                    Item::glyph("edit", t!("Edit connection"), "plug"),
-                    Item::glyph("settings", t!("Settings"), "settings"),
-                    Item::glyph("leave", t!("Leave"), "log-out").danger(),
-                ];
-                match pick::one(&live.computer.name, items).await.as_deref() {
-                    Some("commands") => nav::push(Route::Commands),
-                    Some("machine") => nav::push(Route::AddMachine),
-                    Some("edit") => nav::push(Route::EditConnection),
-                    Some("settings") => nav::push(Route::Settings),
-                    Some("leave") => live::close(),
-                    _ => {}
-                }
-            });
-        }))
+        // New space where the spaces are; the rest (the agents' sort, the
+        // computer's connection, machines, commands, leaving) in Settings.
+        .child(when(move || show_spaces.get(), move || new_space_button(new_space.clone())))
+        .child(ui::icon_button("settings", t!("Settings"), || nav::push(Route::Settings)))
 }
 
 /// A section's heading, with what it offers on the right.

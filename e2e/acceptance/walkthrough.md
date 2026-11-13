@@ -70,13 +70,15 @@ it with the screenshot's name and go on.
    its one line, which ends "… (line truncated)". The diff's header says
    "1 of 3" (and so on) with ‹ and ›: › goes to the next file. Back
    returns to the list each time.
-5. `‹` (Spaces and agents) → the home page; its `⋯` (Menu): a sheet with
-   Commands, Add a machine…, Edit connection, Settings and Leave (red).
-   Press "Add a machine…": "FROM YOUR SSH CONFIG" lists `vps` with `can@10.0.0.7` and
+5. `‹` (Spaces and agents) → the home page: at its top right a search
+   (🔍) and Settings (a gear), and `+` on Spaces; no `⋯`. Press Settings,
+   then "Add a machine…": "FROM YOUR SSH CONFIG" lists `vps` with `can@10.0.0.7` and
    "Add"; a field `user@host` below. Back, then tap the space to return.
 6. Settings (in More): its rows sit on rounded cards under small headings
-   (TERMINAL, COMPUTER, THIS PHONE'S KEY, ABOUT), each row with a line
-   icon. The computer's row has a green dot. "Fit terminals to the phone"
+   (COMPUTER, TERMINAL, GENERAL, THIS PHONE'S KEY, ABOUT), each row with a
+   line icon. COMPUTER has the computer (a green dot), Edit connection,
+   Add a machine…, Commands and Leave this computer (red); GENERAL has
+   Language and Sort agents (Priority). "Fit terminals to the phone"
    shows a switch, on. The font size − and + change the size shown; the
    terminal's text follows when back. Put it back as it was. "Copy" under
    the key shows a note "Copied" saying where the key goes.

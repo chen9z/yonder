@@ -1,5 +1,6 @@
-//! Settings: the terminal's size and fit, the app's language, this
-//! phone's key, and the computer it is on.
+//! Settings: the computer the app is on (its connection, its machines,
+//! its commands, leaving it), the terminal's size, fit and keys, the
+//! app's language and how agents are sorted, this phone's key.
 
 use crate::i18n::Language;
 use crate::live::{self, Live};
@@ -34,6 +35,15 @@ pub fn settings_page(live: Live) -> nsh_core::element::Screen {
             view()
                 .pt(px(4.0))
                 .pb(move || px(safe_area().bottom.0 + 24.0))
+                .child(ui::card_heading(t!("COMPUTER")))
+                .child(ui::card(vec![
+                    setting("monitor", move || live.computer.name.clone(), move || core.get())
+                        .child(view().w(px(8.0)).h(px(8.0)).mr(px(4.0)).rounded(px(4.0)).bg(move || theme::now(state.get()))),
+                    action("plug", t!("Edit connection"), Act::Go, || nav::push(Route::EditConnection)),
+                    action("server", t!("Add a machine…"), Act::Go, || nav::push(Route::AddMachine)),
+                    action("command", t!("Commands"), Act::Go, || nav::push(Route::Commands)),
+                    action("log-out", t!("Leave this computer"), Act::Lose, live::close),
+                ]))
                 .child(ui::card_heading(t!("TERMINAL")))
                 .child(ui::card(vec![
                     setting("type", || t!("Font size").into(), move || t!("{} pt", prefs.font.get())).child(
@@ -50,6 +60,9 @@ pub fn settings_page(live: Live) -> nsh_core::element::Screen {
                     setting("smartphone", || t!("Fit terminals to the phone").into(), || t!("Else they keep the desktop's size, drawn smaller").into())
                         .child(ui::toggle(prefs.fit, t!("Fit terminals to the phone"))),
                     leads(setting("keyboard", || t!("Key bar").into(), move || t!("{} keys", prefs.keys.with(Vec::len))), || nav::push(Route::KeyBar)),
+                ]))
+                .child(ui::card_heading(t!("GENERAL")))
+                .child(ui::card(vec![
                     leads(
                         setting("languages", || t!("Language").into(), move || match prefs.language.get() {
                             Language::System => t!("System").into(),
@@ -74,13 +87,25 @@ pub fn settings_page(live: Live) -> nsh_core::element::Screen {
                             });
                         },
                     ),
-                ]))
-                .child(ui::card_heading(t!("COMPUTER")))
-                .child(ui::card(vec![
-                    setting("monitor", move || live.computer.name.clone(), move || core.get())
-                        .child(view().w(px(8.0)).h(px(8.0)).mr(px(4.0)).rounded(px(4.0)).bg(move || theme::now(state.get()))),
-                    action("plug", t!("Edit connection"), Act::Go, || nav::push(Route::EditConnection)),
-                    action("log-out", t!("Leave this computer"), Act::Lose, live::close),
+                    // How the Agents list goes: by what needs you, or by space.
+                    leads(
+                        setting("layers", || t!("Sort agents").into(), move || if prefs.grouped.get() { t!("Grouped by space").into() } else { t!("Priority").into() }),
+                        move || {
+                            spawn(async move {
+                                use crate::pick::{self, Icon, Item};
+                                let on = prefs.grouped.get_untracked();
+                                let items = vec![
+                                    Item::new("priority", t!("Priority"), Icon::Glyph("clock")).checked(!on),
+                                    Item::new("grouped", t!("Grouped by space"), Icon::Glyph("layers")).checked(on),
+                                ];
+                                match pick::one(t!("Sort agents"), items).await.as_deref() {
+                                    Some("priority") => prefs.grouped.set(false),
+                                    Some("grouped") => prefs.grouped.set(true),
+                                    _ => {}
+                                }
+                            });
+                        },
+                    ),
                 ]))
                 .child(ui::card_heading(t!("THIS PHONE'S KEY")))
                 .child(ui::card(vec![

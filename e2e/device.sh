@@ -84,13 +84,16 @@ adb shell ime set "$keyboard" >/dev/null
 adb shell am start -W -n "$app/com.longbridge.nsh.AppActivity" >/dev/null
 wait_for() { for _ in $(seq 60); do "$ui" dump 2>/dev/null | grep -q "$1" && return; sleep 1; done; echo "never saw $1" >&2; exit 1; }
 seen() { "$ui" dump 2>/dev/null | grep -q "$1"; }
-# Back to the computers: left from the workspace (Settings) or from home (its menu).
-for _ in $(seq 30); do seen "'Switch space'\|'Menu'\|'Add a computer'" && break; sleep 1; done
-if seen "'Switch space'"; then
-  "$ui" press More; sleep 1; "$ui" press Settings; sleep 1.5; "$ui" press "Leave this computer"
-elif seen "'Menu'"; then
-  "$ui" press Menu; sleep 1; "$ui" press pick-leave
-fi
+# Back to the computers: left in Settings, from the workspace (More) or from home.
+leave() {
+  for _ in $(seq 30); do seen "'Switch space'\|'Settings'\|'Add a computer'" && break; sleep 1; done
+  if seen "'Switch space'"; then
+    "$ui" press More; sleep 1; "$ui" press Settings; sleep 1.5; "$ui" press "Leave this computer"
+  elif seen "'Settings'"; then
+    "$ui" press Settings; sleep 1.5; "$ui" press "Leave this computer"
+  fi
+}
+leave
 wait_for "'Add a computer'"
 # The computer the app was on: the first under COMPUTERS, opened again at the end.
 was=$("$ui" nodes | awk -F '	' '$1 == "COMPUTERS" { after = 1; next } after && $2 != "" && $2 != "Add a computer" { print $2; exit }')
@@ -120,11 +123,7 @@ cat "$state/walkthrough.result.md"
 
 # The test computer forgotten, and the person's opened again.
 adb shell am start -W -n "$app/com.longbridge.nsh.AppActivity" >/dev/null; sleep 2
-if seen "'Switch space'"; then
-  "$ui" press More; sleep 1; "$ui" press Settings; sleep 1.5; "$ui" press "Leave this computer"
-elif seen "'Menu'"; then
-  "$ui" press Menu; sleep 1; "$ui" press pick-leave
-fi
+leave
 wait_for "'Add a computer'"
 adb shell input swipe $("$ui" find e2e-test) $("$ui" find e2e-test) 900; sleep 1
 "$ui" press pick-forget; sleep 1; "$ui" press Forget; sleep 1
