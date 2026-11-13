@@ -367,6 +367,47 @@ impl Screen {
         self.snapshot().text()
     }
 
+    /// The links on screen as shown (scrolled back or not): web addresses
+    /// in the text, wrapped lines joined, and the program's own (OSC 8);
+    /// each with the rows it covers, top first, once each.
+    pub fn links(&self) -> Vec<Link> {
+        let grid = self.term.grid();
+        let offset = grid.display_offset() as i32;
+        let (rows, cols) = (grid.screen_lines(), grid.columns());
+        let mut found: Vec<Link> = Vec::new();
+        let mut add = |url: String, first: u16, last: u16| match found.iter_mut().find(|l| l.url == url) {
+            Some(l) => l.rows.1 = l.rows.1.max(last),
+            None => found.push(Link { url, rows: (first, last) }),
+        };
+        // A line as written: its text, and the row each char is on.
+        let (mut text, mut at) = (String::new(), Vec::<u16>::new());
+        for row in 0..rows {
+            let line = &grid[Line(row as i32 - offset)];
+            for col in 0..cols {
+                let cell = &line[Column(col)];
+                if cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
+                    continue;
+                }
+                if let Some(link) = cell.hyperlink() {
+                    add(link.uri().to_owned(), row as u16, row as u16);
+                }
+                text.push(cell.c);
+                at.push(row as u16);
+            }
+            if !line[Column(cols - 1)].flags.contains(Flags::WRAPLINE) || row + 1 == rows {
+                for (start, end) in web_addresses(&text) {
+                    let chars = text[..start].chars().count();
+                    let len = text[start..end].chars().count();
+                    add(text[start..end].to_owned(), at[chars], at[chars + len - 1]);
+                }
+                text.clear();
+                at.clear();
+            }
+        }
+        found.sort_by_key(|l| l.rows);
+        found
+    }
+
     /// The screen and up to `history` lines above it, wrapped lines joined,
     /// trailing blanks gone: what a person copies from.
     pub fn text_with_history(&self, history: usize) -> String {
@@ -381,9 +422,68 @@ impl Screen {
     }
 }
 
+/// A link on screen: where it goes, and its first and last rows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Link {
+    pub url: String,
+    pub rows: (u16, u16),
+}
+
+/// Where web addresses are in `text` (byte ranges): `http://` or
+/// `https://` up to a space, without what usually follows one in prose
+/// (a full stop, a closing bracket it didn't open).
+pub fn web_addresses(text: &str) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(found) = ["http://", "https://"].iter().filter_map(|p| text[from..].find(p)).min() {
+        let start = from + found;
+        let mut end = text[start..].find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '<' | '>' | '`' | '│' | '\u{0}')).map_or(text.len(), |e| start + e);
+        loop {
+            let url = &text[start..end];
+            let trimmed = url.trim_end_matches(['.', ',', ';', ':', '!', '?', '*']);
+            let unopened = |open: char, close: char| trimmed.ends_with(close) && trimmed.matches(close).count() > trimmed.matches(open).count();
+            let trimmed = if unopened('(', ')') || unopened('[', ']') || unopened('{', '}') { &trimmed[..trimmed.len() - 1] } else { trimmed };
+            if trimmed.len() == url.len() {
+                break;
+            }
+            end = start + trimmed.len();
+        }
+        // More than the scheme: a host at least.
+        if text[start..end].split_once("://").is_some_and(|(_, rest)| rest.chars().next().is_some_and(|c| c.is_alphanumeric() || c == '[')) {
+            out.push((start, end));
+        }
+        from = end.max(start + 1);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn web_addresses_lose_what_prose_puts_after_them() {
+        let found = |t: &str| web_addresses(t).into_iter().map(|(a, b)| t[a..b].to_owned()).collect::<Vec<_>>();
+        assert_eq!(found("see https://github.com/a/b/pull/7."), ["https://github.com/a/b/pull/7"]);
+        assert_eq!(found("(at http://localhost:3000/x)"), ["http://localhost:3000/x"]);
+        assert_eq!(found("https://en.wikipedia.org/wiki/Rust_(language), ok"), ["https://en.wikipedia.org/wiki/Rust_(language)"]);
+        assert_eq!(found("[docs](https://docs.rs/x) and 'http://a.b'"), ["https://docs.rs/x", "http://a.b"]);
+        assert!(found("http:// nothing https://").is_empty());
+    }
+
+    #[test]
+    fn links_on_screen_join_wrapped_lines() {
+        let mut s = Screen::new(20, 4, Palette::default());
+        s.feed(b"go https://example.com/a/long/path now\r\nhttp://b.c");
+        let links = s.links();
+        assert_eq!(links, [
+            Link { url: "https://example.com/a/long/path".into(), rows: (0, 1) },
+            Link { url: "http://b.c".into(), rows: (2, 2) },
+        ]);
+        // A program's own link (OSC 8) is one too.
+        s.feed(b"\r\n\x1b]8;;https://x.y/z\x1b\\here\x1b]8;;\x1b\\");
+        assert!(s.links().iter().any(|l| l.url == "https://x.y/z"), "{:?}", s.links());
+    }
 
     #[test]
     fn text_with_history_joins_wrapped_lines() {

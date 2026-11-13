@@ -35,6 +35,15 @@ fn adds_a_computer_then_works_there() {
     let mut config = EngineConfig::new(Root::of::<herdc_app::App>());
     let storage = MemoryStorage::new(Vec::<(String, String)>::new());
     config.storage = Some(storage.clone());
+    // The links the app opens, recorded rather than opened.
+    let opened = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    {
+        let opened = opened.clone();
+        config.host.handle_open_url(move |request| {
+            opened.lock().unwrap().push(request.url().to_owned());
+            request.handled();
+        });
+    }
     let mut app = Headless::start(config).unwrap();
     app.wait_for("text:Connect").unwrap();
 
@@ -134,6 +143,18 @@ fn adds_a_computer_then_works_there() {
     let copied = app.screen().clipboard().map(str::to_owned).unwrap_or_default();
     assert!(copied.contains("sleep 100"), "copied: {copied:?}");
 
+    // Held, it offers the links on screen, and opens one.
+    app.type_text("id:terminal-input", "echo see https://example.com/pull/7.\n").unwrap();
+    app.wait_until("the link on screen", SLOW, |_| {
+        let t = hc_terminals(&session)[0]["address"].as_str().unwrap_or_default().to_owned();
+        String::from_utf8_lossy(&session.hc(&["read", &t]).stdout).lines().any(|l| l.trim() == "see https://example.com/pull/7.")
+    })
+    .unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    answer(&mut app, "Open example.com/pull/7", "Select text");
+    app.long_press("id:terminal").unwrap();
+    app.wait_until("the link opened", SLOW, |_| opened.lock().unwrap().contains(&"https://example.com/pull/7".to_owned())).unwrap();
+
     // What a program copies (OSC 52) reaches the phone's clipboard.
     app.type_text("id:terminal-input", "printf '\\033]52;c;aGVsbG8=\\a'\n").unwrap();
     app.wait_until("the program's copy", SLOW, |screen| screen.clipboard() == Some("hello")).unwrap();
@@ -148,6 +169,15 @@ fn adds_a_computer_then_works_there() {
     app.wait_for_within("text:1 · Studio", SLOW).unwrap();
     app.press("role:tab[2]").unwrap();
     app.wait_for_within("text:2 · Studio", SLOW).unwrap();
+    // Put away, a tab is counted at the strip's end, and comes back from there.
+    answer(&mut app, "Put away", "Rename");
+    app.long_press("role:tab[2]").unwrap();
+    app.wait_for_within("label:1 put away", SLOW).unwrap();
+    app.wait_for_within("text:1 · Studio", SLOW).unwrap();
+    answer(&mut app, "2", "Put away");
+    app.press("label:1 put away").unwrap();
+    app.wait_for_within("text:2 · Studio", SLOW).unwrap();
+    app.wait_for_within("role:tab[1]", SLOW).unwrap();
     app.drag("id:terminal", point(px(200.0), px(0.0))).unwrap();
     app.wait_for_within("text:1 · Studio", SLOW).unwrap();
     app.drag("id:terminal", point(px(-200.0), px(0.0))).unwrap();

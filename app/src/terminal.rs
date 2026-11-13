@@ -238,12 +238,24 @@ pub fn terminal(engine: Engine, address: String, swipes: Swipes) -> impl IntoEle
     // A long press opened the text: its release is no tap.
     let held = stored(false);
     // Held: its text to select, or the clipboard pasted in.
+    // The row a finger went down on: the links nearest it are offered first.
+    let pressed = stored(0u16);
     let select = {
         let viewer = viewer.clone();
         move || {
             let viewer = viewer.clone();
+            let links = nearest_links(viewer.with_screen(|s| s.links()), pressed.get());
             spawn(async move {
-                match crate::ui::choose(t!("Terminal"), &[("select", t!("Select text")), ("paste", t!("Paste"))]).await.as_deref() {
+                let shown: Vec<(String, String)> = links.iter().enumerate().map(|(i, l)| (format!("link:{i}"), t!("Open {}", short_url(&l.url)))).collect();
+                let mut actions: Vec<(&str, &str)> = shown.iter().map(|(id, label)| (id.as_str(), label.as_str())).collect();
+                actions.extend([("select", t!("Select text")), ("paste", t!("Paste"))]);
+                let picked = crate::ui::choose(t!("Terminal"), &actions).await;
+                match picked.as_deref() {
+                    Some(link) if link.starts_with("link:") => {
+                        if let Some(l) = link[5..].parse::<usize>().ok().and_then(|i| links.get(i)) {
+                            let _ = open_url(l.url.clone()).await;
+                        }
+                    }
                     Some("select") => {
                         let text = viewer.with_screen(|s| s.text_with_history(SELECT_HISTORY));
                         nav::push(Route::Text(Arc::new(text)));
@@ -301,7 +313,9 @@ pub fn terminal(engine: Engine, address: String, swipes: Swipes) -> impl IntoEle
                 .on_layout(move |b: &Bounds<Points>| area.set((b.size.width.0, b.size.height.0)))
                 .claim_touches(TouchClaim::on_start())
                 .test_id("terminal")
-                .on_responder_grant(move |_: &ResponderEvent| {
+                .on_responder_grant(move |e: &ResponderEvent| {
+                    let (c, s) = (cell.get_untracked(), scale.get_untracked());
+                    pressed.replace((e.location.y.0 / (c.height * s)).max(0.0) as u16);
                     // A finger down stops a fling.
                     flung.replace(flung.get().wrapping_add(1));
                     swiped.replace(0);
@@ -344,7 +358,9 @@ pub fn terminal(engine: Engine, address: String, swipes: Swipes) -> impl IntoEle
                     }
                 })
                 .child(
-                    terminal_rows(snapshot, cell, scale).bind_scale(&zoom),
+                    // Touches are the terminal's: where a finger is is then
+                    // counted from its top, not from the row it is on.
+                    terminal_rows(snapshot, cell, scale).bind_scale(&zoom).pointer_events(PointerEvents::None),
                 )
                 .child(status(info))
                 .child(latest(viewer.clone(), snapshot))
@@ -357,6 +373,23 @@ pub fn terminal(engine: Engine, address: String, swipes: Swipes) -> impl IntoEle
                 key_bar(viewer.clone(), latch)
             }
         }))
+}
+
+/// How many links a held terminal offers.
+const LINKS: usize = 3;
+
+/// The links nearest `row` (one it is on first), at most [`LINKS`].
+fn nearest_links(mut links: Vec<herdc_term::Link>, row: u16) -> Vec<herdc_term::Link> {
+    let away = |l: &herdc_term::Link| if (l.rows.0..=l.rows.1).contains(&row) { 0 } else { l.rows.0.abs_diff(row).min(l.rows.1.abs_diff(row)) };
+    links.sort_by_key(|l| away(l));
+    links.truncate(LINKS);
+    links
+}
+
+/// A link as a menu says it: no scheme, and not too long.
+fn short_url(url: &str) -> String {
+    let bare = url.split_once("://").map_or(url, |(_, rest)| rest).trim_end_matches('/');
+    if bare.chars().count() > 44 { format!("{}…", bare.chars().take(43).collect::<String>()) } else { bare.to_owned() }
 }
 
 /// Keep the native display list of an unchanged line when scrolling moves it.
@@ -894,6 +927,16 @@ mod tests {
         assert_eq!(blank.iter().collect::<std::collections::HashSet<_>>().len(), 4);
     }
 
+
+    #[test]
+    fn links_nearest_the_finger_come_first_and_read_short() {
+        let link = |url: &str, rows| herdc_term::Link { url: url.into(), rows };
+        let all = vec![link("http://a", (0, 0)), link("http://b", (5, 6)), link("http://c", (9, 9)), link("http://d", (20, 20))];
+        let near: Vec<_> = super::nearest_links(all, 6).into_iter().map(|l| l.url).collect();
+        assert_eq!(near, ["http://b", "http://c", "http://a"]);
+        assert_eq!(super::short_url("https://github.com/x/"), "github.com/x");
+        assert_eq!(super::short_url(&format!("https://{}", "a".repeat(60))).chars().count(), 44);
+    }
 
     #[test]
     fn typing_is_the_difference() {

@@ -210,13 +210,21 @@ fn shown_tabs(v: &herdc_engine::View) -> Vec<&TabView> {
     v.active_space().map(|s| s.tabs.iter().filter(|t| !t.settled || t.active).collect()).unwrap_or_default()
 }
 
+/// The space's tabs put away (the shown one aside): id and label.
+fn settled_tabs(v: &herdc_engine::View) -> Vec<(String, String)> {
+    v.active_space().map(|s| s.tabs.iter().filter(|t| t.settled && !t.active).map(|t| (t.id.clone(), label(t))).collect()).unwrap_or_default()
+}
+
 /// The space's tabs, while it has more than one: a tap shows one, a hold
-/// offers its menu. The shown one is kept in view.
+/// offers its menu. The shown one is kept in view. Tabs put away are
+/// counted at the end, a tap bringing one back.
 fn tab_strip(live: Live) -> impl IntoElement {
     let world = live.view;
     let tabs = computed(move || world.with(|v| shown_tabs(v).into_iter().map(|t| TabChip { id: t.id.clone(), label: label(t), status: t.status, active: t.active }).collect::<Vec<_>>()));
-    when(move || tabs.with(|t| t.len() > 1), move || {
+    let settled = computed(move || world.with(|v| settled_tabs(v)));
+    when(move || tabs.with(|t| t.len() > 1) || settled.with(|s| !s.is_empty()), move || {
         let live = live.clone();
+        let back = live.clone();
         let strip = element_ref();
         // Where each chip is along the strip, to bring the shown one in.
         let at = stored(std::collections::HashMap::<String, f32>::new());
@@ -286,7 +294,32 @@ fn tab_strip(live: Live) -> impl IntoElement {
                                 .text_color(move || if t.with(|t| t.active) { theme::now(theme::FOREGROUND) } else { theme::now(theme::MUTED) }),
                         )
                 },
-            )))
+            ))
+            .child(when(move || settled.with(|s| !s.is_empty()), move || {
+                let back = back.clone();
+                view()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(5.0))
+                    .h(px(34.0))
+                    .px(px(10.0))
+                    .rounded(px(8.0))
+                    .active(|s| s.bg(theme::HOVER))
+                    .role(AccessibilityRole::Button)
+                    .label(move || t!("{} put away", settled.with(Vec::len)))
+                    .on_press(move || {
+                        let (live, tabs) = (back.clone(), settled.get_untracked());
+                        spawn(async move {
+                            let actions: Vec<(&str, &str)> = tabs.iter().map(|(id, label)| (id.as_str(), label.as_str())).collect();
+                            // Shown, it comes back to the lists.
+                            if let Some(id) = ui::choose(t!("Put away"), &actions).await {
+                                live.run("tab.select", serde_json::json!({ "id": id }));
+                            }
+                        });
+                    })
+                    .child(ui::glyph("archive", 14.0, theme::DIM))
+                    .child(text(move || settled.with(Vec::len).to_string()).text_size(px(13.0)).text_color(theme::DIM))
+            })))
     })
 }
 
@@ -675,15 +708,21 @@ pub fn notes(live: Live) -> impl IntoElement {
         })
     });
     let all_shown = signal(false);
-    let shown = computed(move || notes.with(|n| if all_shown.get() || n.len() <= SHOWN_NOTES { n.clone() } else { n[n.len() - SHOWN_NOTES..].to_vec() }));
-    let hidden = computed(move || notes.with(Vec::len) - shown.with(Vec::len));
     let typing = computed(|| keyboard_height().0 > 0.0);
+    // While typing, the newest only: the room above the keyboard is small.
+    let most = move || if typing.get() { 1 } else { SHOWN_NOTES };
+    let shown = computed(move || notes.with(|n| if all_shown.get() || n.len() <= most() { n.clone() } else { n[n.len() - most()..].to_vec() }));
+    let hidden = computed(move || notes.with(Vec::len) - shown.with(Vec::len));
+    // At the top, under the workspace's tab strip when it has one.
+    let strip = computed(move || {
+        nav::routes().with(|r| r.0.last() == Some(&Route::Workspace)) && world.with(|v| shown_tabs(v).len() > 1 || !settled_tabs(v).is_empty())
+    });
     dynamic(move || {
         let stack = view().absolute().left(px(12.0)).right(px(12.0)).gap(px(8.0)).pointer_events(PointerEvents::BoxNone);
-        let stack = if typing.get() { stack.top(move || px(safe_area().top.0 + 56.0)) } else { stack.bottom(move || ui::bottom_inset() + px(56.0)) };
+        let stack = if typing.get() { stack.top(move || px(safe_area().top.0 + if strip.get() { 96.0 } else { 56.0 })) } else { stack.bottom(move || ui::bottom_inset() + px(56.0)) };
         let live = live.clone();
         stack
-            .child(when(move || hidden.get() > 0 || (all_shown.get() && notes.with(Vec::len) > SHOWN_NOTES), move || {
+            .child(when(move || hidden.get() > 0 || (all_shown.get() && notes.with(Vec::len) > most()), move || {
                 view()
                     .self_end()
                     .px(px(12.0))
