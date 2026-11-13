@@ -132,6 +132,53 @@ pub fn forget(id: &str) {
         return;
     }
     Storage::remove_item(&format!("{SEEN}{id}"));
+    if let Some(path) = view_file(id) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// The folder the engines keep this phone's own choices in.
+#[cfg(target_os = "android")]
+fn views_folder() -> Option<std::path::PathBuf> {
+    let line = std::fs::read("/proc/self/cmdline").ok()?;
+    let package = String::from_utf8(line.split(|b| *b == 0).next()?.to_vec()).ok()?;
+    let package = package.split(':').next()?;
+    let user = unsafe { libc::getuid() } / 100_000;
+    Some(std::path::PathBuf::from(format!("/data/user/{user}/{package}/files/views")))
+}
+
+/// Off a phone (the tests), nowhere: each run starts with the layout's own.
+#[cfg(not(target_os = "android"))]
+fn views_folder() -> Option<std::path::PathBuf> {
+    None
+}
+
+/// Where computer `id`'s engine keeps this phone's own choices, as the
+/// desktop keeps `view.json`: the tab each space shows, focus, zoom, tabs
+/// put away and what was seen. Named by the id's bytes (it has `@`, `:`, `/`).
+pub fn view_file(id: &str) -> Option<std::path::PathBuf> {
+    Some(views_folder()?.join(view_name(id)))
+}
+
+fn view_name(id: &str) -> String {
+    let name: String = id.bytes().map(|b| format!("{b:02x}")).collect();
+    format!("{name}.json")
+}
+
+/// A computer saved again under another id: its choices go with it when
+/// it is the same one (its key, user and session), else they go.
+pub fn carry_view(previous: &Computer, now: &Computer) {
+    let (from, to) = (previous.id(), now.id());
+    let (Some(old), Some(new)) = (view_file(&from), view_file(&to)) else { return };
+    if from == to || !old.exists() {
+        return;
+    }
+    let same = previous.fingerprint.is_some() && previous.fingerprint == now.fingerprint && previous.user == now.user && previous.session == now.session;
+    if same && !new.exists() {
+        let _ = std::fs::rename(&old, &new);
+    } else {
+        let _ = std::fs::remove_file(&old);
+    }
 }
 
 /// What a computer showed when it was last connected, and when (seconds
@@ -270,12 +317,19 @@ pub fn display(palette: &herdc_term::Palette, cell: (f32, f32)) -> Value {
 pub fn open(computer: &Computer, first: Option<Session>, display: Value, size: (u16, u16), password: Password) -> Result<Engine, String> {
     let _entered = runtime().enter();
     let (key, _) = phone_key()?;
-    Ok(Engine::start(connector(computer.clone(), key, first, password), Options { store: None, size: Some(size), display }))
+    let store = view_file(&computer.id());
+    Ok(Engine::start(connector(computer.clone(), key, first, password), Options { store, size: Some(size), display }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::Lost;
+
+    #[test]
+    fn each_computer_has_a_view_file_of_its_own() {
+        assert_eq!(super::view_name("me@h:22"), "6d6540683a3232.json");
+        assert_ne!(super::view_name("me@h:22/a"), super::view_name("me@h:22/b"));
+    }
 
     #[test]
     fn why_a_line_went() {
@@ -300,8 +354,9 @@ pub fn replace(previous: &str, computer: &Computer) -> Result<(), String> {
         return Err(t!("This connection is already saved.").into());
     }
     let entry = all.iter_mut().find(|c| c.id() == previous).ok_or(t!("Connection not found."))?;
-    *entry = computer.clone();
+    let was = std::mem::replace(entry, computer.clone());
     keep(&all)?;
+    carry_view(&was, computer);
     if previous != id {
         Storage::remove_item(&format!("{SEEN}{previous}"));
     }

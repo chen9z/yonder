@@ -54,6 +54,7 @@ app 改名 **Yonder**，包名 `dev.yonder.app`（以前叫 Herdr / `dev.herdc.a
 - APK 只打 arm64，fat LTO：66 MB → 33 MB。
 
 ### 修复
+- 重启 app 后，每个 space 回到上次看的 tab（以前总落在第一个），焦点、缩放、收起的 tab 和已读的提醒也保留。
 - 中文界面的工作树页还有英文（main checkout / open / detached）。
 - diff 页最后几行被系统导航栏挡住。
 - 已保留的子 agent 不再同时出现在顶层和父 agent 下（置顶的除外）；子 agent 优先使用列表中的状态。

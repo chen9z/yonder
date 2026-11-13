@@ -92,6 +92,11 @@ pub fn switch_connection(computer: Computer, first: Option<Session>, replacing: 
     // The pane's grid, near enough: the window below the header and tabs.
     let (w, h) = untracked(|| (window().width.0, window().height.0 - safe_area().top.0 - safe_area().bottom.0 - 88.0));
     let password: link::Password = Arc::new(std::sync::Mutex::new(computer.password.clone()));
+    // Its choices (each space's tab, focus, …) read by the engine as it
+    // starts: moved first when the connection was saved under another id.
+    if let Some(was) = replacing.and_then(|id| link::computers().into_iter().find(|c| c.id() == id)) {
+        link::carry_view(&was, &computer);
+    }
     let engine = link::open(&computer, first, link::display(&palette, (cell.width, cell.height)), cell.fit((w - 2.0 * crate::terminal::INSET_X, h - 2.0 * crate::terminal::INSET_Y)), password.clone())?;
     let previous = live();
     if let Some(old) = &previous { old.keep(); }
