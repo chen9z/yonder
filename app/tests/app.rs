@@ -179,12 +179,12 @@ fn adds_a_computer_then_works_there() {
     app.press("label:New").unwrap();
     pick(&mut app, "terminal");
     shows_tab(&mut app, 2);
-    // The tabs are on a strip, the shown one selected; a tap shows another.
+    // The tabs are dots under the name, the shown one selected; a tap shows another.
     app.press("role:tab[1]").unwrap();
     shows_tab(&mut app, 1);
     app.press("role:tab[2]").unwrap();
     shows_tab(&mut app, 2);
-    // Put away, a tab is counted at the strip's end, and comes back from there.
+    // Put away, a tab is counted after the dots, and comes back from there.
     app.long_press("role:tab[2]").unwrap();
     pick(&mut app, "settle");
     app.wait_for_within("label:1 put away", SLOW).unwrap();
@@ -432,7 +432,7 @@ fn what_a_computer_showed_last_is_drawn_while_it_is_not_there() {
     app.press("label:notes").unwrap();
     app.wait_for_within("text:proj", SLOW).unwrap();
     // Said to be on that machine, reached through the computer.
-    app.wait_for("text:1 · gpu · Studio desk").unwrap();
+    app.wait_for("text:· gpu · Studio desk").unwrap();
     app.press("label:Spaces and agents").unwrap();
     app.press("label:Spaces").unwrap();
     app.wait_for_within("text:notes", SLOW).unwrap();

@@ -28,9 +28,10 @@ current choice checked. `press` finds a row by its words. Look after every step;
 it with the screenshot's name and go on.
 
 1. The workspace shows a terminal with a shell prompt under a header: `‹`,
-   a small colored square with the space's first letter, the space's name,
-   `1 · ` and the computer under it, then `+` and `⋯` (line icons, not
-   characters). No keyboard yet, and no tab strip (the space has one tab).
+   a small colored square with the space's first letter, the space's name
+   and `· ` the computer after it on one line, then `+` and `⋯` (line
+   icons, not characters). No keyboard yet, and no dots under the name
+   (the space has one tab).
 2. Tap the terminal (`./adbui.sh tap 720 1400`); the keyboard comes up
    typing English letters (not composing Chinese), with a key bar above it
    (Esc, Tab, Ctrl, arrows). The keyboard's own layout is not the app's: a
@@ -53,15 +54,14 @@ it with the screenshot's name and go on.
    middle of the screen. Back returns to the terminal.
 3b. `+` (New): a sheet "New" offers "Terminal" (a `>_` icon) and the
    agents installed (their own icons), then "New space" and the
-   worktrees. Press "Terminal": a second tab opens, and a strip of two
-   tabs shows under the header (no line between the header and the
-   strip; a thin one under the strip, over the terminal), the new one
-   selected; the header's second line now says only the computer; a note
-   "2/2 · …" shows a moment over the terminal. Tap the first tab on the
-   strip: it is selected. Hold the second tab: a sheet "Tab" offers
-   Rename, Put away and Close (red); press "Close" (only that one: it was
-   opened here). The strip goes, and the header's second line starts
-   `1 · ` again.
+   worktrees. Press "Terminal": a second tab opens, and two dots show
+   under the space's name (no strip of tabs), the second a short bar (the
+   one shown); a note "2/2 · …" shows a moment over the terminal. Tap the
+   first dot (`./adbui.sh press` its tab's name, as `dump` says it): the
+   bar moves to it and "1/2 · …" shows. Swipe the terminal right to left
+   (`./adbui.sh swipe 1200 1400 200 1400`): the second again. Hold the
+   second dot: a sheet "Tab" offers Rename, Put away and Close (red);
+   press "Close" (only that one: it was opened here). The dots go.
 4. More (`⋯`): a sheet of icons (Split right, Split down, Zoom, Rename tab,
    Files, Changes, Worktrees, Put away tab, Commands, Settings) and "Close
    pane" in red. Changes: lists `big.txt`, `blob.bin`, `long.txt` as new.

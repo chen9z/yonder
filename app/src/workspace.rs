@@ -41,7 +41,6 @@ pub fn workspace_page(live: Live) -> impl IntoElement {
         .pl(move || safe_area().left)
         .pr(move || safe_area().right)
         .child(header(live.clone(), space, tab, more_open))
-        .child(tab_strip(live.clone()))
         .child(
             // Above the keyboard: a terminal typed in fits what is left.
             view()
@@ -76,8 +75,8 @@ fn header(
     // Agents elsewhere that need you, else that are done: said on the way
     // back, in the color of what they are.
     let waiting = computed(move || world.with(|v| waiting_elsewhere(v)));
-    // The tab strip goes on from the bar, as one: no line between.
-    let strip = computed(move || world.with(|v| has_strip(v)));
+    // The tabs, as dots under the name, while there are several.
+    let many = computed(move || world.with(|v| has_strip(v)));
     let computer = live.computer.id();
     let color = move || space.with(|s| s.as_ref().and_then(|s| prefs.colors.with(|c| c.get(&format!("{computer}\u{0}{}", s.0)).copied())).unwrap_or(0));
     // A machine's space says which, before the computer it's reached through.
@@ -87,9 +86,6 @@ fn header(
         computed(move || world.with(|v| v.active_space().and_then(|s| s.machine.clone())).map_or(computer.clone(), |m| format!("{} · {computer}", prefs.machine_name(&id, &m))))
     };
     ui::top_bar()
-        .border_b(move || px(if strip.get() { 0.0 } else { 1.0 }))
-        // With the strip under it, one line: as tall as its buttons.
-        .min_h(move || px(if strip.get() { 44.0 } else { 48.0 } + safe_area().top.0))
         .child(
             view()
                 .child(ui::icon_button("chevron-left", t!("Spaces and agents"), nav::home).pr(px(4.0)))
@@ -112,26 +108,30 @@ fn header(
         .child(
             view()
                 .flex_1()
-                .gap(px(1.0))
-                .role(AccessibilityRole::Button)
-                .label(t!("Switch space"))
-                .on_press({
-                    let live = live.clone();
-                    move || switch_space(live.clone(), prefs)
-                })
-                .on_long_press({
-                    let live = live.clone();
-                    move || {
-                        if let Some(id) = tab.with(|t| t.as_ref().map(|t| t.id.clone())) {
-                            tab_menu(live.clone(), id);
-                        }
-                    }
-                })
+                .gap(px(2.0))
                 .child(
+                    // The space and where it is: a tap goes to another, a hold
+                    // offers the shown tab's menu.
                     view()
                         .flex_row()
                         .items_center()
                         .gap(px(8.0))
+                        .min_h(px(24.0))
+                        .hit_slop(EdgeInsets::all(px(8.0)))
+                        .role(AccessibilityRole::Button)
+                        .label(t!("Switch space"))
+                        .on_press({
+                            let live = live.clone();
+                            move || switch_space(live.clone(), prefs)
+                        })
+                        .on_long_press({
+                            let live = live.clone();
+                            move || {
+                                if let Some(id) = tab.with(|t| t.as_ref().map(|t| t.id.clone())) {
+                                    tab_menu(live.clone(), id);
+                                }
+                            }
+                        })
                         .child(when(move || space.with(Option::is_some), move || {
                             ui::space_mark(move || space.with(|s| s.as_ref().map(|s| s.1.clone()).unwrap_or_default()), color.clone())
                         }))
@@ -143,21 +143,13 @@ fn header(
                                 .text_color(theme::FOREGROUND)
                                 .number_of_lines(1),
                         )
-                        // The strip says the tab: where it is goes after the name
-                        // (the status after both, a spare gap when there is none).
-                        .child(when(move || strip.get(), move || {
-                            text(move || format!("· {}", machine.get())).flex_shrink(1.0).text_size(px(13.0)).text_color(theme::MUTED).number_of_lines(1)
-                        }))
+                        // The status after where it is: a spare gap when there is none.
+                        .child(text(move || format!("· {}", machine.get())).flex_shrink(1.0).text_size(px(13.0)).text_color(theme::MUTED).number_of_lines(1))
                         .child(ui::tab_status(move || space.with(|s| s.as_ref().and_then(|s| s.2)))),
                 )
-                .child(when(move || !strip.get(), move || {
-                    text(move || {
-                        let names = world.with(|v| space_names(v));
-                        tab.with(|t| t.as_ref().map_or(machine.get(), |t| format!("{} · {}", label(t, &names), machine.get())))
-                    })
-                    .text_size(px(12.0))
-                    .text_color(theme::MUTED)
-                    .number_of_lines(1)
+                .child(when(move || many.get(), {
+                    let live = live.clone();
+                    move || tab_dots(live.clone())
                 })),
         )
         // The new-menu: a terminal, an agent, a space or a worktree.
@@ -240,7 +232,6 @@ struct TabChip {
     label: String,
     status: Option<&'static str>,
     active: bool,
-    program: serde_json::Value,
 }
 
 /// The tabs the space shows (a tab put away, unless it is the shown one).
@@ -248,7 +239,7 @@ fn shown_tabs(v: &herdc_engine::View) -> Vec<&TabView> {
     v.active_space().map(|s| s.tabs.iter().filter(|t| !t.settled || t.active).collect()).unwrap_or_default()
 }
 
-/// The strip is shown: more than one tab, or some put away.
+/// The tabs are shown (as dots): more than one, or some put away.
 fn has_strip(v: &herdc_engine::View) -> bool {
     shown_tabs(v).len() > 1 || !settled_tabs(v).is_empty()
 }
@@ -259,119 +250,86 @@ fn settled_tabs(v: &herdc_engine::View) -> Vec<(String, String)> {
     v.active_space().map(|s| s.tabs.iter().filter(|t| t.settled && !t.active).map(|t| (t.id.clone(), label(t, &names))).collect()).unwrap_or_default()
 }
 
-/// The space's tabs, while it has more than one: a tap shows one, a hold
-/// offers its menu. The shown one is kept in view. Tabs put away are
-/// counted at the end, a tap bringing one back.
-fn tab_strip(live: Live) -> impl IntoElement {
+/// The space's tabs as dots under its name, while it has more than one
+/// (a swipe across goes between them): the shown one a bar, one that
+/// works, needs you or is done in its color. A tap shows one, a hold
+/// offers its menu; tabs put away are counted after, a tap bringing one
+/// back.
+fn tab_dots(live: Live) -> impl IntoElement {
     let world = live.view;
     let tabs = computed(move || {
         world.with(|v| {
             let names = space_names(v);
-            shown_tabs(v).into_iter().map(|t| TabChip { id: t.id.clone(), label: label(t, &names), status: t.status, active: t.active, program: tab_program(t) }).collect::<Vec<_>>()
+            shown_tabs(v).into_iter().map(|t| TabChip { id: t.id.clone(), label: label(t, &names), status: t.status, active: t.active }).collect::<Vec<_>>()
         })
     });
     let settled = computed(move || world.with(|v| settled_tabs(v)));
-    when(move || tabs.with(|t| t.len() > 1) || settled.with(|s| !s.is_empty()), move || {
-        let live = live.clone();
-        let back = live.clone();
-        let strip = element_ref();
-        // Where each chip is along the strip, to bring the shown one in.
-        let at = stored(std::collections::HashMap::<String, f32>::new());
-        let width = stored(0.0f32);
-        let active = computed(move || tabs.with(|t| t.iter().find(|t| t.active).map(|t| t.id.clone())));
-        // Brought in once each time another is shown (when it is laid out,
-        // if not yet): a strip scrolled by hand stays where it was put.
-        let pending = stored(false);
-        let bring = move || {
-            if !pending.get() {
-                return;
-            }
-            if let Some(x) = active.with_untracked(|a| a.as_ref().and_then(|a| at.with(|at| at.get(a).copied()))) {
-                pending.replace(false);
-                strip.scroll_to(point(px((x - width.get() / 3.0).max(0.0)), px(0.0)), true);
-            }
-        };
-        effect(move || {
-            active.with(|_| ());
-            pending.replace(true);
-            bring();
-        });
-        scroll()
-            .horizontal()
-            .scrollbar(false)
-            .element_ref(&strip)
-            .on_layout(move |b: &Bounds<Points>| { width.replace(b.size.width.0); })
-            .bg(theme::CHROME)
-            .border_b_1()
-            .border_color(theme::BORDER)
-            .child(view().flex_row().items_center().px(px(6.0)).h(px(40.0)).gap(px(2.0)).child(each(
-                move || tabs.get(),
-                |t| t.id.clone(),
-                move |t, _| {
-                    let (press, hold) = (live.clone(), live.clone());
-                    let id = t.with_untracked(|t| t.id.clone());
-                    view()
-                        .on_layout(move |b: &Bounds<Points>| {
-                            at.with(|at| at.insert(id.clone(), b.origin.x.0));
-                            bring();
-                        })
-                        .flex_row()
-                        .items_center()
-                        .gap(px(6.0))
-                        .h(px(34.0))
-                        .px(px(12.0))
-                        .rounded(px(8.0))
-                        .bg(move || if t.with(|t| t.active) { theme::now(theme::SELECTED) } else { Hsla::transparent_black() })
-                        .active(|s| s.bg(theme::HOVER))
-                        .role(AccessibilityRole::Tab)
-                        .label(move || t.with(|t| t.label.clone()))
-                        .accessibility_state(move || AccessibilityState { selected: t.with(|t| t.active), ..Default::default() })
-                        .on_press(move || {
-                            let t = t.get_untracked();
-                            if !t.active {
-                                press.run("tab.select", serde_json::json!({ "id": t.id }));
-                            }
-                        })
-                        .on_long_press(move || tab_menu(hold.clone(), t.with_untracked(|t| t.id.clone())))
-                        // What runs there, as the pane strip shows it, then its words.
-                        .child(ui::program_icon(move || t.with(|t| t.program.clone()), 14.0))
-                        .child(
-                            text(move || t.with(|t| t.label.clone()))
-                                .max_w(px(180.0))
-                                .number_of_lines(1)
-                                .text_size(px(13.0))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(move || if t.with(|t| t.active) { theme::now(theme::FOREGROUND) } else { theme::now(theme::MUTED) }),
-                        )
-                        .child(ui::tab_status(move || t.with(|t| t.status)))
-                },
-            ))
-            .child(when(move || settled.with(|s| !s.is_empty()), move || {
-                let back = back.clone();
+    let back = live.clone();
+    view()
+        .flex_row()
+        .items_center()
+        // The first dot under the name's first letter (past the space's mark).
+        .pl(px(24.0))
+        .child(each(
+            move || tabs.get(),
+            |t| t.id.clone(),
+            move |t, _| {
+                let (press, hold) = (live.clone(), live.clone());
                 view()
-                    .flex_row()
+                    .w(px(18.0))
+                    .h(px(14.0))
                     .items_center()
-                    .gap(px(5.0))
-                    .h(px(34.0))
-                    .px(px(10.0))
-                    .rounded(px(8.0))
-                    .active(|s| s.bg(theme::HOVER))
-                    .role(AccessibilityRole::Button)
-                    .label(move || t!("{} put away", settled.with(Vec::len)))
+                    .justify_center()
+                    .hit_slop(EdgeInsets::all(px(6.0)))
+                    .role(AccessibilityRole::Tab)
+                    .label(move || t.with(|t| t.label.clone()))
+                    .accessibility_state(move || AccessibilityState { selected: t.with(|t| t.active), ..Default::default() })
                     .on_press(move || {
-                        let (live, tabs) = (back.clone(), settled.get_untracked());
-                        spawn(async move {
-                            let items = tabs.iter().map(|(id, label)| crate::pick::Item::glyph(id.clone(), label.clone(), "archive")).collect();
-                            // Shown, it comes back to the lists.
-                            if let Some(id) = crate::pick::one(t!("Put away"), items).await {
-                                live.run("tab.select", serde_json::json!({ "id": id }));
-                            }
-                        });
+                        let t = t.get_untracked();
+                        if !t.active {
+                            press.run("tab.select", serde_json::json!({ "id": t.id }));
+                        }
                     })
-                    .child(ui::glyph("archive", 14.0, theme::DIM))
-                    .child(text(move || settled.with(Vec::len).to_string()).text_size(px(13.0)).text_color(theme::DIM))
-            })))
-    })
+                    .on_long_press(move || tab_menu(hold.clone(), t.with_untracked(|t| t.id.clone())))
+                    .child(
+                        view()
+                            .h(px(6.0))
+                            .w(move || px(if t.with(|t| t.active) { 14.0 } else { 6.0 }))
+                            .rounded(px(3.0))
+                            .bg(move || {
+                                t.with(|t| match t.status {
+                                    _ if t.active => theme::now(theme::FOREGROUND),
+                                    Some(word @ ("working" | "blocked" | "done")) => theme::now(theme::status(word)),
+                                    _ => theme::now(theme::DIM),
+                                })
+                            }),
+                    )
+            },
+        ))
+        .child(when(move || settled.with(|s| !s.is_empty()), move || {
+            let back = back.clone();
+            view()
+                .flex_row()
+                .items_center()
+                .gap(px(3.0))
+                .ml(px(6.0))
+                .h(px(14.0))
+                .hit_slop(EdgeInsets::all(px(8.0)))
+                .role(AccessibilityRole::Button)
+                .label(move || t!("{} put away", settled.with(Vec::len)))
+                .on_press(move || {
+                    let (live, tabs) = (back.clone(), settled.get_untracked());
+                    spawn(async move {
+                        let items = tabs.iter().map(|(id, label)| crate::pick::Item::glyph(id.clone(), label.clone(), "archive")).collect();
+                        // Shown, it comes back to the dots.
+                        if let Some(id) = crate::pick::one(t!("Put away"), items).await {
+                            live.run("tab.select", serde_json::json!({ "id": id }));
+                        }
+                    });
+                })
+                .child(ui::glyph("archive", 11.0, theme::DIM))
+                .child(text(move || settled.with(Vec::len).to_string()).text_size(px(11.0)).text_color(theme::DIM))
+        }))
 }
 
 /// Said a moment when the shown tab changes (a swipe says nothing else):
@@ -503,10 +461,6 @@ fn without(title: &str, names: &[String]) -> String {
     title.to_owned()
 }
 
-/// What a tab runs, as its icon says: its agent, else the pane shown.
-fn tab_program(t: &TabView) -> serde_json::Value {
-    t.panes.iter().find(|p| p.status.is_some()).or_else(|| shown(t)).map(|p| p.program.clone()).unwrap_or_default()
-}
 
 /// The pane shown on a phone: the zoomed one, else the focused one.
 fn shown(t: &TabView) -> Option<&PaneView> {
@@ -829,13 +783,9 @@ pub fn notes(live: Live) -> impl IntoElement {
     let most = move || if typing.get() { 1 } else { SHOWN_NOTES };
     let shown = computed(move || notes.with(|n| if all_shown.get() || n.len() <= most() { n.clone() } else { n[n.len() - most()..].to_vec() }));
     let hidden = computed(move || notes.with(Vec::len) - shown.with(Vec::len));
-    // At the top, under the workspace's tab strip when it has one.
-    let strip = computed(move || {
-        nav::routes().with(|r| r.0.last() == Some(&Route::Workspace)) && world.with(|v| has_strip(v))
-    });
     dynamic(move || {
         let stack = view().absolute().left(px(12.0)).right(px(12.0)).gap(px(8.0)).pointer_events(PointerEvents::BoxNone);
-        let stack = if typing.get() { stack.top(move || px(safe_area().top.0 + if strip.get() { 96.0 } else { 56.0 })) } else { stack.bottom(move || ui::bottom_inset() + px(56.0)) };
+        let stack = if typing.get() { stack.top(move || px(safe_area().top.0 + 56.0)) } else { stack.bottom(move || ui::bottom_inset() + px(56.0)) };
         let live = live.clone();
         stack
             .child(when(move || hidden.get() > 0 || (all_shown.get() && notes.with(Vec::len) > most()), move || {
