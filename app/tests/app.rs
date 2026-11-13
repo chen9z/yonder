@@ -247,6 +247,14 @@ fn adds_a_computer_then_works_there() {
     app.press("label:Spaces and agents").unwrap();
     app.press("label:Agents").unwrap();
     app.wait_for_within("text:No agent status yet. Agents show up here when they report their status. Older versions and agents inside tmux may not.", SLOW).unwrap();
+    // Or any terminal, found by its space's name: a tap shows it.
+    app.press("label:Jump to a terminal").unwrap();
+    app.type_text("id:search", "hom").unwrap();
+    let first = hc_terminals(&session)[0]["address"].as_str().unwrap_or_default().to_owned();
+    app.wait_for_within(&format!("id:jump-{first}"), SLOW).unwrap();
+    app.type_text("id:search", "e nothing-is-called-this").unwrap();
+    app.wait_for_within("text:No terminal is called that", SLOW).unwrap();
+    app.back().unwrap();
     app.press("label:Spaces").unwrap();
     app.press("text:home").unwrap();
     app.wait_for_within("label:More", SLOW).unwrap();

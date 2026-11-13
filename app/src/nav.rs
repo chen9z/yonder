@@ -32,6 +32,8 @@ pub enum Route {
     Text(Arc<String>),
     /// The key bar's keys, to choose.
     KeyBar,
+    /// Every terminal on every machine, found by typing.
+    Search,
 }
 
 impl Route {

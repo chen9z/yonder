@@ -427,21 +427,7 @@ fn agent_row(live: Live, l: ReadSignal<Line>, now: Signal<u64>, inline: bool, fo
                         }
                     });
                 })
-                .child(
-                    // The space's mark, what runs there on its corner.
-                    view()
-                        .child(ui::space_mark(move || agent().map(|a| a.space_name).unwrap_or_default(), color))
-                        .child(
-                            view()
-                                .absolute()
-                                .right(px(-5.0))
-                                .bottom(px(-5.0))
-                                .p(px(1.5))
-                                .rounded(px(5.0))
-                                .bg(theme::POPOVER)
-                                .child(ui::program_icon(move || agent().map(|a| a.program).unwrap_or_default(), 11.0)),
-                        ),
-                )
+                .child(ui::space_badge(move || agent().map(|a| a.space_name).unwrap_or_default(), color, move || agent().map(|a| a.program).unwrap_or_default()))
                 .child(
                     view()
                         .flex_1()

@@ -82,6 +82,7 @@ fn top_bar(live: Live, show_spaces: Signal<bool>) -> impl IntoElement {
     ui::top_bar()
         .border_b(px(0.0))
         .child(text(name).flex_1().pl(px(12.0)).text_size(px(20.0)).font_weight(FontWeight::BOLD).text_color(theme::FOREGROUND).number_of_lines(1))
+        .child(ui::icon_button("search", t!("Jump to a terminal"), || nav::push(Route::Search)))
         .child(when(move || show_spaces.get(), move || new_space_button(new_space.clone())).otherwise(agents::sort_button))
         .child(ui::icon_button("ellipsis", t!("Menu"), move || {
             let live = live.clone();

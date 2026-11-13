@@ -229,6 +229,21 @@ pub fn space_mark(name: impl Fn() -> String + 'static, color: impl Fn() -> usize
         )
 }
 
+/// A space's mark with what runs there on its corner: how an agent or a
+/// terminal is listed (Agents, Jump to a terminal).
+pub fn space_badge(name: impl Fn() -> String + 'static, color: impl Fn() -> usize + 'static, program: impl Fn() -> serde_json::Value + 'static) -> View {
+    view().child(space_mark(name, color)).child(
+        view()
+            .absolute()
+            .right(px(-5.0))
+            .bottom(px(-5.0))
+            .p(px(1.5))
+            .rounded(px(5.0))
+            .bg(theme::POPOVER)
+            .child(program_icon(program, 11.0)),
+    )
+}
+
 /// An agent's status as a dot (nothing when it has none).
 pub fn dot(status: impl Fn() -> Option<&'static str> + 'static) -> View {
     let status = std::rc::Rc::new(status);

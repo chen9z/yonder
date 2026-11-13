@@ -19,6 +19,7 @@ mod nav;
 mod palette;
 mod pick;
 mod prefs;
+mod search;
 mod settings;
 mod terminal;
 mod theme;
@@ -140,6 +141,7 @@ fn page(live: Live, route: Route) -> Screen {
         Route::Diff { place, changes, file } => changes::diff_page(live, place, changes, file),
         Route::Worktrees(place) => worktrees::worktrees_page(live, place),
         Route::Peek(address) => agents::peek_page(live, address),
+        Route::Search => search::search_page(live),
         Route::AddMachine => machines::add_machine_page(live),
         Route::Text(text) => terminal::text_page(live, text),
     }
