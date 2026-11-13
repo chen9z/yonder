@@ -295,7 +295,19 @@ pub fn agents_section(live: Live, inline: bool) -> impl IntoElement {
         let (grouped, folded, all) = (grouped.get(), folded.get(), all.get());
         world.with(|v| held.with(|held| lines(v, grouped, &folded, all, held)))
     });
-    let fold = move |id: String| folded.update(|set| if set.contains(&id) { set.retain(|k| k != &id) } else { set.push(id) });
+    let fold = move |id: String| {
+        ui::smoothly();
+        folded.update(|set| if set.contains(&id) { set.retain(|k| k != &id) } else { set.push(id) })
+    };
+    // On the home page, rows move to where the agents' changes put them.
+    let settled = stored(false);
+    effect(move || {
+        lines.with(|_| ());
+        if settled.get() && !inline && crate::nav::routes().with_untracked(|r| r.0.is_empty()) {
+            ui::smoothly();
+        }
+        settled.replace(true);
+    });
     view()
         .child(when(move || inline, || crate::home::section(t!("Agents"), view())))
         .child(when(move || lines.with(Vec::is_empty), || {
@@ -367,9 +379,20 @@ fn on_card(edge: impl Fn() -> Edge + Copy + 'static, line: bool) -> View {
         .child(when(move || line && !edge().top, || view().h(px(1.0)).ml(px(46.0)).bg(theme::BORDER)))
 }
 
+/// How far a row is pulled aside for what its swipe does.
+const SWIPE: f32 = 80.0;
+
+/// Stops an agent, once the person says so.
+async fn stop(live: Live, address: String) {
+    if ui::confirm(t!("Stop this agent?"), t!("It ends with its sub-agents."), t!("Stop")).await {
+        live.run("terminal.kill", json!({ "terminal": address }));
+    }
+}
+
 /// An agent's row: its space's mark (what runs on its corner), the space
 /// and what it does, where it is under them, how long since its status
-/// changed and that status. A tap shows it; a long press pins or stops it.
+/// changed and that status. A tap shows it; a long press pins or stops it,
+/// and so does pulling it right (pins, or unpins) or left (stops).
 fn agent_row(live: Live, l: ReadSignal<Line>, now: Signal<u64>, inline: bool, fold: impl Fn(String) + Copy + 'static) -> impl IntoElement {
     let agent = move || l.with(|l| match l { Line::Agent { agent, .. } => Some((**agent).clone()), _ => None });
     let row = computed(move || match l.get() {
@@ -384,9 +407,63 @@ fn agent_row(live: Live, l: ReadSignal<Line>, now: Signal<u64>, inline: bool, fo
         let computer = computer.clone();
         move || l.with(|l| match l { Line::Agent { agent, .. } => prefs.colors.with(|c| c.get(&format!("{computer}\u{0}{}", agent.space)).copied()).unwrap_or(0), _ => 0 })
     };
-    let (press, hold) = (live.clone(), live);
-    on_card(edge, true)
+    let (press, hold, swiper) = (live.clone(), live.clone(), live);
+    // How far the row is pulled aside, and whether a finger has it.
+    let pulled = signal(0.0f32);
+    let pulling = signal(false);
+    let pinned = move || row.with(|r| r.as_ref().is_some_and(|r| r.3));
+    // Which side shows under it: right while pulled right.
+    let side = computed(move || { let by = pulled.get(); (by != 0.0).then_some(by > 0.0) });
+    // Let go, it goes back in a few frames, quickly then slowly.
+    let back = move || {
+        let from = pulled.get_untracked();
+        spawn(async move {
+            const FRAMES: i32 = 10;
+            for i in 1..=FRAMES {
+                if pulling.get_untracked() {
+                    return;
+                }
+                let t = i as f32 / FRAMES as f32;
+                pulled.set(from * (1.0 - t).powi(3));
+                timer(std::time::Duration::from_millis(16)).await;
+            }
+            pulled.set(0.0);
+        });
+    };
+    on_card(edge, true).child(
+        view()
+        // Under it while pulled: what letting go does, on the side it shows.
+        .child(dynamic(move || {
+            let Some(right) = side.get() else { return view().into_element() };
+            let under = view()
+                .absolute()
+                .left(px(0.0))
+                .right(px(0.0))
+                .top(px(0.0))
+                .bottom(px(0.0))
+                .flex_row()
+                .items_center()
+                .gap(px(8.0))
+                .px(px(22.0))
+                .bg(if right { theme::ACCENT } else { theme::BLOCKED })
+                .opacity(move || if pulled.get().abs() >= SWIPE { 1.0f32 } else { 0.6 })
+                .child(dynamic(move || ui::glyph(if !right { "square" } else if pinned() { "pin-off" } else { "pin" }, 18.0, theme::ACCENT_FOREGROUND).into_element()))
+                .child(
+                    text(move || if !right { t!("Stop") } else if pinned() { t!("Unpin") } else { t!("Pin") })
+                        .text_size(theme::CALLOUT)
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme::ACCENT_FOREGROUND),
+                );
+            if right { under.justify_start() } else { under.justify_end() }.into_element()
+        }))
+        // What moves: the row on a ground of its own, opaque while pulled
+        // (pressed, the row itself is see-through).
         .child(
+            view()
+                .translate_x(move || px(pulled.get()))
+                .z_index(1)
+                .bg(move || if pulled.get() != 0.0 { theme::now(theme::POPOVER) } else { Hsla::transparent_black() })
+                .child(
             view()
                 .flex_row()
                 .items_center()
@@ -396,6 +473,26 @@ fn agent_row(live: Live, l: ReadSignal<Line>, now: Signal<u64>, inline: bool, fo
                 .py(px(8.0))
                 .bg(move || if row.with(|r| r.as_ref().is_some_and(|r| r.2)) { theme::now(theme::SELECTED) } else { Hsla::transparent_black() })
                 .active(|s| s.bg(theme::HOVER))
+                .claim_touches(TouchClaim::on_pan(PanActivation::horizontal(px(14.0), px(10.0))))
+                .on_responder_move(move |e: &ResponderEvent| {
+                    pulling.set(true);
+                    pulled.set(e.gesture.delta.x.0.clamp(-SWIPE - 40.0, SWIPE + 40.0));
+                })
+                .on_responder_terminate(move |_: &ResponderEvent| {
+                    pulling.set(false);
+                    back();
+                })
+                .on_responder_release(move |_: &ResponderEvent| {
+                    let by = pulled.get_untracked();
+                    pulling.set(false);
+                    back();
+                    let Some(a) = agent() else { return };
+                    if by >= SWIPE {
+                        swiper.run("terminal.pin", json!({ "terminal": a.address, "pinned": !a.pinned }));
+                    } else if by <= -SWIPE {
+                        spawn(stop(swiper.clone(), a.address));
+                    }
+                })
                 .on_press(move || {
                     if let Some(a) = agent() {
                         press.run("agent.focus", json!({ "terminal": a.address }));
@@ -405,6 +502,10 @@ fn agent_row(live: Live, l: ReadSignal<Line>, now: Signal<u64>, inline: bool, fo
                     }
                 })
                 .on_long_press(move || {
+                    // Held still while pulled aside: the swipe's, not the menu's.
+                    if pulling.get_untracked() {
+                        return;
+                    }
                     let Some(a) = agent() else { return };
                     let live = hold.clone();
                     spawn(async move {
@@ -413,9 +514,7 @@ fn agent_row(live: Live, l: ReadSignal<Line>, now: Signal<u64>, inline: bool, fo
                         match pick::one(&ui::title(&a.title), vec![pin, Item::glyph("kill", t!("Stop it"), "square").danger()]).await.as_deref() {
                             Some("pin") => live.run("terminal.pin", json!({ "terminal": a.address, "pinned": true })),
                             Some("unpin") => live.run("terminal.pin", json!({ "terminal": a.address, "pinned": false })),
-                            Some("kill") if ui::confirm(t!("Stop this agent?"), t!("It ends with its sub-agents."), t!("Stop")).await => {
-                                live.run("terminal.kill", json!({ "terminal": a.address }));
-                            }
+                            Some("kill") => stop(live, a.address).await,
                             _ => {}
                         }
                     });
@@ -470,13 +569,15 @@ fn agent_row(live: Live, l: ReadSignal<Line>, now: Signal<u64>, inline: bool, fo
                         .role(AccessibilityRole::Button)
                         .label(t!("Fold or unfold its sub-agents"))
                         .on_press(move || if let Some(r) = row.get_untracked() { fold(r.0) })
-                        .child(dynamic(move || ui::glyph(if row.with(|r| r.as_ref().is_some_and(|r| r.8)) { "chevron-down" } else { "chevron-right" }, 12.0, theme::DIM).into_element()))
+                        .child(ui::chevron(move || row.with(|r| r.as_ref().is_some_and(|r| r.8)), 12.0))
                         .child(text(move || row.with(|r| r.as_ref().filter(|r| !r.8).map(|r| r.7.to_string()).unwrap_or_default())).text_size(theme::SMALL).text_color(theme::DIM))
                 }))
                 .child(text(move || agent().map(|a| elapsed(a.since, now.get())).unwrap_or_default()).text_size(theme::CAPTION).text_color(theme::DIM))
                 .child(when(move || row.with(|r| r.as_ref().is_some_and(|r| r.3)), || ui::glyph("pin", 13.0, theme::DIM)))
                 .child(ui::status_mark(move || row.with(|r| r.as_ref().map(|r| r.1)), move || row.with(|r| r.as_ref().is_some_and(|r| r.9)))),
-        )
+                ),
+        ),
+    )
 }
 
 /// Show all the idle ones, or Show less, in line with the rows' words.
@@ -495,7 +596,10 @@ fn more_row(l: ReadSignal<Line>, all: Signal<bool>) -> impl IntoElement {
             .active(|s| s.bg(theme::HOVER))
             .role(AccessibilityRole::Button)
             .label(said)
-            .on_press(move || all.update(|a| *a = !*a))
+            .on_press(move || {
+                ui::smoothly();
+                all.update(|a| *a = !*a)
+            })
             .child(text(said).text_size(theme::CALLOUT).text_color(theme::ACCENT)),
     )
 }

@@ -69,7 +69,13 @@ fn home_tab(label: &'static str, icon: &'static str, show_spaces: Signal<bool>, 
         .label(move || if count() == 0 { label.to_owned() } else { format!("{label} · {}", count()) })
         .accessibility_state(move || AccessibilityState { selected: active(), ..Default::default() })
         .bg(move || if active() { theme::now(theme::CHROME) } else { Hsla::transparent_black() })
-        .on_press(move || show_spaces.set(spaces))
+        .active(|s| s.scale(0.94))
+        .transition()
+        .duration(ui::QUICK)
+        .on_press(move || if show_spaces.get_untracked() != spaces {
+            ui::smoothly();
+            show_spaces.set(spaces);
+        })
         .child(dynamic(move || ui::glyph(icon, 22.0, ink()).into_element()))
         .child(text(label).text_size(theme::SMALL).font_weight(FontWeight::MEDIUM).text_color(move || theme::now(ink())))
         .child(when(move || count() > 0, move || {
@@ -100,7 +106,10 @@ fn top_bar(live: Live, show_spaces: Signal<bool>, reorder: Signal<bool>) -> impl
                 .active(|s| s.bg(theme::HOVER))
                 .role(AccessibilityRole::Button)
                 .label(t!("Done"))
-                .on_press(move || reorder.set(false))
+                .on_press(move || {
+                    ui::smoothly();
+                    reorder.set(false);
+                })
                 .child(text(t!("Done")).text_size(theme::ROW).font_weight(FontWeight::SEMIBOLD).text_color(theme::ACCENT))
         }))
 }
@@ -251,11 +260,14 @@ fn machine_heading(live: Live, g: ReadSignal<Group>, folded: Signal<Vec<String>>
             let machine = g.with_untracked(|g| g.machine.clone());
             if !machine.is_empty() { spawn(async move { prefs.rename_machine(&live, &machine).await; }); }
         })
-        .on_press(move || folded.update(|set| {
-            let key = g.with_untracked(|g| g.key.clone());
-            if set.contains(&key) { set.retain(|k| k != &key); } else { set.push(key); }
-        }))
-        .child(dynamic(move || ui::glyph(if is_folded.get() { "chevron-right" } else { "chevron-down" }, 14.0, theme::DIM).into_element()))
+        .on_press(move || {
+            ui::smoothly();
+            folded.update(|set| {
+                let key = g.with_untracked(|g| g.key.clone());
+                if set.contains(&key) { set.retain(|k| k != &key); } else { set.push(key); }
+            })
+        })
+        .child(ui::chevron(move || !is_folded.get(), 14.0))
         .child(text(move || g.with(|g| g.name.clone())).flex_1().text_size(theme::FOOTNOTE).font_weight(FontWeight::SEMIBOLD).text_color(theme::MUTED).number_of_lines(1))
         .child(when(move || !connected.get(), move || {
             text(move || g.with(|g| match g.state.as_str() { "connecting" => t!("Connecting…"), "needs_login" => t!("Needs login"), "needs_update" => t!("Needs update"), _ => t!("Not connected") }))
@@ -370,7 +382,10 @@ fn space_row(live: Live, s: ReadSignal<SpaceView>, g: ReadSignal<Group>, drag: S
                         live.run("tab.new", json!({ "space": id }));
                         nav::workspace();
                     }
-                    Some("reorder") => reorder.set(true),
+                    Some("reorder") => {
+                        ui::smoothly();
+                        reorder.set(true);
+                    }
                     Some("new") => worktrees::new_worktree(live, place).await,
                     Some("open") => nav::push(Route::Worktrees(place)),
                     Some("remove") => worktrees::remove_worktree(live, id, place).await,

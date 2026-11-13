@@ -29,11 +29,32 @@ pub fn icon_button(icon: &'static str, label: &'static str, press: impl Fn() + '
         .rounded(px(10.0))
         .items_center()
         .justify_center()
-        .active(|s| s.bg(theme::HOVER))
+        .active(|s| s.bg(theme::HOVER).scale(PRESSED))
+        .transition()
+        .duration(QUICK)
         .role(AccessibilityRole::Button)
         .label(label)
         .on_press(press)
         .child(glyph(icon, 22.0, theme::FOREGROUND))
+}
+
+/// How long a press's or a switch's change takes, in ms.
+pub const QUICK: f32 = 140.0;
+/// How long the layout takes to settle (a group folds, a row moves), in ms.
+pub const SETTLE: f32 = 240.0;
+/// How small a button goes while pressed.
+pub const PRESSED: f32 = 0.92;
+
+/// The next change of the layout moves into place rather than jumps: what
+/// goes fades, what stays slides. Call it just before the change.
+pub fn smoothly() {
+    use nsh_core::{LayoutAnimation, LayoutCurve, LayoutTransition};
+    animate_layout(LayoutAnimation::all(LayoutTransition::new(LayoutCurve::EaseInEaseOut, SETTLE)));
+}
+
+/// A fold's chevron: down while open, turned right while folded.
+pub fn chevron(open: impl Fn() -> bool + 'static, size: f32) -> impl IntoElement {
+    glyph("chevron-down", size, theme::DIM).rotate(move || deg(if open() { 0.0 } else { -90.0 })).transition_transform().duration(SETTLE)
 }
 
 /// On or off, taking effect at once: a track the thumb slides along, in
@@ -46,6 +67,8 @@ pub fn toggle(on: Signal<bool>, label: &'static str) -> View {
         .rounded(px(13.0))
         .flex_shrink(0.0)
         .bg(move || if on.get() { theme::now(theme::ACCENT) } else { theme::now(theme::INPUT) })
+        .transition_colors()
+        .duration(QUICK)
         .role(AccessibilityRole::Switch)
         .label(label)
         .accessibility_state(move || AccessibilityState { checked: Some(if on.get() { Checked::True } else { Checked::False }), ..Default::default() })
@@ -57,7 +80,9 @@ pub fn toggle(on: Signal<bool>, label: &'static str) -> View {
                 .h(px(20.0))
                 .rounded(px(10.0))
                 .bg(rgb(0xffffff))
-                .translate_x(move || px(if on.get() { 18.0 } else { 0.0 })),
+                .translate_x(move || px(if on.get() { 18.0 } else { 0.0 }))
+                .transition_transform()
+                .duration(QUICK),
         )
 }
 
@@ -109,7 +134,9 @@ pub fn busy_button(label: impl IntoReactive<String> + 'static, busy: impl Fn() -
         .items_center()
         .justify_center()
         .bg(theme::SOLID)
-        .active(|s| s.opacity(0.7))
+        .active(|s| s.opacity(0.8).scale(0.97))
+        .transition()
+        .duration(QUICK)
         .role(AccessibilityRole::Button)
         .on_press(press)
         .child(when(busy, || glyph("spinner", 16.0, theme::SOLID_FOREGROUND).animate_spin()))
@@ -126,7 +153,9 @@ pub fn ghost_button(label: &'static str, press: impl Fn() + 'static) -> View {
         .justify_center()
         .border_1()
         .border_color(theme::BORDER)
-        .active(|s| s.bg(theme::HOVER))
+        .active(|s| s.bg(theme::HOVER).scale(0.97))
+        .transition()
+        .duration(QUICK)
         .role(AccessibilityRole::Button)
         .label(label)
         .on_press(press)

@@ -756,3 +756,45 @@ fn home_makes_no_space_before_the_computer_has_said_its_layout() {
     assert!(!texts.contains(&"No spaces yet"), "{texts:?}");
     assert!(!app.screen().enabled("label:New space").unwrap());
 }
+
+#[test]
+fn an_agent_s_row_pulled_left_asks_to_stop_it_and_a_short_pull_does_nothing() {
+    // Drawn from what the computer showed last; nobody answers on its port.
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let computer = serde_json::json!({ "name": "desk", "host": "127.0.0.1", "port": port, "user": "me", "fingerprint": "SHA256:x" });
+    let root = serde_json::to_value(herdc_model::model::Tab::new("tab", "1", "p1", "t1").root).unwrap();
+    let agent = serde_json::json!({ "address": "t1", "pane": "p1", "space": "s1", "space_name": "proj", "machine": null,
+        "tab": "tab", "tab_index": 1, "tab_name": "1", "status": "working", "app": null, "program": {},
+        "title": "Fix the build", "seq": 1, "pinned": false, "focused": false });
+    let seen = serde_json::json!({ "at": 0, "view": {
+        "link": { "state": "connected", "core": "desk", "version": "0.1.18" }, "home": "/home/me",
+        "machines": [{ "name": null, "state": "connected", "layout": "ready", "error": null, "host": "desk" }],
+        "spaces": [{ "id": "s1", "index": 1, "name": "proj", "named": true, "folder": "~", "machine": null, "branch": "main",
+            "active": true, "status": "working",
+            "tabs": [{ "id": "tab", "index": 1, "name": "1", "named": false, "active": true, "status": "working",
+                "settled": false, "settled_at": null, "changed_at": null, "working_since": null, "focused": "p1", "zoomed": null,
+                "root": root, "panes": [] }] }],
+        "agents": [agent], "terminals": [], "focused": null,
+    }});
+    let mut config = EngineConfig::new(Root::of::<herdc_app::App>());
+    config.storage = Some(MemoryStorage::new(vec![
+        ("computers".to_owned(), serde_json::json!([computer]).to_string()),
+        (format!("seen.me@127.0.0.1:{port}"), seen.to_string()),
+    ]));
+    let mut app = Headless::start(config).unwrap();
+    app.wait_for("label:proj").unwrap();
+    app.press("label:proj").unwrap();
+    app.wait_for_within("label:Spaces and agents", SLOW).unwrap();
+    app.press("label:Spaces and agents").unwrap();
+    app.wait_for_within("text:Fix the build", SLOW).unwrap();
+
+    // Not far enough: back in place, nothing asked.
+    app.drag("text:Fix the build", point(px(-30.0), px(0.0))).unwrap();
+    app.wait_for("text:Fix the build").unwrap();
+    assert!(app.screen().dialogs().is_empty());
+    // Far enough: asked first (and left as it was).
+    answer(&mut app, "Cancel", "Stop this agent?");
+    app.drag("text:Fix the build", point(px(-120.0), px(0.0))).unwrap();
+    app.wait_until("asked to stop it", SLOW, |s| s.dialogs().len() == 1).unwrap();
+    app.wait_for("text:Fix the build").unwrap();
+}
