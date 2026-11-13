@@ -76,7 +76,8 @@ pub fn worktrees_page(live: Live, place: Place) -> Screen {
             view()
                 .flex_1()
                 .bg(theme::CANVAS)
-                .child(
+                // Worth a filter only when there are many.
+                .child(when(move || filter.with(|f| !f.is_empty()) || found.with(|r| r.as_ref().and_then(|r| r.as_ref().ok()).is_some_and(|r| r.all.len() > 6)), move || {
                     view().p(px(12.0)).child(
                         input()
                             .value(move || filter.get())
@@ -93,8 +94,8 @@ pub fn worktrees_page(live: Live, place: Place) -> Screen {
                             .h(px(44.0))
                             .text_size(px(16.0))
                             .text_color(theme::FOREGROUND),
-                    ),
-                )
+                    )
+                }))
                 .child(
                     virtual_list(move || shown.with(Vec::len), move |at| {
                         let (live, place) = (live.clone(), place.clone());
@@ -114,19 +115,35 @@ pub fn worktrees_page(live: Live, place: Place) -> Screen {
                                 String::new()
                             })
                         };
-                        ui::row(
-                            move || checkout().map(|c| c.branch.unwrap_or_else(|| t!("detached").into())).unwrap_or_default(),
-                            move || checkout().map(|c| format!("{} · {}", state().unwrap_or_default(), tilde(&c.path, &home()))).unwrap_or_default(),
-                        )
-                        .border_b_1()
-                        .border_color(theme::BORDER)
+                        // Its branch over its folder; how it is (open, when last used) after.
+                        let open_now = {
+                            let state = state.clone();
+                            move || state() == Some(t!("open").to_owned())
+                        };
+                        view()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(14.0))
+                            .px(px(16.0))
+                            .min_h(px(60.0))
+                            .py(px(8.0))
+                            .active(|s| s.bg(theme::HOVER))
+                            .child(ui::glyph("branch", 20.0, theme::MUTED))
+                            .child(
+                                view()
+                                    .flex_1()
+                                    .gap(px(2.0))
+                                    .child(text(move || checkout().map(|c| c.branch.unwrap_or_else(|| t!("detached").into())).unwrap_or_default()).text_size(px(16.0)).text_color(theme::FOREGROUND).number_of_lines(1))
+                                    .child(text(move || checkout().map(|c| tilde(&c.path, &home())).unwrap_or_default()).text_size(px(12.0)).text_color(theme::MUTED).number_of_lines(1)),
+                            )
+                            .child(text(move || state().unwrap_or_default()).text_size(px(12.0)).text_color(move || if open_now() { theme::now(theme::ACCENT) } else { theme::now(theme::DIM) }))
                         .on_press(move || {
                             let Some(c) = checkout() else { return };
                             let all = found.with_untracked(|r| r.as_ref().and_then(|r| r.as_ref().ok()).map(|r| r.all.clone()).unwrap_or_default());
                             open(&live, &place, &c, &all);
                         })
                     })
-                    .estimated_item_size(px(56.0))
+                    .estimated_item_size(px(60.0))
                     .empty(
                         view().p(px(32.0)).items_center().child(
                             text(move || match found.get() {
