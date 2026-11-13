@@ -44,7 +44,9 @@ restore() {
   adb shell settings put system accelerometer_rotation "$rotate" || true
   set -- $was_scales
   for k in $scales; do
-    case "$1" in null|"") adb shell settings delete global "$k" >/dev/null || true ;; *) adb shell settings put global "$k" "$1" || true ;; esac
+    # Unset at first: 1 again, then unset. Deleted alone, the system keeps
+    # the 0 it had (until a restart) and every animator ends at once.
+    case "$1" in null|"") adb shell settings put global "$k" 1.0 || true; adb shell settings delete global "$k" >/dev/null || true ;; *) adb shell settings put global "$k" "$1" || true ;; esac
     shift
   done
   adb shell svc wifi enable || true
