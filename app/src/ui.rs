@@ -93,8 +93,16 @@ pub fn action_row(title: &'static str, act: Act, press: impl Fn() + 'static) -> 
 
 /// The main action of a page.
 pub fn button(label: impl IntoReactive<String> + 'static, press: impl Fn() + 'static) -> View {
+    busy_button(label, || false, press)
+}
+
+/// The main action, turning while what it started goes on (`busy`, its
+/// label saying what).
+pub fn busy_button(label: impl IntoReactive<String> + 'static, busy: impl Fn() -> bool + 'static, press: impl Fn() + 'static) -> View {
     let label = label.into_reactive();
     view()
+        .flex_row()
+        .gap(px(10.0)) 
         .h(px(48.0))
         .px(px(20.0))
         .rounded(px(12.0))
@@ -104,6 +112,7 @@ pub fn button(label: impl IntoReactive<String> + 'static, press: impl Fn() + 'st
         .active(|s| s.opacity(0.7))
         .role(AccessibilityRole::Button)
         .on_press(press)
+        .child(when(busy, || glyph("spinner", 16.0, theme::SOLID_FOREGROUND).animate_spin()))
         .child(text(move || label.get()).text_size(px(16.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::SOLID_FOREGROUND))
 }
 
@@ -280,6 +289,24 @@ pub fn row(title: impl Fn() -> String + 'static, detail: impl Fn() -> String + '
                 .child(text(title).text_size(px(16.0)).text_color(theme::FOREGROUND).number_of_lines(1))
                 .child(text(detail).text_size(px(13.0)).text_color(theme::MUTED).number_of_lines(1)),
         )
+}
+
+/// A card's heading, in line with its rows' words.
+pub fn card_heading(title: &'static str) -> View {
+    view()
+        .px(px(32.0))
+        .pt(px(22.0))
+        .pb(px(8.0))
+        .child(text(title).text_size(px(12.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::DIM))
+}
+
+/// Rows that go together, on a card, a line between each from where their
+/// words start (after a row's glyph).
+pub fn card(rows: Vec<View>) -> View {
+    let last = rows.len().saturating_sub(1);
+    view().mx(px(16.0)).rounded(px(14.0)).overflow_hidden().bg(theme::POPOVER).children(rows.into_iter().enumerate().map(move |(at, row)| {
+        view().child(row).children((at < last).then(|| view().h(px(1.0)).ml(px(50.0)).bg(theme::BORDER)))
+    }))
 }
 
 /// A section's heading in a list.

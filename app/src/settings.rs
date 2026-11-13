@@ -34,8 +34,8 @@ pub fn settings_page(live: Live) -> nsh_core::element::Screen {
             view()
                 .pt(px(4.0))
                 .pb(move || px(safe_area().bottom.0 + 24.0))
-                .child(heading(t!("TERMINAL")))
-                .child(card(vec![
+                .child(ui::card_heading(t!("TERMINAL")))
+                .child(ui::card(vec![
                     setting("type", || t!("Font size").into(), move || t!("{} pt", prefs.font.get())).child(
                         view()
                             .flex_row()
@@ -75,15 +75,15 @@ pub fn settings_page(live: Live) -> nsh_core::element::Screen {
                         },
                     ),
                 ]))
-                .child(heading(t!("COMPUTER")))
-                .child(card(vec![
+                .child(ui::card_heading(t!("COMPUTER")))
+                .child(ui::card(vec![
                     setting("monitor", move || live.computer.name.clone(), move || core.get())
                         .child(view().w(px(8.0)).h(px(8.0)).mr(px(4.0)).rounded(px(4.0)).bg(move || theme::now(state.get()))),
                     action("plug", t!("Edit connection"), Act::Go, || nav::push(Route::EditConnection)),
                     action("log-out", t!("Leave this computer"), Act::Lose, live::close),
                 ]))
-                .child(heading(t!("THIS PHONE'S KEY")))
-                .child(card(vec![
+                .child(ui::card_heading(t!("THIS PHONE'S KEY")))
+                .child(ui::card(vec![
                     view().px(px(16.0)).py(px(14.0)).child(
                         text(public.clone())
                             .font_family(theme::MONO)
@@ -97,8 +97,8 @@ pub fn settings_page(live: Live) -> nsh_core::element::Screen {
                         copied.say(herdc_engine::Note::info(t!("Copied"), t!("Add it to ~/.ssh/authorized_keys on the computer.")));
                     }),
                 ]))
-                .child(heading(t!("ABOUT")))
-                .child(card(vec![
+                .child(ui::card_heading(t!("ABOUT")))
+                .child(ui::card(vec![
                     setting("info", || "Yonder".into(), version),
                     action("stethoscope", t!("Copy diagnostics"), Act::Do, move || {
                         set_clipboard(diagnostics(&about, prefs));
@@ -107,23 +107,6 @@ pub fn settings_page(live: Live) -> nsh_core::element::Screen {
                 ])),
         ),
     )
-}
-
-/// A group's heading, in line with its rows' words.
-fn heading(title: &'static str) -> View {
-    view()
-        .px(px(32.0))
-        .pt(px(22.0))
-        .pb(px(8.0))
-        .child(text(title).text_size(px(12.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::DIM))
-}
-
-/// Rows that go together, on a card, a line between each (from their words on).
-fn card(rows: Vec<View>) -> View {
-    let last = rows.len().saturating_sub(1);
-    view().mx(px(16.0)).rounded(px(14.0)).overflow_hidden().bg(theme::POPOVER).children(rows.into_iter().enumerate().map(move |(at, row)| {
-        view().child(row).children((at < last).then(|| view().h(px(1.0)).ml(px(50.0)).bg(theme::BORDER)))
-    }))
 }
 
 /// A setting that leads to a page or a choice: pressed, with a chevron.

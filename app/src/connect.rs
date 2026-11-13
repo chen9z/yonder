@@ -17,7 +17,9 @@ use nsh_core::prelude::*;
 
 pub fn computers_page() -> impl IntoElement {
     let known = signal(link::computers());
-    let adding = signal(known.with(Vec::is_empty));
+    // Untracked: read where the app's root draws this page, it would make
+    // the page again (its signals gone) each time the computers change.
+    let adding = signal(known.with_untracked(Vec::is_empty));
     let original = stored(None::<Computer>);
     let edit = move |computer: Computer| {
         original.replace(Some(computer));
@@ -56,7 +58,7 @@ fn computer_list(known: Signal<Vec<Computer>>, edit: impl Fn(Computer) + Copy + 
     view().flex_1().child(scroll().flex_1().child(
         view()
             .pb(move || px(safe_area().bottom.0 + 16.0))
-            .child(ui::heading(|| t!("COMPUTERS").to_owned()))
+            .child(ui::card_heading(t!("COMPUTERS")))
             .child(each(
                 move || known.get(),
                 |c: &Computer| c.id(),
@@ -78,21 +80,28 @@ fn computer_list(known: Signal<Vec<Computer>>, edit: impl Fn(Computer) + Copy + 
                     first.truncate(SEEN_SPACES);
                     first.sort_unstable();
                     let more = spaces.len() - first.len();
-                    view()
-                        .child(computer_row(c, status, then, known, editing, asking, edit))
-                        .children(first.into_iter().map(|i| &spaces[i]).map(move |s| {
-                            let id = s.id.clone();
-                            seen_space(s).on_press(move || live::open_at(c.get_untracked(), id.clone()))
-                        }))
-                        .children((more > 0).then(|| {
-                            text(t!("{} more spaces", more)).pl(px(49.0)).pb(px(6.0)).text_size(px(12.0)).text_color(theme::DIM)
-                        }))
+                    // A card each: the computer, then where it was.
+                    let mut rows = vec![computer_row(c, status, then, known, editing, asking, edit)];
+                    if !first.is_empty() {
+                        rows.push(
+                            view()
+                                .py(px(6.0))
+                                .children(first.into_iter().map(|i| &spaces[i]).map(move |s| {
+                                    let id = s.id.clone();
+                                    seen_space(s).on_press(move || live::open_at(c.get_untracked(), id.clone()))
+                                }))
+                                .children((more > 0).then(|| {
+                                    text(t!("{} more spaces", more)).pl(px(50.0)).pt(px(2.0)).pb(px(4.0)).text_size(px(12.0)).text_color(theme::DIM)
+                                })),
+                        );
+                    }
+                    ui::card(rows).mb(px(12.0))
                 },
             ))
             .child(
                 text(t!("Long-press a computer to edit, rename or forget it."))
-                    .px(px(16.0))
-                    .pt(px(12.0))
+                    .px(px(32.0))
+                    .pt(px(4.0))
                     .text_size(px(13.0))
                     .text_color(theme::DIM),
             ),
@@ -118,8 +127,25 @@ fn now() -> i64 {
 
 /// A computer: its name and address, how its agents were when last seen.
 fn computer_row(c: ReadSignal<Computer>, status: Option<&'static str>, then: impl Fn() -> String + 'static, known: Signal<Vec<Computer>>, editing: Stored<Option<Computer>>, asking: Signal<Option<ui::Prompt>>, edit: impl Fn(Computer) + Copy + 'static) -> View {
-    ui::row(move || c.with(|c| c.name.clone()), then)
+    view()
+        .flex_row()
+        .items_center()
+        .gap(px(14.0))
+        .px(px(16.0))
+        .min_h(px(60.0))
+        .py(px(8.0))
+        .active(|s| s.bg(theme::HOVER))
+        .role(AccessibilityRole::Button)
+        .child(ui::glyph("monitor", 20.0, theme::MUTED))
+        .child(
+            view()
+                .flex_1()
+                .gap(px(2.0))
+                .child(text(move || c.with(|c| c.name.clone())).text_size(px(16.0)).font_weight(FontWeight::MEDIUM).text_color(theme::FOREGROUND).number_of_lines(1))
+                .child(text(then).text_size(px(12.0)).text_color(theme::MUTED).number_of_lines(1)),
+        )
         .child(ui::dot(move || status))
+        .child(ui::glyph("chevron-right", 16.0, theme::DIM))
         .on_press(move || live::open(c.get_untracked(), None))
         .label(move || c.with(|c| c.name.clone()))
         .on_long_press(move || {
@@ -159,9 +185,9 @@ fn seen_space(s: &SpaceView) -> View {
         .flex_row()
         .items_center()
         .gap(px(10.0))
-        .pl(px(32.0))
+        .pl(px(50.0))
         .pr(px(16.0))
-        .py(px(6.0))
+        .h(px(36.0))
         .active(|st| st.bg(theme::HOVER))
         .role(AccessibilityRole::Button)
         .label(s.name.clone())
@@ -181,7 +207,7 @@ enum Step {
 pub fn edit_current_page(live: live::Live) -> nsh_core::element::Screen {
     let id = live.computer.id();
     let original = link::computers().into_iter().find(|c| c.id() == id).unwrap_or(live.computer);
-    ui::page(t!("Edit connection")).child(connection_form(Some(original), true, crate::nav::back, move |computer, session| {
+    ui::page(t!("Edit connection")).child(connection_form(Some(original), false, crate::nav::back, move |computer, session| {
         live::switch_connection(computer, Some(session), Some(&id))
     }))
 }
@@ -199,6 +225,7 @@ fn connection_form(
     let session = signal(original.as_ref().and_then(|c| c.session.clone()).unwrap_or_default());
     let password = signal(String::new());
     let is_edit = original.is_some();
+    let more = signal(!session.get_untracked().is_empty());
     let step = signal(Step::Form);
     let connect = move || {
         // One try at a time: pressed again meanwhile, nothing more.
@@ -307,28 +334,50 @@ fn connection_form(
                     .child(ui::field(t!("User"), user, KeyboardType::Url).flex_1())
                     .child(ui::field(t!("Port"), port, KeyboardType::Number).w(px(88.0))),
             )
-            .child(password_field(password))
-            .child(when(move || is_edit, || text(t!("Leave blank to keep the current login.")).text_size(px(12.0)).text_color(theme::DIM)))
-            .child(
+            .child(password_field(password, is_edit))
+            // Seldom wanted: folded, unless it has one.
+            .child(when(move || !more.get(), move || {
+                view()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(6.0))
+                    .h(px(32.0))
+                    .role(AccessibilityRole::Button)
+                    .label(t!("More options"))
+                    .on_press(move || more.set(true))
+                    .child(text(t!("More options")).text_size(px(14.0)).text_color(theme::MUTED))
+                    .child(ui::glyph("chevron-down", 14.0, theme::MUTED))
+            }))
+            .child(when(move || more.get(), move || {
                 view()
                     .gap(px(4.0))
                     .child(ui::field(t!("Session"), session, KeyboardType::Url))
-                    .child(text(t!("Optional: another herdr's HC_SESSION on that computer.")).text_size(px(12.0)).text_color(theme::DIM)),
-            )
+                    .child(text(t!("Optional: another herdr's HC_SESSION on that computer.")).text_size(px(12.0)).text_color(theme::DIM))
+            }))
             .child(dynamic(move || match step.get() {
                 Step::Failed(why) => text(why).text_size(px(14.0)).text_color(theme::BLOCKED).into_element(),
-                Step::Busy(what) => text(what).text_size(px(14.0)).text_color(theme::MUTED).into_element(),
-                Step::Form => view().into_element(),
+                _ => view().into_element(),
             }))
-            // Pressed, it waits (dimmed) for the try to end.
-            .child(ui::button(if is_edit { t!("Test and save") } else { t!("Connect") }, connect.clone()).disabled(move || matches!(step.get(), Step::Busy(_))).disabled_style(|s| s.opacity(0.4)))
+            // Pressed, it says what it is doing, and waits (dimmed) for the try to end.
+            .child(
+                ui::busy_button(
+                    move || match step.get() {
+                        Step::Busy(what) => what.to_owned(),
+                        _ => if is_edit { t!("Test and save") } else { t!("Connect") }.to_owned(),
+                    },
+                    move || matches!(step.get(), Step::Busy(_)),
+                    connect.clone(),
+                )
+                .disabled(move || matches!(step.get(), Step::Busy(_)))
+                .disabled_style(|s| s.opacity(0.6)),
+            )
             .child(when(move || can_cancel, move || ui::ghost_button(t!("Cancel"), cancel).disabled(move || matches!(step.get(), Step::Busy(_))))),
     )
 }
 
 /// The password, hidden unless asked: a keyboard that changed a letter
 /// shows here.
-fn password_field(password: Signal<String>) -> impl IntoElement {
+fn password_field(password: Signal<String>, is_edit: bool) -> impl IntoElement {
     let shown = signal(false);
     view()
         .gap(px(6.0))
@@ -370,8 +419,12 @@ fn password_field(password: Signal<String>) -> impl IntoElement {
                 ),
         )
         .child(
-            text(t!("Kept on this phone, sealed: nothing is left on the computer."))
-                .text_size(px(12.0))
-                .text_color(theme::DIM),
+            text(if is_edit {
+                format!("{} {}", t!("Leave blank to keep the current login."), t!("Kept on this phone, sealed: nothing is left on the computer."))
+            } else {
+                t!("Kept on this phone, sealed: nothing is left on the computer.").to_owned()
+            })
+            .text_size(px(12.0))
+            .text_color(theme::DIM),
         )
 }

@@ -231,6 +231,7 @@ fn zh(en: &str) -> Option<&'static str> {
         "Cannot load the phone's key: {}" => "读不到手机的密钥：{}",
         "Rename" => "重命名",
         "Rename {}" => "重命名 {}",
+        "More options" => "更多选项",
         "Close" => "关闭",
         "Not now" => "稍后",
         "Tab" => "标签页",

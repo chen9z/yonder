@@ -480,7 +480,8 @@ fn edits_a_saved_connection_only_after_it_works() {
     app.type_text("id:password", "incorrect").unwrap();
     app.press("text:Test and save").unwrap();
     app.wait_for_within("text:Wrong user name or password.", SLOW).unwrap();
-    app.press("text:Cancel").unwrap();
+    // Nothing saved: back is the way out (no Cancel under a back arrow).
+    app.back().unwrap();
     app.back().unwrap();
     app.wait_for_within("id:terminal-input", SLOW).unwrap();
     app.type_text("id:terminal-input", "touch still-connected\n").unwrap();
@@ -504,13 +505,13 @@ fn another_session_is_a_computer_of_its_own() {
     app.clear("id:port").unwrap();
     app.type_text("id:password", "nope").unwrap();
 
-    // Trying, Connect takes no press; something that never answers is
-    // given up on.
+    // Trying, Connect says what it does and takes no press; something
+    // that never answers is given up on.
     let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     app.type_text("id:port", &silent.local_addr().unwrap().port().to_string()).unwrap();
     app.press("text:Connect").unwrap();
     app.wait_for("text:Reaching the computer…").unwrap();
-    assert!(!app.screen().enabled("text:Connect").unwrap());
+    assert!(!app.screen().enabled("text:Reaching the computer…").unwrap());
     app.wait_for_within("text:127.0.0.1 doesn't answer.", SLOW).unwrap();
     assert!(app.screen().enabled("text:Connect").unwrap());
     drop(silent);
@@ -521,6 +522,8 @@ fn another_session_is_a_computer_of_its_own() {
     app.wait_for("text:Hide").unwrap();
 
     // Words a shell would take apart are not a session.
+    // A session is a seldom thing: under More options.
+    app.press("label:More options").unwrap();
     app.type_text("id:session", "two; ls").unwrap();
     app.press("text:Connect").unwrap();
     app.wait_for("text:A session is letters, digits and . _ - / only.").unwrap();
