@@ -80,8 +80,16 @@ fn header(
     let strip = computed(move || world.with(|v| has_strip(v)));
     let computer = live.computer.id();
     let color = move || space.with(|s| s.as_ref().and_then(|s| prefs.colors.with(|c| c.get(&format!("{computer}\u{0}{}", s.0)).copied())).unwrap_or(0));
+    // A machine's space says which, before the computer it's reached through.
+    let machine = {
+        let id = live.computer.id();
+        let computer = live.computer.name.clone();
+        computed(move || world.with(|v| v.active_space().and_then(|s| s.machine.clone())).map_or(computer.clone(), |m| format!("{} · {computer}", prefs.machine_name(&id, &m))))
+    };
     ui::top_bar()
         .border_b(move || px(if strip.get() { 0.0 } else { 1.0 }))
+        // With the strip under it, one line: as tall as its buttons.
+        .min_h(move || px(if strip.get() { 44.0 } else { 48.0 } + safe_area().top.0))
         .child(
             view()
                 .child(ui::icon_button("chevron-left", t!("Spaces and agents"), nav::home).pr(px(4.0)))
@@ -135,25 +143,22 @@ fn header(
                                 .text_color(theme::FOREGROUND)
                                 .number_of_lines(1),
                         )
+                        // The strip says the tab: where it is goes after the name
+                        // (the status after both, a spare gap when there is none).
+                        .child(when(move || strip.get(), move || {
+                            text(move || format!("· {}", machine.get())).flex_shrink(1.0).text_size(px(13.0)).text_color(theme::MUTED).number_of_lines(1)
+                        }))
                         .child(ui::tab_status(move || space.with(|s| s.as_ref().and_then(|s| s.2)))),
                 )
-                .child(
-                    text({
-                        // A machine's space says which, before the computer it's reached through.
-                        let id = live.computer.id();
-                        let computer = live.computer.name.clone();
-                        move || {
-                        let machine = world.with(|v| v.active_space().and_then(|s| s.machine.clone())).map_or(computer.clone(), |m| format!("{} · {computer}", prefs.machine_name(&id, &m)));
-                        // The strip says the tab, when there is one.
-                        if strip.get() {
-                            return machine;
-                        }
-                        tab.with(|t| t.as_ref().map_or(machine.clone(), |t| format!("{} · {machine}", label(t))))
-                    }})
+                .child(when(move || !strip.get(), move || {
+                    text(move || {
+                        let names = world.with(|v| space_names(v));
+                        tab.with(|t| t.as_ref().map_or(machine.get(), |t| format!("{} · {}", label(t, &names), machine.get())))
+                    })
                     .text_size(px(12.0))
                     .text_color(theme::MUTED)
-                    .number_of_lines(1),
-                ),
+                    .number_of_lines(1)
+                })),
         )
         // The new-menu: a terminal, an agent, a space or a worktree.
         .child(ui::icon_button("plus", t!("New"), {
@@ -235,6 +240,7 @@ struct TabChip {
     label: String,
     status: Option<&'static str>,
     active: bool,
+    program: serde_json::Value,
 }
 
 /// The tabs the space shows (a tab put away, unless it is the shown one).
@@ -249,7 +255,8 @@ fn has_strip(v: &herdc_engine::View) -> bool {
 
 /// The space's tabs put away (the shown one aside): id and label.
 fn settled_tabs(v: &herdc_engine::View) -> Vec<(String, String)> {
-    v.active_space().map(|s| s.tabs.iter().filter(|t| t.settled && !t.active).map(|t| (t.id.clone(), label(t))).collect()).unwrap_or_default()
+    let names = space_names(v);
+    v.active_space().map(|s| s.tabs.iter().filter(|t| t.settled && !t.active).map(|t| (t.id.clone(), label(t, &names))).collect()).unwrap_or_default()
 }
 
 /// The space's tabs, while it has more than one: a tap shows one, a hold
@@ -257,7 +264,12 @@ fn settled_tabs(v: &herdc_engine::View) -> Vec<(String, String)> {
 /// counted at the end, a tap bringing one back.
 fn tab_strip(live: Live) -> impl IntoElement {
     let world = live.view;
-    let tabs = computed(move || world.with(|v| shown_tabs(v).into_iter().map(|t| TabChip { id: t.id.clone(), label: label(t), status: t.status, active: t.active }).collect::<Vec<_>>()));
+    let tabs = computed(move || {
+        world.with(|v| {
+            let names = space_names(v);
+            shown_tabs(v).into_iter().map(|t| TabChip { id: t.id.clone(), label: label(t, &names), status: t.status, active: t.active, program: tab_program(t) }).collect::<Vec<_>>()
+        })
+    });
     let settled = computed(move || world.with(|v| settled_tabs(v)));
     when(move || tabs.with(|t| t.len() > 1) || settled.with(|s| !s.is_empty()), move || {
         let live = live.clone();
@@ -321,7 +333,8 @@ fn tab_strip(live: Live) -> impl IntoElement {
                             }
                         })
                         .on_long_press(move || tab_menu(hold.clone(), t.with_untracked(|t| t.id.clone())))
-                        .child(ui::tab_status(move || t.with(|t| t.status)))
+                        // What runs there, as the pane strip shows it, then its words.
+                        .child(ui::program_icon(move || t.with(|t| t.program.clone()), 14.0))
                         .child(
                             text(move || t.with(|t| t.label.clone()))
                                 .max_w(px(180.0))
@@ -330,6 +343,7 @@ fn tab_strip(live: Live) -> impl IntoElement {
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(move || if t.with(|t| t.active) { theme::now(theme::FOREGROUND) } else { theme::now(theme::MUTED) }),
                         )
+                        .child(ui::tab_status(move || t.with(|t| t.status)))
                 },
             ))
             .child(when(move || settled.with(|s| !s.is_empty()), move || {
@@ -369,7 +383,7 @@ fn tab_said(live: Live) -> impl IntoElement {
             let tabs = shown_tabs(v);
             let at = tabs.iter().position(|t| t.active)?;
             let space = v.active_space()?.id.clone();
-            Some((space, tabs[at].id.clone(), format!("{}/{} · {}", at + 1, tabs.len(), label(tabs[at]))))
+            Some((space, tabs[at].id.clone(), format!("{}/{} · {}", at + 1, tabs.len(), label(tabs[at], &space_names(v)))))
         })
     });
     let said = signal(None::<String>);
@@ -448,10 +462,50 @@ pub fn link_banner(live: Live) -> impl IntoElement {
 }
 
 /// What a tab is called on a phone: its name if it was given one, else
-/// what its agent works on (a number says little among several).
-fn label(t: &TabView) -> String {
-    let agent = || t.panes.iter().find(|p| p.status.is_some()).map(|p| ui::title(&p.title)).filter(|s| !s.is_empty());
-    if t.named { t.name.clone() } else { agent().unwrap_or_else(|| t.name.clone()) }
+/// what its agent works on (a number says little among several), without
+/// the space's name the bar says (`π - nova`, `Fix it | nova`); with
+/// little more than that, the agent's name.
+fn label(t: &TabView, space: &[String]) -> String {
+    if t.named {
+        return t.name.clone();
+    }
+    let Some(agent) = t.panes.iter().find(|p| p.status.is_some()) else { return t.name.clone() };
+    let title = without(&ui::title(&agent.title), space);
+    if title.chars().count() > 2 {
+        return title;
+    }
+    let name = agent.program["name"].as_str().filter(|n| !n.is_empty()).map(str::to_owned);
+    name.or_else(|| (!title.is_empty()).then_some(title)).unwrap_or_else(|| t.name.clone())
+}
+
+/// What the shown space is called, as an agent's title may say it: its
+/// name, and its folder's.
+fn space_names(v: &herdc_engine::View) -> Vec<String> {
+    let Some(s) = v.active_space() else { return Vec::new() };
+    let folder = s.folder.trim_end_matches('/').rsplit('/').next().unwrap_or_default().to_owned();
+    vec![s.name.clone(), folder]
+}
+
+/// `title` without one of `names` at its start or end, and what joins it
+/// there (` | `, ` - `, ` · `).
+fn without(title: &str, names: &[String]) -> String {
+    for name in names.iter().filter(|n| !n.is_empty()) {
+        if title == name {
+            return String::new();
+        }
+        for join in [" | ", " - ", " – ", " — ", " · ", ": "] {
+            let rest = title.strip_suffix(&format!("{join}{name}")).or_else(|| title.strip_prefix(&format!("{name}{join}")));
+            if let Some(rest) = rest {
+                return rest.trim().to_owned();
+            }
+        }
+    }
+    title.to_owned()
+}
+
+/// What a tab runs, as its icon says: its agent, else the pane shown.
+fn tab_program(t: &TabView) -> serde_json::Value {
+    t.panes.iter().find(|p| p.status.is_some()).or_else(|| shown(t)).map(|p| p.program.clone()).unwrap_or_default()
 }
 
 /// The pane shown on a phone: the zoomed one, else the focused one.
@@ -853,6 +907,18 @@ fn note(live: Live, n: ReadSignal<(u64, herdc_engine::Note)>) -> impl IntoElemen
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tabs_lose_the_space_s_name() {
+        let names = ["nova".to_owned(), "nova".to_owned()];
+        let without = |t: &str| super::without(t, &names);
+        assert_eq!(without("π - nova"), "π");
+        assert_eq!(without("nova"), "");
+        assert_eq!(without("检查输入框回车键缺失 | nova"), "检查输入框回车键缺失");
+        assert_eq!(without("nova · notes"), "notes");
+        assert_eq!(without("nova2 | fix"), "nova2 | fix");
+        assert_eq!(super::without("Fix it", &[]), "Fix it");
+    }
+
     #[test]
     fn panes_on_the_strip_are_told_apart() {
         let named = |raw: &[&str]| super::chip_titles(raw.iter().copied());
