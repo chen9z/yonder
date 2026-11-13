@@ -459,8 +459,38 @@ pub fn prompt_dialog(asking: Signal<Option<Prompt>>, answer: impl Fn(Option<Stri
     })
 }
 
+/// `title` without one of `names` at its start or end, and what joins it
+/// there (` | `, ` - `, ` · `): what an agent adds of where it works
+/// (`π - nova`), where the space already says it.
+pub fn without(title: &str, names: &[String]) -> String {
+    for name in names.iter().filter(|n| !n.is_empty()) {
+        if title == name {
+            return String::new();
+        }
+        for join in [" | ", " - ", " – ", " — ", " · ", ": "] {
+            let rest = title.strip_suffix(&format!("{join}{name}")).or_else(|| title.strip_prefix(&format!("{name}{join}")));
+            if let Some(rest) = rest {
+                return rest.trim().to_owned();
+            }
+        }
+    }
+    title.to_owned()
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn titles_lose_the_space_s_name() {
+        let names = ["nova".to_owned(), "nova".to_owned()];
+        let without = |t: &str| super::without(t, &names);
+        assert_eq!(without("π - nova"), "π");
+        assert_eq!(without("nova"), "");
+        assert_eq!(without("检查输入框回车键缺失 | nova"), "检查输入框回车键缺失");
+        assert_eq!(without("nova · notes"), "notes");
+        assert_eq!(without("nova2 | fix"), "nova2 | fix");
+        assert_eq!(super::without("Fix it", &[]), "Fix it");
+    }
+
     #[test]
     fn titles_lose_markers_and_what_cannot_be_seen() {
         assert_eq!(super::title("[ ! ] Action Required | Create notes\u{feff}\u{feff}"), "Create notes");

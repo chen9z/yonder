@@ -47,8 +47,15 @@ pub fn listed(agents: &[AgentView], terminals: &[Value]) -> Vec<AgentView> {
 enum Line {
     /// `word`: a heading the app says (in its language), else a space's `label`.
     Heading { id: String, label: String, word: Option<&'static str>, status: Option<&'static str>, count: usize, open: bool, top: Option<&'static str>, priority: bool },
-    Agent { agent: Box<AgentView>, name: String, more: Option<String>, machine: Option<String>, subs: usize, open: bool, compact: bool },
-    Sub { sub: Sub, last: bool, compact: bool },
+    Agent { agent: Box<AgentView>, name: String, more: Option<String>, machine: Option<String>, subs: usize, open: bool, compact: bool, edge: Edge },
+    Sub { sub: Sub, last: bool, compact: bool, edge: Edge },
+}
+
+/// Where a row is on its group's card: its first, its last (or both).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Edge {
+    top: bool,
+    bottom: bool,
 }
 
 impl Line {
@@ -115,14 +122,22 @@ fn lines(v: &herdc_engine::View, grouped: bool, folded: &[String], held: &mut Op
             let subs = &kids[a.address.as_str()];
             let open = !folded.contains(&a.address);
             let compact = !grouped && !pinned;
-            out.push(Line::Agent { agent: Box::new(a.clone()), name, more, machine: machine(a), subs: subs.len(), open, compact });
+            out.push(Line::Agent { agent: Box::new(a.clone()), name, more, machine: machine(a), subs: subs.len(), open, compact, edge: Edge::default() });
             if open {
                 for (i, sub) in subs.iter().enumerate() {
                     // The last of its siblings: none at its depth before the tree goes up.
                     let last = subs[i + 1..].iter().find(|s| s.depth <= sub.depth).is_none_or(|s| s.depth < sub.depth);
-                    out.push(Line::Sub { sub: sub.clone(), last, compact: !grouped });
+                    out.push(Line::Sub { sub: sub.clone(), last, compact: !grouped, edge: Edge::default() });
                 }
             }
+        }
+    }
+    // A group's rows make one card: under its heading, until the next.
+    let heading = |l: Option<&Line>| l.is_none_or(|l| matches!(l, Line::Heading { .. }));
+    for at in 0..out.len() {
+        let (top, bottom) = (heading(at.checked_sub(1).and_then(|b| out.get(b))), heading(out.get(at + 1)));
+        if let Line::Agent { edge, .. } | Line::Sub { edge, .. } = &mut out[at] {
+            *edge = Edge { top, bottom };
         }
     }
     out
@@ -197,8 +212,11 @@ fn numeric(detail: &str) -> bool {
 /// no space heading above (by priority, pinned), the name is its space's.
 // Adapted from herdr-app defaults/mods/agents/main.js, Apache-2.0.
 fn parts(a: &AgentView, view: &herdc_engine::View, listed: &[AgentView], full: bool) -> (String, Option<String>) {
-    let label = row_detail(a, view, listed);
     let program = a.program["name"].as_str().or(a.app.as_deref()).unwrap_or_default();
+    // `π - nova` in nova says Pi; `nova` alone, the agent's name too.
+    let detail = row_detail(a, view, listed);
+    let stripped = ui::without(&detail, std::slice::from_ref(&a.space_name));
+    let label = if stripped != detail && stripped.chars().count() <= 2 && !program.is_empty() { program.to_owned() } else { stripped };
     // An automatic tab number says nothing, unless two rows would read the same.
     let ambiguous = listed.iter().filter(|other| other.space_name == a.space_name && numeric(&row_detail(other, view, listed))).count() > 1;
     let more = (!label.is_empty() && (!numeric(&label) || ambiguous)).then(|| label.clone());
@@ -315,9 +333,10 @@ fn heading(l: ReadSignal<Line>, fold: impl Fn(String) + Copy + 'static) -> impl 
         .flex_row()
         .items_center()
         .gap(px(8.0))
-        .mx(px(8.0))
-        .px(px(10.0))
-        .h(px(40.0))
+        .mx(px(12.0))
+        .mt(px(6.0))
+        .px(px(12.0))
+        .h(px(36.0))
         .rounded(px(8.0))
         .active(|s| s.bg(theme::HOVER))
         .role(AccessibilityRole::Button)
@@ -343,29 +362,45 @@ fn heading(l: ReadSignal<Line>, fold: impl Fn(String) + Copy + 'static) -> impl 
         }))
 }
 
-/// An agent's row: what runs, its name over what it does and its
-/// machine, how long since its status changed and that status. A tap shows it; a long press pins or
-/// stops it.
+/// A row's piece of its group's card: the card's color, rounded where
+/// the card starts and ends, a line above it from the words on.
+fn on_card(edge: impl Fn() -> Edge + Copy + 'static, line: bool) -> View {
+    view()
+        .mx(px(12.0))
+        .bg(theme::POPOVER)
+        .overflow_hidden()
+        .rounded_t(move || px(if edge().top { 14.0 } else { 0.0 }))
+        .rounded_b(move || px(if edge().bottom { 14.0 } else { 0.0 }))
+        .child(when(move || line && !edge().top, || view().h(px(1.0)).ml(px(46.0)).bg(theme::BORDER)))
+}
+
+/// An agent's row: its space's mark (what runs on its corner), the space
+/// and what it does, where it is under them, how long since its status
+/// changed and that status. A tap shows it; a long press pins or stops it.
 fn agent_row(live: Live, l: ReadSignal<Line>, now: Signal<u64>, inline: bool, fold: impl Fn(String) + Copy + 'static) -> impl IntoElement {
     let agent = move || l.with(|l| match l { Line::Agent { agent, .. } => Some((**agent).clone()), _ => None });
     let row = computed(move || match l.get() {
-        Line::Agent { agent, name, more, machine, subs, open, compact } => Some((agent.address, agent.status, agent.focused, agent.pinned, name, more, machine, subs, open, compact)),
+        Line::Agent { agent, name, more, machine, subs, open, compact, .. } => Some((agent.address, agent.status, agent.focused, agent.pinned, name, more, machine, subs, open, compact)),
         _ => None,
     });
+    let edge = move || l.with(|l| match l { Line::Agent { edge, .. } => *edge, _ => Edge::default() });
     let prefs = use_context::<crate::prefs::Prefs>().unwrap();
     let computer = live.computer.id();
+    let here = live.computer.name.clone();
+    let color = {
+        let computer = computer.clone();
+        move || l.with(|l| match l { Line::Agent { agent, .. } => prefs.colors.with(|c| c.get(&format!("{computer}\u{0}{}", agent.space)).copied()).unwrap_or(0), _ => 0 })
+    };
     let (press, hold) = (live.clone(), live);
-    view()
-        .mx(px(8.0))
+    on_card(edge, true)
         .child(
             view()
                 .flex_row()
                 .items_center()
-                .gap(px(10.0))
-                .px(px(10.0))
-                .min_h(px(52.0))
-                .py(px(6.0))
-                .rounded(px(10.0))
+                .gap(px(12.0))
+                .px(px(12.0))
+                .min_h(px(58.0))
+                .py(px(8.0))
                 .bg(move || if row.with(|r| r.as_ref().is_some_and(|r| r.2)) { theme::now(theme::SELECTED) } else { Hsla::transparent_black() })
                 .active(|s| s.bg(theme::HOVER))
                 .on_press(move || {
@@ -392,32 +427,56 @@ fn agent_row(live: Live, l: ReadSignal<Line>, now: Signal<u64>, inline: bool, fo
                         }
                     });
                 })
-                .child(ui::program_icon(move || agent().map(|a| a.program).unwrap_or_default(), 18.0))
+                .child(
+                    // The space's mark, what runs there on its corner.
+                    view()
+                        .child(ui::space_mark(move || agent().map(|a| a.space_name).unwrap_or_default(), color))
+                        .child(
+                            view()
+                                .absolute()
+                                .right(px(-5.0))
+                                .bottom(px(-5.0))
+                                .p(px(1.5))
+                                .rounded(px(5.0))
+                                .bg(theme::POPOVER)
+                                .child(ui::program_icon(move || agent().map(|a| a.program).unwrap_or_default(), 11.0)),
+                        ),
+                )
                 .child(
                     view()
                         .flex_1()
                         .gap(px(2.0))
+                        // The space (or what it does, under its space's heading), then what it does, quieter.
                         .child(
-                            text(move || row.with(|r| r.as_ref().map(|r| r.4.clone()).unwrap_or_default()))
-                                .text_size(px(15.0))
-                                // An idle agent not shown is quieter.
-                                .text_color(move || if row.with(|r| r.as_ref().is_some_and(|r| r.1 == "idle" && !r.2)) { theme::now(theme::MUTED) } else { theme::now(theme::FOREGROUND) })
-                                .number_of_lines(1),
+                            view()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(6.0))
+                                .child(
+                                    text(move || row.with(|r| r.as_ref().map(|r| r.4.clone()).unwrap_or_default()))
+                                        .flex_shrink(0.0)
+                                        .max_w(px(180.0))
+                                        .text_size(px(15.0))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        // An idle agent not shown is quieter.
+                                        .text_color(move || if row.with(|r| r.as_ref().is_some_and(|r| r.1 == "idle" && !r.2)) { theme::now(theme::MUTED) } else { theme::now(theme::FOREGROUND) })
+                                        .number_of_lines(1),
+                                )
+                                .child(
+                                    text(move || row.with(|r| r.as_ref().and_then(|r| r.5.clone()).unwrap_or_default()))
+                                        .flex_1()
+                                        .text_size(px(14.0))
+                                        .text_color(theme::MUTED)
+                                        .number_of_lines(1),
+                                ),
                         )
-                        // What it does and where, quieter, under it (when there is any).
-                        .child(when(move || row.with(|r| r.as_ref().is_some_and(|r| r.5.is_some() || r.6.is_some())), move || {
-                            let computer = computer.clone();
-                            text(move || {
-                                row.with(|r| {
-                                    let Some(r) = r else { return String::new() };
-                                    let machine = r.6.as_ref().map(|m| prefs.machine_name(&computer, m));
-                                    [r.5.clone(), machine].into_iter().flatten().collect::<Vec<_>>().join(" · ")
-                                })
-                            })
-                            .text_size(px(12.0))
-                            .text_color(theme::DIM)
-                            .number_of_lines(1)
-                        })),
+                        // Where: its machine, else the computer.
+                        .child(
+                            text(move || row.with(|r| r.as_ref().map(|r| r.6.as_ref().map_or_else(|| here.clone(), |m| prefs.machine_name(&computer, m))).unwrap_or_default()))
+                                .text_size(px(12.0))
+                                .text_color(theme::DIM)
+                                .number_of_lines(1),
+                        ),
                 )
                 .child(when(move || row.with(|r| r.as_ref().is_some_and(|r| r.7 > 0)), move || {
                     // The sub-agents' fold; folded, how many.
@@ -445,19 +504,18 @@ fn agent_row(live: Live, l: ReadSignal<Line>, now: Signal<u64>, inline: bool, fo
 /// pane, or peeks at it.
 fn sub_row(live: Live, l: ReadSignal<Line>, inline: bool) -> impl IntoElement {
     let sub = computed(move || match l.get() {
-        Line::Sub { sub, last, compact } => Some((sub, last, compact)),
+        Line::Sub { sub, last, compact, .. } => Some((sub, last, compact)),
         _ => None,
     });
+    let edge = move || l.with(|l| match l { Line::Sub { edge, .. } => *edge, _ => Edge::default() });
     let address = move || sub.with_untracked(|s| s.as_ref().map(|s| s.0.address.clone()).unwrap_or_default());
-    view()
+    on_card(edge, false).child(view()
         .flex_row()
         .items_center()
         .gap(px(8.0))
-        .mx(px(8.0))
         .pl(move || px(24.0 + 16.0 * sub.with(|s| s.as_ref().map_or(0, |s| s.0.depth)) as f32))
-        .pr(px(10.0))
+        .pr(px(12.0))
         .h(px(40.0))
-        .rounded(px(8.0))
         .active(|s| s.bg(theme::HOVER))
         .role(AccessibilityRole::Button)
         .label(move || sub.with(|s| s.as_ref().map(|s| t!("{}, sub-agent", s.0.name)).unwrap_or_default()))
@@ -476,7 +534,7 @@ fn sub_row(live: Live, l: ReadSignal<Line>, inline: bool) -> impl IntoElement {
         .child(text(move || if sub.with(|s| s.as_ref().is_some_and(|s| s.1)) { "└" } else { "├" }).text_size(px(13.0)).text_color(theme::DIM))
         .child(ui::program_icon(move || sub.with(|s| s.as_ref().map(|s| s.0.program.clone()).unwrap_or_default()), 15.0))
         .child(text(move || sub.with(|s| s.as_ref().map(|s| s.0.name.clone()).unwrap_or_default())).flex_1().text_size(px(14.0)).text_color(theme::MUTED).number_of_lines(1))
-        .child(ui::status_mark(move || sub.with(|s| s.as_ref().and_then(|s| s.0.status)), move || sub.with(|s| s.as_ref().is_some_and(|s| s.2))))
+        .child(ui::status_mark(move || sub.with(|s| s.as_ref().and_then(|s| s.0.status)), move || sub.with(|s| s.as_ref().is_some_and(|s| s.2)))))
 }
 
 /// A terminal without a pane, shown as it is: keep it (a pane of its own,
@@ -578,6 +636,17 @@ mod tests {
         view.agents[1].title.clear();
         view.agents[1].app = Some("Claude".into());
         assert_eq!(super::label(&view.agents[1], &view), "Project · Claude");
+    }
+
+    #[test]
+    fn rows_say_the_space_once() {
+        let mut a = agent();
+        (a.space_name, a.title, a.program) = ("nova".into(), "π - nova".into(), json!({"name": "Pi"}));
+        let mut b = a.clone();
+        (b.address, b.title) = ("t2".into(), "Fix the build | nova".into());
+        let view = herdc_engine::View { agents: vec![a, b], ..Default::default() };
+        assert_eq!(super::label(&view.agents[0], &view), "nova · Pi");
+        assert_eq!(super::label(&view.agents[1], &view), "nova · Fix the build");
     }
 
     /// The list's lines, shortened: headings as `# label count`, agents

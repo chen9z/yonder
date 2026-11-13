@@ -428,7 +428,7 @@ fn label(t: &TabView, space: &[String]) -> String {
         return t.name.clone();
     }
     let Some(agent) = t.panes.iter().find(|p| p.status.is_some()) else { return t.name.clone() };
-    let title = without(&ui::title(&agent.title), space);
+    let title = ui::without(&ui::title(&agent.title), space);
     if title.chars().count() > 2 {
         return title;
     }
@@ -444,22 +444,6 @@ fn space_names(v: &herdc_engine::View) -> Vec<String> {
     vec![s.name.clone(), folder]
 }
 
-/// `title` without one of `names` at its start or end, and what joins it
-/// there (` | `, ` - `, ` · `).
-fn without(title: &str, names: &[String]) -> String {
-    for name in names.iter().filter(|n| !n.is_empty()) {
-        if title == name {
-            return String::new();
-        }
-        for join in [" | ", " - ", " – ", " — ", " · ", ": "] {
-            let rest = title.strip_suffix(&format!("{join}{name}")).or_else(|| title.strip_prefix(&format!("{name}{join}")));
-            if let Some(rest) = rest {
-                return rest.trim().to_owned();
-            }
-        }
-    }
-    title.to_owned()
-}
 
 
 /// The pane shown on a phone: the zoomed one, else the focused one.
@@ -857,18 +841,6 @@ fn note(live: Live, n: ReadSignal<(u64, herdc_engine::Note)>) -> impl IntoElemen
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn tabs_lose_the_space_s_name() {
-        let names = ["nova".to_owned(), "nova".to_owned()];
-        let without = |t: &str| super::without(t, &names);
-        assert_eq!(without("π - nova"), "π");
-        assert_eq!(without("nova"), "");
-        assert_eq!(without("检查输入框回车键缺失 | nova"), "检查输入框回车键缺失");
-        assert_eq!(without("nova · notes"), "notes");
-        assert_eq!(without("nova2 | fix"), "nova2 | fix");
-        assert_eq!(super::without("Fix it", &[]), "Fix it");
-    }
-
     #[test]
     fn panes_on_the_strip_are_told_apart() {
         let named = |raw: &[&str]| super::chip_titles(raw.iter().copied());
