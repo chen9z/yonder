@@ -20,6 +20,20 @@ pub fn workspace_page(live: Live) -> impl IntoElement {
     let space = computed(move || world.with(|v| v.active_space().map(|s| (s.id.clone(), s.name.clone(), s.status))));
     let tab = computed(move || world.with(|v| v.active_tab().cloned()));
     let more_open = signal(false);
+    // The space shown closed (its last pane, from a menu): home, not on to
+    // whichever space the core shows next, maybe on another machine.
+    let was = stored(None::<String>);
+    effect(move || {
+        let (now, gone) = world.with(|v| {
+            let now = v.active_space().map(|s| s.id.clone());
+            let gone = v.connected() && was.with(|w| w.as_ref().is_some_and(|w| Some(w) != now.as_ref() && !v.spaces.iter().any(|s| &s.id == w)));
+            (now, gone)
+        });
+        was.replace(now);
+        if gone && nav::routes().with_untracked(|r| r.0.last() == Some(&Route::Workspace)) {
+            nav::home();
+        }
+    });
     view()
         .flex_1()
         .bg(theme::BACKGROUND)
@@ -62,10 +76,15 @@ fn header(
     // Agents elsewhere that need you, else that are done: said on the way
     // back, in the color of what they are.
     let waiting = computed(move || world.with(|v| waiting_elsewhere(v)));
+    // The tab strip goes on from the bar, as one: no line between.
+    let strip = computed(move || world.with(|v| has_strip(v)));
+    let computer = live.computer.id();
+    let color = move || space.with(|s| s.as_ref().and_then(|s| prefs.colors.with(|c| c.get(&format!("{computer}\u{0}{}", s.0)).copied())).unwrap_or(0));
     ui::top_bar()
+        .border_b(move || px(if strip.get() { 0.0 } else { 1.0 }))
         .child(
             view()
-                .child(ui::icon_button("‹", t!("Spaces and agents"), nav::home).pr(px(4.0)))
+                .child(ui::icon_button("chevron-left", t!("Spaces and agents"), nav::home).pr(px(4.0)))
                 .child(when(move || waiting.get().0 > 0, move || {
                     view()
                         .absolute()
@@ -104,15 +123,19 @@ fn header(
                     view()
                         .flex_row()
                         .items_center()
-                        .gap(px(6.0))
-                        .child(ui::dot(move || space.with(|s| s.as_ref().and_then(|s| s.2))))
+                        .gap(px(8.0))
+                        .child(when(move || space.with(Option::is_some), move || {
+                            ui::space_mark(move || space.with(|s| s.as_ref().map(|s| s.1.clone()).unwrap_or_default()), color.clone())
+                        }))
                         .child(
                             text(move || space.with(|s| s.as_ref().map_or_else(|| "Yonder".to_owned(), |s| s.1.clone())))
+                                .flex_shrink(1.0)
                                 .text_size(px(16.0))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(theme::FOREGROUND)
                                 .number_of_lines(1),
-                        ),
+                        )
+                        .child(ui::tab_status(move || space.with(|s| s.as_ref().and_then(|s| s.2)))),
                 )
                 .child(
                     text({
@@ -121,6 +144,10 @@ fn header(
                         let computer = live.computer.name.clone();
                         move || {
                         let machine = world.with(|v| v.active_space().and_then(|s| s.machine.clone())).map_or(computer.clone(), |m| format!("{} · {computer}", prefs.machine_name(&id, &m)));
+                        // The strip says the tab, when there is one.
+                        if strip.get() {
+                            return machine;
+                        }
                         tab.with(|t| t.as_ref().map_or(machine.clone(), |t| format!("{} · {machine}", label(t))))
                     }})
                     .text_size(px(12.0))
@@ -129,14 +156,14 @@ fn header(
                 ),
         )
         // The new-menu: a terminal, an agent, a space or a worktree.
-        .child(ui::icon_button("+", t!("New"), {
+        .child(ui::icon_button("plus", t!("New"), {
             let live = live.clone();
             move || {
                 dismiss_keyboard();
                 spawn(crate::palette::new_terminal(live.clone()));
             }
         }))
-        .child(ui::icon_button("⋯", t!("More"), move || {
+        .child(ui::icon_button("ellipsis", t!("More"), move || {
             dismiss_keyboard();
             more_open.set(true)
         }))
@@ -208,6 +235,11 @@ struct TabChip {
 /// The tabs the space shows (a tab put away, unless it is the shown one).
 fn shown_tabs(v: &herdc_engine::View) -> Vec<&TabView> {
     v.active_space().map(|s| s.tabs.iter().filter(|t| !t.settled || t.active).collect()).unwrap_or_default()
+}
+
+/// The strip is shown: more than one tab, or some put away.
+fn has_strip(v: &herdc_engine::View) -> bool {
+    shown_tabs(v).len() > 1 || !settled_tabs(v).is_empty()
 }
 
 /// The space's tabs put away (the shown one aside): id and label.
@@ -715,7 +747,7 @@ pub fn notes(live: Live) -> impl IntoElement {
     let hidden = computed(move || notes.with(Vec::len) - shown.with(Vec::len));
     // At the top, under the workspace's tab strip when it has one.
     let strip = computed(move || {
-        nav::routes().with(|r| r.0.last() == Some(&Route::Workspace)) && world.with(|v| shown_tabs(v).len() > 1 || !settled_tabs(v).is_empty())
+        nav::routes().with(|r| r.0.last() == Some(&Route::Workspace)) && world.with(|v| has_strip(v))
     });
     dynamic(move || {
         let stack = view().absolute().left(px(12.0)).right(px(12.0)).gap(px(8.0)).pointer_events(PointerEvents::BoxNone);
@@ -777,7 +809,7 @@ fn note(live: Live, n: ReadSignal<(u64, herdc_engine::Note)>) -> impl IntoElemen
                 )
                 .child({
                     let notes = live.notes;
-                    ui::icon_button("✕", t!("Not now"), move || {
+                    ui::icon_button("x", t!("Not now"), move || {
                         let id = n.with_untracked(|n| n.0);
                         notes.update(|all| all.retain(|(i, _)| *i != id));
                     })

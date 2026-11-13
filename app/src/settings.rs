@@ -6,8 +6,8 @@ use crate::live::{self, Live};
 use crate::prefs::Prefs;
 use crate::nav::{self, Route};
 use crate::{link, theme, ui};
+use crate::ui::Act;
 use herdc_engine::Link;
-use nsh_base::switch;
 use nsh_core::prelude::*;
 
 pub fn settings_page(live: Live) -> nsh_core::element::Screen {
@@ -28,18 +28,29 @@ pub fn settings_page(live: Live) -> nsh_core::element::Screen {
                 .pb(move || px(safe_area().bottom.0 + 24.0))
                 .child(ui::heading(|| t!("TERMINAL").into()))
                 .child(
-                    setting(|| t!("Font size").into(), move || t!("{} pt", prefs.font.get()))
-                        .child(ui::ghost_button("−", move || prefs.font.update(|f| *f = (*f - 1.0).max(crate::terminal::FONT.0))).label(t!("Smaller text")))
-                        .child(ui::ghost_button("+", move || prefs.font.update(|f| *f = (*f + 1.0).min(crate::terminal::FONT.1))).label(t!("Larger text"))),
+                    setting(|| t!("Font size").into(), move || t!("{} pt", prefs.font.get())).child(
+                        view()
+                            .flex_row()
+                            .items_center()
+                            .h(px(36.0))
+                            .rounded(px(10.0))
+                            .border_1()
+                            .border_color(theme::BORDER)
+                            .child(step("minus", t!("Smaller text"), move || prefs.font.update(|f| *f = (*f - 1.0).max(crate::terminal::FONT.0))))
+                            .child(view().w(px(1.0)).h(px(18.0)).bg(theme::BORDER))
+                            .child(step("plus", t!("Larger text"), move || prefs.font.update(|f| *f = (*f + 1.0).min(crate::terminal::FONT.1)))),
+                    ),
                 )
                 .child(
                     setting(|| t!("Fit terminals to the phone").into(), || t!("Else they keep the desktop's size, drawn smaller").into())
-                        .child(switch().checked(prefs.fit).on_change(move |on: &bool| prefs.fit.set(*on))),
+                        .child(ui::toggle(prefs.fit, t!("Fit terminals to the phone"))),
                 )
                 .child(
                     setting(|| t!("Key bar").into(), move || t!("{} keys", prefs.keys.with(Vec::len)))
+                        .active(|s| s.bg(theme::HOVER))
                         .role(AccessibilityRole::Button)
-                        .on_press(|| nav::push(Route::KeyBar)),
+                        .on_press(|| nav::push(Route::KeyBar))
+                        .child(ui::glyph("chevron-right", 16.0, theme::DIM)),
                 )
                 .child(
                     setting(|| t!("Language").into(), move || match prefs.language.get() {
@@ -47,6 +58,8 @@ pub fn settings_page(live: Live) -> nsh_core::element::Screen {
                         Language::English => "English".into(),
                         Language::Chinese => "中文".into(),
                     })
+                    .active(|s| s.bg(theme::HOVER))
+                    .child(ui::glyph("chevron-right", 16.0, theme::DIM))
                     .role(AccessibilityRole::Button)
                     .on_press(move || {
                         spawn(async move {
@@ -62,8 +75,8 @@ pub fn settings_page(live: Live) -> nsh_core::element::Screen {
                 )
                 .child(ui::heading(|| t!("COMPUTER").into()))
                 .child(setting(move || live.computer.name.clone(), move || core.get()))
-                .child(view().px(px(16.0)).child(ui::ghost_button(t!("Edit connection"), || nav::push(Route::EditConnection))))
-                .child(view().px(px(16.0)).pt(px(8.0)).child(ui::ghost_button(t!("Leave this computer"), live::close)))
+                .child(ui::action_row(t!("Edit connection"), Act::Go, || nav::push(Route::EditConnection)))
+                .child(ui::action_row(t!("Leave this computer"), Act::Lose, live::close))
                 .child(ui::heading(|| t!("THIS PHONE'S KEY").into()))
                 .child(
                     view().px(px(16.0)).gap(px(8.0)).child(
@@ -74,13 +87,13 @@ pub fn settings_page(live: Live) -> nsh_core::element::Screen {
                             .selectable(true),
                     ),
                 )
-                .child(view().px(px(16.0)).pt(px(8.0)).child(ui::ghost_button(t!("Copy"), move || set_clipboard(public.clone()))))
+                .child(ui::action_row(t!("Copy"), Act::Do, move || set_clipboard(public.clone())))
                 .child(ui::heading(|| t!("ABOUT").into()))
                 .child(setting(|| "Yonder".into(), version))
-                .child(view().px(px(16.0)).pt(px(8.0)).child(ui::ghost_button(t!("Copy diagnostics"), move || {
+                .child(ui::action_row(t!("Copy diagnostics"), Act::Do, move || {
                     set_clipboard(diagnostics(&about, prefs));
                     about.say(herdc_engine::Note::info(t!("Copied"), t!("Paste it where you tell what went wrong.")));
-                }))),
+                })),
         ),
     )
 }
@@ -115,6 +128,20 @@ fn diagnostics(live: &Live, prefs: Prefs) -> String {
         out.push(format!("{} spaces · {tabs} tabs · {} terminals · {} agents", v.spaces.len(), v.terminals.len(), v.agents.len()));
     });
     out.join("\n")
+}
+
+/// One half of the font size's − / +.
+fn step(icon: &'static str, label: &'static str, press: impl Fn() + 'static) -> View {
+    view()
+        .w(px(44.0))
+        .h_full()
+        .items_center()
+        .justify_center()
+        .active(|s| s.bg(theme::HOVER))
+        .role(AccessibilityRole::Button)
+        .label(label)
+        .on_press(press)
+        .child(ui::glyph(icon, 16.0, theme::FOREGROUND))
 }
 
 /// A setting's row: what it is, what it is now, and its controls after.

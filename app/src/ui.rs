@@ -5,6 +5,7 @@ use crate::theme;
 use nsh_base::{alert_dialog, dialog};
 use nsh_base::input;
 use nsh_core::prelude::*;
+use nsh_core::Checked;
 
 /// A row of the app's own top bar, under the status bar.
 pub fn top_bar() -> View {
@@ -20,8 +21,8 @@ pub fn top_bar() -> View {
         .border_color(theme::BORDER)
 }
 
-/// A square press target with a glyph.
-pub fn icon_button(glyph: &'static str, label: &'static str, press: impl Fn() + 'static) -> View {
+/// A square press target with one of the lists' glyphs (`assets/chrome`).
+pub fn icon_button(icon: &'static str, label: &'static str, press: impl Fn() + 'static) -> View {
     view()
         .w(px(44.0))
         .h(px(44.0))
@@ -32,7 +33,62 @@ pub fn icon_button(glyph: &'static str, label: &'static str, press: impl Fn() + 
         .role(AccessibilityRole::Button)
         .label(label)
         .on_press(press)
-        .child(text(glyph).text_size(px(20.0)).text_color(theme::FOREGROUND))
+        .child(glyph(icon, 22.0, theme::FOREGROUND))
+}
+
+/// On or off, taking effect at once: a track the thumb slides along, in
+/// the accent while on. (NSH's `switch` leaves its look to the app.)
+pub fn toggle(on: Signal<bool>, label: &'static str) -> View {
+    view()
+        .w(px(44.0))
+        .h(px(26.0))
+        .p(px(3.0))
+        .rounded(px(13.0))
+        .flex_shrink(0.0)
+        .bg(move || if on.get() { theme::now(theme::ACCENT) } else { theme::now(theme::INPUT) })
+        .role(AccessibilityRole::Switch)
+        .label(label)
+        .accessibility_state(move || AccessibilityState { checked: Some(if on.get() { Checked::True } else { Checked::False }), ..Default::default() })
+        .hit_slop(EdgeInsets::all(px(10.0)))
+        .on_press(move || on.update(|o| *o = !*o))
+        .child(
+            view()
+                .w(px(20.0))
+                .h(px(20.0))
+                .rounded(px(10.0))
+                .bg(rgb(0xffffff))
+                .translate_x(move || px(if on.get() { 18.0 } else { 0.0 })),
+        )
+}
+
+/// What an [`action_row`] does: leads to a page, does something here, or
+/// does something that loses something.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Act {
+    Go,
+    Do,
+    Lose,
+}
+
+/// A list row that is pressed: its words in the color of what it does, a
+/// chevron where it leads to a page.
+pub fn action_row(title: &'static str, act: Act, press: impl Fn() + 'static) -> View {
+    let color = match act {
+        Act::Go => theme::FOREGROUND,
+        Act::Do => theme::ACCENT,
+        Act::Lose => theme::BLOCKED,
+    };
+    view()
+        .flex_row()
+        .items_center()
+        .px(px(16.0))
+        .h(px(52.0))
+        .active(|s| s.bg(theme::HOVER))
+        .role(AccessibilityRole::Button)
+        .label(title)
+        .on_press(press)
+        .child(text(title).flex_1().text_size(px(15.0)).text_color(color).number_of_lines(1))
+        .child(when(move || act == Act::Go, || glyph("chevron-right", 16.0, theme::DIM)))
 }
 
 /// The main action of a page.

@@ -170,7 +170,7 @@ fn on_bar(keys: Signal<Vec<String>>, id: ReadSignal<String>) -> View {
         .min_h(px(48.0))
         .child(text(shows).font_family(theme::MONO).text_size(px(15.0)).text_color(theme::FOREGROUND).w(px(56.0)))
         .child(text(if name == shows { String::new() } else { name.to_owned() }).flex_1().text_size(px(13.0)).text_color(theme::MUTED))
-        .child(ui::icon_button("↑", t!("Earlier"), step(-1)).label(t!("{} earlier", name)))
-        .child(ui::icon_button("↓", t!("Later"), step(1)).label(t!("{} later", name)))
-        .child(ui::icon_button("✕", t!("Take off"), move || keys.update(|k| k.retain(|o| *o != id))).label(t!("Take {} off", name)))
+        .child(ui::icon_button("arrow-up", t!("Earlier"), step(-1)).label(t!("{} earlier", name)))
+        .child(ui::icon_button("arrow-down", t!("Later"), step(1)).label(t!("{} later", name)))
+        .child(ui::icon_button("x", t!("Take off"), move || keys.update(|k| k.retain(|o| *o != id))).label(t!("Take {} off", name)))
 }

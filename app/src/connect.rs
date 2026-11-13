@@ -31,7 +31,7 @@ pub fn computers_page() -> impl IntoElement {
             ui::top_bar()
                 .child(view().w(px(12.0)))
                 .child(text("Yonder").text_size(px(20.0)).font_weight(FontWeight::BOLD).text_color(theme::FOREGROUND).flex_1())
-                .child(when(move || !adding.get(), move || ui::icon_button("+", t!("Add a computer"), move || { original.replace(None); adding.set(true); }))),
+                .child(when(move || !adding.get(), move || ui::icon_button("plus", t!("Add a computer"), move || { original.replace(None); adding.set(true); }))),
         )
         .child(when(move || adding.get(), move || {
             let old = original.replace(None);

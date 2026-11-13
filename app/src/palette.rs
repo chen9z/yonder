@@ -87,7 +87,7 @@ pub fn commands_page(live: Live) -> nsh_core::element::Screen {
                 virtual_list(move || shown.with(Vec::len), move |at| {
                     let live = live.clone();
                     let entry = move || shown.with(|s| s.get(at.index()).cloned());
-                    ui::row(move || entry().map(|e| e.title).unwrap_or_default(), move || entry().map(|e| e.detail).unwrap_or_default())
+                    line(move || entry().map(|e| e.title).unwrap_or_default(), move || entry().map(|e| e.detail).unwrap_or_default())
                         .on_press(move || {
                             if let Some(e) = entry() {
                                 let live = live.clone();
@@ -95,11 +95,24 @@ pub fn commands_page(live: Live) -> nsh_core::element::Screen {
                             }
                         })
                 })
-                .estimated_item_size(px(56.0))
+                .estimated_item_size(px(48.0))
                 .keyboard_taps(KeyboardTaps::Handled)
                 .flex_1(),
             ),
     )
+}
+
+/// An entry on one line: what it is, then what kind, quieter.
+fn line(title: impl Fn() -> String + 'static, kind: impl Fn() -> String + 'static) -> View {
+    view()
+        .flex_row()
+        .items_center()
+        .gap(px(12.0))
+        .px(px(16.0))
+        .h(px(48.0))
+        .active(|s| s.bg(theme::HOVER))
+        .child(text(title).flex_1().text_size(px(15.0)).text_color(theme::FOREGROUND).number_of_lines(1))
+        .child(text(kind).max_w(percentage(0.45)).text_size(px(12.0)).text_color(theme::DIM).number_of_lines(1))
 }
 
 /// Runs an entry, asking for the arguments it needs first.

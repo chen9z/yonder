@@ -251,8 +251,8 @@ pub fn diff_page(live: Live, place: Place, changes: Arc<Changes>, at: usize) -> 
         .flex_row()
         .items_center()
         .child(text(t!("{} of {}", at + 1, total)).text_size(px(13.0)).text_color(theme::MUTED).mr(px(4.0)))
-        .child(turn("‹", t!("Previous file"), at.checked_sub(1)))
-        .child(turn("›", t!("Next file"), (at + 1 < total).then_some(at + 1)));
+        .child(turn("chevron-left", t!("Previous file"), at.checked_sub(1)))
+        .child(turn("chevron-right", t!("Next file"), (at + 1 < total).then_some(at + 1)));
     if let Some(file) = file {
         spawn(async move {
             let Ok(there) = live.there(place.on.clone()) else { return lines.set(Some(Vec::new())) };

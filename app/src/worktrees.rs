@@ -71,7 +71,7 @@ pub fn worktrees_page(live: Live, place: Place) -> Screen {
         }
     };
     ui::page(move || title.get())
-        .header_right(ui::icon_button("+", t!("New worktree"), new))
+        .header_right(ui::icon_button("plus", t!("New worktree"), new))
         .child(
             view()
                 .flex_1()

@@ -17,6 +17,13 @@ fn hc_terminals(session: &Session) -> Vec<serde_json::Value> {
     v.as_array().or(v["terminals"].as_array()).cloned().unwrap_or_default()
 }
 
+/// Waits for the tab strip to show tab `n` (the bar under it says only
+/// where the space is, then).
+fn shows_tab(app: &mut Headless, n: usize) {
+    let tab = format!("role:tab[{n}]");
+    app.wait_until(&format!("tab {n} shown"), SLOW, |screen| screen.selected(&tab) == Ok(true)).unwrap();
+}
+
 /// Answers the next dialog by pressing `button`, checking it says `says`.
 fn answer(app: &mut Headless, button: &'static str, says: &'static str) {
     app.on_dialog(move |d| {
@@ -163,25 +170,25 @@ fn adds_a_computer_then_works_there() {
     // (`+` offers a terminal, the agents installed, a space or a worktree.)
     answer(&mut app, "Terminal", "New space");
     app.press("label:New").unwrap();
-    app.wait_for_within("text:2 · Studio", SLOW).unwrap();
+    shows_tab(&mut app, 2);
     // The tabs are on a strip, the shown one selected; a tap shows another.
     app.press("role:tab[1]").unwrap();
-    app.wait_for_within("text:1 · Studio", SLOW).unwrap();
+    shows_tab(&mut app, 1);
     app.press("role:tab[2]").unwrap();
-    app.wait_for_within("text:2 · Studio", SLOW).unwrap();
+    shows_tab(&mut app, 2);
     // Put away, a tab is counted at the strip's end, and comes back from there.
     answer(&mut app, "Put away", "Rename");
     app.long_press("role:tab[2]").unwrap();
     app.wait_for_within("label:1 put away", SLOW).unwrap();
-    app.wait_for_within("text:1 · Studio", SLOW).unwrap();
+    shows_tab(&mut app, 1);
     answer(&mut app, "2", "Put away");
     app.press("label:1 put away").unwrap();
-    app.wait_for_within("text:2 · Studio", SLOW).unwrap();
+    shows_tab(&mut app, 2);
     app.wait_for_within("role:tab[1]", SLOW).unwrap();
     app.drag("id:terminal", point(px(200.0), px(0.0))).unwrap();
-    app.wait_for_within("text:1 · Studio", SLOW).unwrap();
+    shows_tab(&mut app, 1);
     app.drag("id:terminal", point(px(-200.0), px(0.0))).unwrap();
-    app.wait_for_within("text:2 · Studio", SLOW).unwrap();
+    shows_tab(&mut app, 2);
 
     // Files shows the folder the shell is in.
     app.press("label:More").unwrap();
@@ -244,12 +251,15 @@ fn adds_a_computer_then_works_there() {
     // Settings copies what to tell when something goes wrong, without secrets.
     app.press("label:More").unwrap();
     app.press("label:Settings").unwrap();
+    // The fit switch turns (said in the diagnostics), and back.
+    app.press("role:switch").unwrap();
     app.press("label:Copy diagnostics").unwrap();
     let said = app.screen().clipboard().map(str::to_owned).unwrap_or_default();
-    for part in ["Yonder 0.1.0", "computer: me@127.0.0.1:", "link: {\"state\":\"connected\"", "1 spaces · 2 tabs"] {
+    for part in ["Yonder 0.1.0", "computer: me@127.0.0.1:", "link: {\"state\":\"connected\"", "1 spaces · 2 tabs", "fit false"] {
         assert!(said.contains(part), "{part:?} not in {said}");
     }
     assert!(!said.contains("open sesame") && !said.contains("ssh-ed25519"), "{said}");
+    app.press("role:switch").unwrap();
     app.back().unwrap();
     // Its note goes in a few seconds, though the page that said it has.
     app.wait_for_within("text:Copied", SLOW).unwrap();
@@ -531,7 +541,7 @@ fn another_session_is_a_computer_of_its_own() {
     // At home, a space's handle drags it below the next.
     answer(&mut app, "Terminal", "New space");
     app.press("label:New").unwrap();
-    app.wait_for_within("text:2 · Studio · two", SLOW).unwrap();
+    shows_tab(&mut app, 2);
     app.press("label:Spaces and agents").unwrap();
     answer(&mut app, "Rename", "Rename");
     app.long_press("text:home").unwrap();
@@ -579,8 +589,8 @@ fn another_session_is_a_computer_of_its_own() {
     let mut app = Headless::start(config).unwrap();
     // What it showed last is drawn first: looked at once the computer has answered.
     std::thread::sleep(Duration::from_secs(5));
-    // Its workspace: the space's name over its tab and the computer.
-    app.wait_until("open on first space", SLOW, |s| s.texts().windows(2).any(|w| w[0] == "first space" && w[1].ends_with(" · Studio · two"))).unwrap();
+    // Its workspace: the space's name over the computer (its tabs on the strip).
+    app.wait_until("open on first space", SLOW, |s| s.texts().windows(2).any(|w| w[0] == "first space" && w[1].ends_with("Studio · two"))).unwrap();
 }
 
 /// How many terminals session `name` of the test computer has.
