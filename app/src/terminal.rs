@@ -240,6 +240,9 @@ pub fn terminal(engine: Engine, address: String, swipes: Swipes) -> impl IntoEle
     // Held: its text to select, or the clipboard pasted in.
     // The row a finger went down on: the links nearest it are offered first.
     let pressed = stored(0u16);
+    // A message written before it goes in, kept while not sent.
+    let writing = signal(false);
+    let draft = signal(String::new());
     let select = {
         let viewer = viewer.clone();
         move || {
@@ -252,7 +255,7 @@ pub fn terminal(engine: Engine, address: String, swipes: Swipes) -> impl IntoEle
                 use crate::pick::{self, Item};
                 let mut items: Vec<Item> = links.iter().enumerate().map(|(i, l)| Item::glyph(format!("link:{i}"), t!("Open {}", short_url(&l.url)), "external-link")).collect();
                 items.extend(paths.iter().enumerate().map(|(i, p)| Item::glyph(format!("file:{i}"), t!("Open {}", short_path(&p.url)), "file")));
-                items.extend([Item::glyph("select", t!("Select text"), "copy"), Item::glyph("paste", t!("Paste"), "clipboard")]);
+                items.extend([Item::glyph("select", t!("Select text"), "copy"), Item::glyph("paste", t!("Paste"), "clipboard"), Item::glyph("write", t!("Write a message"), "pencil")]);
                 let picked = pick::one(t!("Terminal"), items).await;
                 match picked.as_deref() {
                     Some(link) if link.starts_with("link:") => {
@@ -276,6 +279,7 @@ pub fn terminal(engine: Engine, address: String, swipes: Swipes) -> impl IntoEle
                             viewer.paste(&text);
                         }
                     }
+                    Some("write") => writing.set(true),
                     _ => {}
                 }
             });
@@ -380,8 +384,130 @@ pub fn terminal(engine: Engine, address: String, swipes: Swipes) -> impl IntoEle
             let viewer = viewer.clone();
             move || {
                 hardware_keys(viewer.clone());
-                key_bar(viewer.clone(), latch)
+                key_bar(viewer.clone(), latch, writing)
             }
+        }))
+        .child(compose(viewer.clone(), writing, draft))
+}
+
+/// A message written whole before it goes in (more than a few words, a
+/// pasted text, what the keyboard's voice typing heard): sent as one
+/// paste, then Enter. Let go unsent, it is kept for next time.
+fn compose(viewer: Rc<Viewer>, writing: Signal<bool>, draft: Signal<String>) -> impl IntoElement {
+    // The terminal's: the sheet's own goes as it closes, its Enter with it.
+    let owner = Owner::current();
+    let send = move || {
+        let words = draft.get_untracked();
+        if words.trim().is_empty() {
+            return;
+        }
+        viewer.paste(words.trim_end());
+        let viewer = viewer.clone();
+        owner.run(|| set_timeout(ENTER_AFTER, move || viewer.key(Key::Enter, Mods::NONE)));
+        draft.set(String::new());
+        writing.set(false);
+        dismiss_keyboard();
+    };
+    // Let go, the keyboard goes with it: nothing is left to type in.
+    let done = move || {
+        writing.set(false);
+        dismiss_keyboard();
+    };
+    let none = move || draft.with(|d| d.trim().is_empty());
+    nsh_base::sheet()
+        .open(move || Some(writing.get()))
+        .close_on_swipe(true)
+        .backdrop_class("bg-black/40")
+        .on_close(done)
+        .on_cancel(done)
+        .child(when(move || writing.get(), move || {
+            let send = send.clone();
+            view().w_full().items_center().child(
+                view()
+                    .w_full()
+                    .max_w(px(560.0))
+                    .rounded_t(px(18.0))
+                    .bg(theme::CHROME)
+                    .pt(px(8.0))
+                    .px(px(16.0))
+                    .pb(move || ui::bottom_inset() + px(12.0))
+                    .gap(px(10.0))
+                    .child(view().w(px(36.0)).h(px(4.0)).rounded(px(2.0)).bg(theme::BORDER).self_center())
+                    .child(
+                        view()
+                            .flex_row()
+                            .items_center()
+                            .child(text(t!("Write a message")).flex_1().text_size(px(13.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::MUTED))
+                            .child(
+                                view()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap(px(6.0))
+                                    .px(px(10.0))
+                                    .h(px(32.0))
+                                    .rounded(px(8.0))
+                                    .active(|s| s.bg(theme::HOVER))
+                                    .role(AccessibilityRole::Button)
+                                    .label(t!("Paste"))
+                                    .on_press(move || {
+                                        spawn(async move {
+                                            let pasted = clipboard_string().await;
+                                            if !pasted.is_empty() {
+                                                draft.update(|d| d.push_str(&pasted));
+                                            }
+                                        });
+                                    })
+                                    .child(ui::glyph("clipboard", 15.0, theme::MUTED))
+                                    .child(text(t!("Paste")).text_size(px(14.0)).text_color(theme::MUTED)),
+                            ),
+                    )
+                    .child(
+                        input()
+                            .test_id("compose")
+                            .multiline(true)
+                            .auto_focus(true)
+                            .value(move || draft.get())
+                            .on_change(move |t: &str| draft.set(t.to_owned()))
+                            .placeholder(t!("Type, paste or speak it"))
+                            .placeholder_color(move || theme::now(theme::DIM))
+                            .min_h(px(96.0))
+                            .max_h(move || px(window().height.0 * 0.4))
+                            .px(px(12.0))
+                            .py(px(10.0))
+                            .rounded(px(12.0))
+                            .border_1()
+                            .border_color(theme::INPUT)
+                            .bg(theme::BACKGROUND)
+                            .text_size(px(16.0))
+                            .line_height(px(22.0))
+                            .text_color(theme::FOREGROUND),
+                    )
+                    .child(
+                        view()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(12.0))
+                            .child(text(t!("It goes in as one paste, then Enter.")).flex_1().text_size(px(12.0)).text_color(theme::DIM))
+                            .child(
+                                view()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap(px(6.0))
+                                    .px(px(16.0))
+                                    .h(px(40.0))
+                                    .rounded(px(20.0))
+                                    .bg(theme::SOLID)
+                                    .active(|s| s.opacity(0.7))
+                                    .role(AccessibilityRole::Button)
+                                    .label(t!("Send"))
+                                    .disabled(none)
+                                    .disabled_style(|s| s.opacity(0.35))
+                                    .on_press(send)
+                                    .child(ui::glyph("send", 15.0, theme::SOLID_FOREGROUND))
+                                    .child(text(t!("Send")).text_size(px(15.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::SOLID_FOREGROUND)),
+                            ),
+                    ),
+            )
         }))
 }
 
@@ -746,7 +872,7 @@ pub fn text_page(live: crate::live::Live, words: Arc<String>) -> nsh_core::eleme
 
 /// The keys a phone keyboard lacks: Enter at one end, Hide keyboard at
 /// the other, the chosen ones scrolling between.
-fn key_bar(viewer: Rc<Viewer>, latch: Latch) -> impl IntoElement {
+fn key_bar(viewer: Rc<Viewer>, latch: Latch, writing: Signal<bool>) -> impl IntoElement {
     let enter_viewer = viewer.clone();
     let keys = use_context::<Prefs>().expect("prefs").keys;
     view()
@@ -775,6 +901,7 @@ fn key_bar(viewer: Rc<Viewer>, latch: Latch) -> impl IntoElement {
                 ),
         )
         .child(view().w(px(1.0)).h(px(24.0)).bg(theme::BORDER))
+        .child(bar_key("✎", move || writing.set(true)))
         .child(bar_key("⌄", dismiss_keyboard))
 }
 
@@ -845,6 +972,7 @@ fn key_face(label: &str, ink: impl Fn() -> Hsla + 'static) -> View {
         .child(match label {
             "↵" => ui::glyph("corner-down-left", 18.0, theme::FOREGROUND).into_element(),
             "⌄" => ui::glyph("chevron-down", 18.0, theme::FOREGROUND).into_element(),
+            "✎" => ui::glyph("pencil", 17.0, theme::FOREGROUND).into_element(),
             // One's own key that presses Enter after its words.
             _ if keybar::words(label).1 => view()
                 .flex_row()

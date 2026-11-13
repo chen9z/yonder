@@ -127,6 +127,7 @@ pub fn spoken(shows: &str) -> String {
         "-" => t!("Dash"),
         "Paste" => t!("Paste"),
         "⌄" => t!("Hide keyboard"),
+        "✎" => t!("Write a message"),
         _ => shows,
     };
     said.to_owned()

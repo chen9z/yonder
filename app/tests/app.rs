@@ -170,6 +170,14 @@ fn adds_a_computer_then_works_there() {
     pick(&mut app, "link:0");
     app.wait_until("the link opened", SLOW, |_| opened.lock().unwrap().contains(&"https://example.com/pull/7".to_owned())).unwrap();
 
+    // Or a message written whole, sent as one paste and Enter.
+    app.long_press("id:terminal").unwrap();
+    pick(&mut app, "write");
+    app.wait_for_within("id:compose", SLOW).unwrap();
+    app.type_text("id:compose", "touch written-on-the-phone").unwrap();
+    app.press("label:Send").unwrap();
+    app.wait_until("the written command's file", SLOW, |_| session.path("written-on-the-phone").exists()).unwrap();
+
     // What a program copies (OSC 52) reaches the phone's clipboard.
     app.type_text("id:terminal-input", "printf '\\033]52;c;aGVsbG8=\\a'\n").unwrap();
     app.wait_until("the program's copy", SLOW, |screen| screen.clipboard() == Some("hello")).unwrap();
