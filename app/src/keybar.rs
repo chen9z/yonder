@@ -167,7 +167,7 @@ pub fn keybar_page() -> nsh_core::element::Screen {
                                 .role(AccessibilityRole::Button)
                                 .label(t!("Add {}", spoken(shows)))
                                 .on_press(move || keys.update(|k| k.push(id.to_owned())))
-                                .child(text(shows).font_family(theme::MONO).text_size(px(14.0)).text_color(theme::FOREGROUND))
+                                .child(text(shows).font_family(theme::MONO).text_size(theme::CALLOUT).text_color(theme::FOREGROUND))
                         },
                     )),
                 )
@@ -223,7 +223,7 @@ fn own_key(keys: Signal<Vec<String>>) -> View {
                         .px(px(12.0))
                         .h(px(44.0))
                         .font_family(theme::MONO)
-                        .text_size(px(15.0))
+                        .text_size(theme::ROW)
                         .text_color(theme::FOREGROUND),
                 )
                 .child(
@@ -249,7 +249,7 @@ fn own_key(keys: Signal<Vec<String>>) -> View {
                 .items_center()
                 .px(px(4.0))
                 .h(px(48.0))
-                .child(text(t!("Then press Enter")).flex_1().text_size(px(15.0)).text_color(theme::FOREGROUND))
+                .child(text(t!("Then press Enter")).flex_1().text_size(theme::ROW).text_color(theme::FOREGROUND))
                 .child(ui::toggle(enter, t!("Then press Enter"))),
         )
 }
@@ -311,10 +311,10 @@ fn on_bar(keys: Signal<Vec<String>>, id: ReadSignal<String>) -> View {
                 .gap(px(6.0))
                 .min_w(px(56.0))
                 .max_w(px(if own { 240.0 } else { 56.0 }))
-                .child(text(words.to_owned()).font_family(theme::MONO).text_size(px(15.0)).text_color(theme::FOREGROUND).number_of_lines(1).flex_shrink(1.0))
+                .child(text(words.to_owned()).font_family(theme::MONO).text_size(theme::ROW).text_color(theme::FOREGROUND).number_of_lines(1).flex_shrink(1.0))
                 .children(enter.then(|| ui::glyph("corner-down-left", 14.0, theme::MUTED)))
         })
-        .child(text(if name == shows || own { String::new() } else { name.clone() }).flex_1().text_size(px(13.0)).text_color(theme::MUTED))
+        .child(text(if name == shows || own { String::new() } else { name.clone() }).flex_1().text_size(theme::FOOTNOTE).text_color(theme::MUTED))
         .child(control("arrow-up", t!("{} earlier", name), theme::MUTED, first, step(-1)))
         .child(control("arrow-down", t!("{} later", name), theme::MUTED, last, step(1)))
         .child(control("x", t!("Take {} off", name), theme::DIM, || false, move || keys.update(|k| k.retain(|o| *o != id))))

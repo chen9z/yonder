@@ -33,7 +33,7 @@ pub fn computers_page() -> impl IntoElement {
         .child(
             ui::top_bar()
                 .child(view().w(px(12.0)))
-                .child(text("Yonder").text_size(px(20.0)).font_weight(FontWeight::BOLD).text_color(theme::FOREGROUND).flex_1())
+                .child(text("Yonder").text_size(theme::TITLE).font_weight(FontWeight::BOLD).text_color(theme::FOREGROUND).flex_1())
                 .child(when(move || !adding.get(), move || ui::icon_button("plus", t!("Add a computer"), move || { original.replace(None); adding.set(true); }))),
         )
         .child(when(move || adding.get(), move || {
@@ -91,7 +91,7 @@ fn computer_list(known: Signal<Vec<Computer>>, edit: impl Fn(Computer) + Copy + 
                                     seen_space(s).on_press(move || live::open_at(c.get_untracked(), id.clone()))
                                 }))
                                 .children((more > 0).then(|| {
-                                    text(t!("{} more spaces", more)).pl(px(50.0)).pt(px(2.0)).pb(px(4.0)).text_size(px(12.0)).text_color(theme::DIM)
+                                    text(t!("{} more spaces", more)).pl(px(50.0)).pt(px(2.0)).pb(px(4.0)).text_size(theme::CAPTION).text_color(theme::DIM)
                                 })),
                         );
                     }
@@ -102,7 +102,7 @@ fn computer_list(known: Signal<Vec<Computer>>, edit: impl Fn(Computer) + Copy + 
                 text(t!("Long-press a computer to edit, rename or forget it."))
                     .px(px(32.0))
                     .pt(px(4.0))
-                    .text_size(px(13.0))
+                    .text_size(theme::FOOTNOTE)
                     .text_color(theme::DIM),
             ),
     )).child(ui::prompt_dialog(asking, move |answer| {
@@ -141,8 +141,8 @@ fn computer_row(c: ReadSignal<Computer>, status: Option<&'static str>, then: imp
             view()
                 .flex_1()
                 .gap(px(2.0))
-                .child(text(move || c.with(|c| c.name.clone())).text_size(px(16.0)).font_weight(FontWeight::MEDIUM).text_color(theme::FOREGROUND).number_of_lines(1))
-                .child(text(then).text_size(px(12.0)).text_color(theme::MUTED).number_of_lines(1)),
+                .child(text(move || c.with(|c| c.name.clone())).text_size(theme::ROW).font_weight(FontWeight::MEDIUM).text_color(theme::FOREGROUND).number_of_lines(1))
+                .child(text(then).text_size(theme::CAPTION).text_color(theme::MUTED).number_of_lines(1)),
         )
         .child(ui::dot(move || status))
         .child(ui::glyph("chevron-right", 16.0, theme::DIM))
@@ -192,8 +192,8 @@ fn seen_space(s: &SpaceView) -> View {
         .role(AccessibilityRole::Button)
         .label(s.name.clone())
         .child(ui::dot(move || status))
-        .child(text(s.name.clone()).text_size(px(14.0)).text_color(theme::FOREGROUND).number_of_lines(1).flex_shrink(1.0))
-        .child(text(detail).text_size(px(12.0)).text_color(theme::MUTED).number_of_lines(1))
+        .child(text(s.name.clone()).text_size(theme::CALLOUT).text_color(theme::FOREGROUND).number_of_lines(1).flex_shrink(1.0))
+        .child(text(detail).text_size(theme::CAPTION).text_color(theme::MUTED).number_of_lines(1))
 }
 
 /// What adding is doing now.
@@ -322,7 +322,7 @@ fn connection_form(
             .pb(move || px(safe_area().bottom.0 + 24.0))
             .child(
                 text(t!("Reach the computer running Herdr over SSH: its name or address on this network, or its Tailscale name."))
-                    .text_size(px(14.0))
+                    .text_size(theme::CALLOUT)
                     .text_color(theme::MUTED),
             )
             .child(ui::field(t!("Display name"), name, KeyboardType::Default))
@@ -345,17 +345,17 @@ fn connection_form(
                     .role(AccessibilityRole::Button)
                     .label(t!("More options"))
                     .on_press(move || more.set(true))
-                    .child(text(t!("More options")).text_size(px(14.0)).text_color(theme::MUTED))
+                    .child(text(t!("More options")).text_size(theme::CALLOUT).text_color(theme::MUTED))
                     .child(ui::glyph("chevron-down", 14.0, theme::MUTED))
             }))
             .child(when(move || more.get(), move || {
                 view()
                     .gap(px(4.0))
                     .child(ui::field(t!("Session"), session, KeyboardType::Url))
-                    .child(text(t!("Optional: another herdr's HC_SESSION on that computer.")).text_size(px(12.0)).text_color(theme::DIM))
+                    .child(text(t!("Optional: another herdr's HC_SESSION on that computer.")).text_size(theme::CAPTION).text_color(theme::DIM))
             }))
             .child(dynamic(move || match step.get() {
-                Step::Failed(why) => text(why).text_size(px(14.0)).text_color(theme::BLOCKED).into_element(),
+                Step::Failed(why) => text(why).text_size(theme::CALLOUT).text_color(theme::BLOCKED).into_element(),
                 _ => view().into_element(),
             }))
             // Pressed, it says what it is doing, and waits (dimmed) for the try to end.
@@ -381,7 +381,7 @@ fn password_field(password: Signal<String>, is_edit: bool) -> impl IntoElement {
     let shown = signal(false);
     view()
         .gap(px(6.0))
-        .child(text(t!("Password")).text_size(px(13.0)).text_color(theme::MUTED))
+        .child(text(t!("Password")).text_size(theme::FOOTNOTE).text_color(theme::MUTED))
         .child(
             view()
                 .flex_row()
@@ -403,7 +403,7 @@ fn password_field(password: Signal<String>, is_edit: bool) -> impl IntoElement {
                         .flex_1()
                         .px(px(12.0))
                         .h(px(46.0))
-                        .text_size(px(16.0))
+                        .text_size(theme::BODY)
                         .text_color(theme::FOREGROUND),
                 )
                 .child(
@@ -415,7 +415,7 @@ fn password_field(password: Signal<String>, is_edit: bool) -> impl IntoElement {
                         .label(t!("Show the password"))
                         .active(|s| s.bg(theme::HOVER))
                         .on_press(move || shown.update(|s| *s = !*s))
-                        .child(text(move || if shown.get() { t!("Hide") } else { t!("Show") }).text_size(px(14.0)).text_color(theme::MUTED)),
+                        .child(text(move || if shown.get() { t!("Hide") } else { t!("Show") }).text_size(theme::CALLOUT).text_color(theme::MUTED)),
                 ),
         )
         .child(
@@ -424,7 +424,7 @@ fn password_field(password: Signal<String>, is_edit: bool) -> impl IntoElement {
             } else {
                 t!("Kept on this phone, sealed: nothing is left on the computer.").to_owned()
             })
-            .text_size(px(12.0))
+            .text_size(theme::CAPTION)
             .text_color(theme::DIM),
         )
 }

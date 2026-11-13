@@ -87,7 +87,7 @@ pub fn action_row(title: &'static str, act: Act, press: impl Fn() + 'static) -> 
         .role(AccessibilityRole::Button)
         .label(title)
         .on_press(press)
-        .child(text(title).flex_1().text_size(px(15.0)).text_color(color).number_of_lines(1))
+        .child(text(title).flex_1().text_size(theme::ROW).text_color(color).number_of_lines(1))
         .child(when(move || act == Act::Go, || glyph("chevron-right", 16.0, theme::DIM)))
 }
 
@@ -113,7 +113,7 @@ pub fn busy_button(label: impl IntoReactive<String> + 'static, busy: impl Fn() -
         .role(AccessibilityRole::Button)
         .on_press(press)
         .child(when(busy, || glyph("spinner", 16.0, theme::SOLID_FOREGROUND).animate_spin()))
-        .child(text(move || label.get()).text_size(px(16.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::SOLID_FOREGROUND))
+        .child(text(move || label.get()).text_size(theme::BODY).font_weight(FontWeight::SEMIBOLD).text_color(theme::SOLID_FOREGROUND))
 }
 
 /// A quieter action.
@@ -130,7 +130,7 @@ pub fn ghost_button(label: &'static str, press: impl Fn() + 'static) -> View {
         .role(AccessibilityRole::Button)
         .label(label)
         .on_press(press)
-        .child(text(label).text_size(px(15.0)).text_color(theme::FOREGROUND))
+        .child(text(label).text_size(theme::ROW).text_color(theme::FOREGROUND))
 }
 
 /// A file the app ships, by its path under `assets/`.
@@ -180,7 +180,7 @@ pub fn status_mark(status: impl Fn() -> Option<&'static str> + 'static, compact:
             .bg(faint(theme::BLOCKED))
             .items_center()
             .justify_center()
-            .child(text("!").text_size(px(10.5)).font_weight(FontWeight::BOLD).text_color(theme::BLOCKED))
+            .child(text("!").text_size(theme::SMALL).font_weight(FontWeight::BOLD).text_color(theme::BLOCKED))
             .into_element(),
         (Some("blocked"), false) => view()
             .px(px(6.0))
@@ -188,7 +188,7 @@ pub fn status_mark(status: impl Fn() -> Option<&'static str> + 'static, compact:
             .rounded(px(5.0))
             .bg(faint(theme::BLOCKED))
             .justify_center()
-            .child(text(t!("Needs you")).text_size(px(10.5)).font_weight(FontWeight::SEMIBOLD).text_color(theme::BLOCKED))
+            .child(text(t!("Needs you")).text_size(theme::SMALL).font_weight(FontWeight::SEMIBOLD).text_color(theme::BLOCKED))
             .into_element(),
         // Idle is the usual: nothing to say, as on the tabs and spaces.
         (Some("idle") | None, _) => view().w(px(7.0)).h(px(7.0)).mx(px(3.0)).into_element(),
@@ -223,7 +223,7 @@ pub fn space_mark(name: impl Fn() -> String + 'static, color: impl Fn() -> usize
         .justify_center()
         .child(
             text(move || name().chars().next().map(|c| c.to_uppercase().collect::<String>()).unwrap_or_else(|| "?".into()))
-                .text_size(px(12.0))
+                .text_size(theme::CAPTION)
                 .font_weight(FontWeight::BOLD)
                 .text_color(rgb(0xffffff)),
         )
@@ -264,7 +264,7 @@ pub fn field(label: &'static str, value: Signal<String>, keyboard: KeyboardType)
     let focused = signal(false);
     view()
         .gap(px(6.0))
-        .child(text(label).text_size(px(13.0)).text_color(theme::MUTED))
+        .child(text(label).text_size(theme::FOOTNOTE).text_color(theme::MUTED))
         .child(
             input()
                 .test_id(&label.to_lowercase())
@@ -281,7 +281,7 @@ pub fn field(label: &'static str, value: Signal<String>, keyboard: KeyboardType)
                 .bg(theme::BACKGROUND)
                 .px(px(12.0))
                 .h(px(46.0))
-                .text_size(px(16.0))
+                .text_size(theme::BODY)
                 .text_color(theme::FOREGROUND)
                 .placeholder_color(move || theme::now(theme::DIM)),
         )
@@ -301,14 +301,14 @@ pub fn row(title: impl Fn() -> String + 'static, detail: impl Fn() -> String + '
             view()
                 .flex_1()
                 .gap(px(2.0))
-                .child(text(title).text_size(px(16.0)).text_color(theme::FOREGROUND).number_of_lines(1))
-                .child(text(detail).text_size(px(13.0)).text_color(theme::MUTED).number_of_lines(1)),
+                .child(text(title).text_size(theme::ROW).text_color(theme::FOREGROUND).number_of_lines(1))
+                .child(text(detail).text_size(theme::CAPTION).text_color(theme::MUTED).number_of_lines(1)),
         )
 }
 
 /// What a card's rows need said, under it in small words.
 pub fn card_footer(said: &'static str) -> View {
-    view().px(px(32.0)).pt(px(8.0)).child(text(said).text_size(px(12.0)).line_height(px(17.0)).text_color(theme::DIM))
+    view().px(px(32.0)).pt(px(8.0)).child(text(said).text_size(theme::CAPTION).line_height(px(17.0)).text_color(theme::DIM))
 }
 
 /// A card's heading, in line with its rows' words.
@@ -317,14 +317,14 @@ pub fn card_heading(title: &'static str) -> View {
         .px(px(32.0))
         .pt(px(22.0))
         .pb(px(8.0))
-        .child(text(title).text_size(px(12.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::DIM))
+        .child(text(title).text_size(theme::CAPTION).font_weight(FontWeight::SEMIBOLD).text_color(theme::DIM))
 }
 
 /// Rows that go together, on a card, a line between each from where their
 /// words start (after a row's glyph).
 pub fn card(rows: Vec<View>) -> View {
     let last = rows.len().saturating_sub(1);
-    view().mx(px(16.0)).rounded(px(14.0)).overflow_hidden().bg(theme::POPOVER).children(rows.into_iter().enumerate().map(move |(at, row)| {
+    view().mx(theme::INSET).rounded(theme::CARD_RADIUS).overflow_hidden().bg(theme::POPOVER).children(rows.into_iter().enumerate().map(move |(at, row)| {
         view().child(row).children((at < last).then(|| view().h(px(1.0)).ml(px(50.0)).bg(theme::BORDER)))
     }))
 }
@@ -335,7 +335,7 @@ pub fn heading(title: impl Fn() -> String + 'static) -> View {
         .px(px(16.0))
         .pt(px(18.0))
         .pb(px(6.0))
-        .child(text(title).text_size(px(12.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::DIM))
+        .child(text(title).text_size(theme::CAPTION).font_weight(FontWeight::SEMIBOLD).text_color(theme::DIM))
 }
 
 /// A page pushed over the workspace, its header in the app's colors (the
@@ -441,7 +441,7 @@ pub fn prompt_dialog(asking: Signal<Option<Prompt>>, answer: impl Fn(Option<Stri
                         .border_1()
                         .border_color(theme::BORDER)
                         .on_press(|| {})
-                        .child(text(p.title.clone()).text_size(px(18.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::FOREGROUND))
+                        .child(text(p.title.clone()).text_size(theme::HEADLINE).font_weight(FontWeight::SEMIBOLD).text_color(theme::FOREGROUND))
                         .child(
                             input()
                                 .test_id("prompt")
@@ -460,7 +460,7 @@ pub fn prompt_dialog(asking: Signal<Option<Prompt>>, answer: impl Fn(Option<Stri
                                 .border_color(theme::INPUT)
                                 .px(px(12.0))
                                 .h(px(44.0))
-                                .text_size(px(16.0))
+                                .text_size(theme::BODY)
                                 .text_color(theme::FOREGROUND),
                         )
                         .child(

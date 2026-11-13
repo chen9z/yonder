@@ -80,7 +80,7 @@ pub fn commands_page(live: Live) -> nsh_core::element::Screen {
                         .bg(theme::BACKGROUND)
                         .px(px(12.0))
                         .h(px(44.0))
-                        .text_size(px(16.0))
+                        .text_size(theme::BODY)
                         .text_color(theme::FOREGROUND),
                 ),
             )
@@ -112,8 +112,8 @@ fn line(title: impl Fn() -> String + 'static, kind: impl Fn() -> String + 'stati
         .px(px(16.0))
         .h(px(48.0))
         .active(|s| s.bg(theme::HOVER))
-        .child(text(title).flex_1().text_size(px(15.0)).text_color(theme::FOREGROUND).number_of_lines(1))
-        .child(text(kind).max_w(percentage(0.45)).text_size(px(12.0)).text_color(theme::DIM).number_of_lines(1))
+        .child(text(title).flex_1().text_size(theme::ROW).text_color(theme::FOREGROUND).number_of_lines(1))
+        .child(text(kind).max_w(percentage(0.45)).text_size(theme::CAPTION).text_color(theme::DIM).number_of_lines(1))
 }
 
 /// Runs an entry, asking for the arguments it needs first.

@@ -130,14 +130,14 @@ pub fn host() -> impl IntoElement {
                         .pt(px(8.0))
                         .pb(move || px(safe_area().bottom.0 + 8.0))
                         .child(view().w(px(36.0)).h(px(4.0)).rounded(px(2.0)).bg(theme::BORDER).self_center().mb(px(4.0)))
-                        .child(text(menu.0.clone()).px(px(20.0)).py(px(8.0)).text_size(px(13.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::MUTED))
+                        .child(text(menu.0.clone()).px(px(20.0)).py(px(8.0)).text_size(theme::FOOTNOTE).font_weight(FontWeight::SEMIBOLD).text_color(theme::MUTED))
                         .child(
                             scroll().max_h(move || px(window().height.0 * 0.7)).child(
                                 view().children(menu.1.iter().enumerate().map(|(at, section)| {
                                     let finish = finish.clone();
                                     view()
                                         .children((at > 0).then(|| view().h(px(1.0)).mx(px(20.0)).my(px(6.0)).bg(theme::BORDER)))
-                                        .children(section.title.clone().map(|t| text(t).px(px(20.0)).pt(px(6.0)).pb(px(2.0)).text_size(px(12.0)).text_color(theme::DIM)))
+                                        .children(section.title.clone().map(|t| text(t).px(px(20.0)).pt(px(6.0)).pb(px(2.0)).text_size(theme::CAPTION).text_color(theme::DIM)))
                                         .children(section.items.iter().cloned().map(move |item| {
                                             let finish = finish.clone();
                                             let id = item.id.clone();
@@ -178,7 +178,7 @@ fn row(item: Item, press: impl Fn() + 'static) -> impl IntoElement {
         .child(
             text(item.label)
                 .flex_shrink(1.0)
-                .text_size(px(16.0))
+                .text_size(theme::BODY)
                 .font_weight(if item.checked { FontWeight::SEMIBOLD } else { FontWeight::NORMAL })
                 .text_color(ink)
                 .number_of_lines(1),

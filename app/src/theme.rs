@@ -119,3 +119,26 @@ pub fn rgb_of(c: Rgb) -> Hsla {
 
 /// The terminal's font family.
 pub const MONO: &str = "monospace";
+
+// The words' sizes, by what they are (after Apple's text styles, a step
+// smaller: a phone of terminals). One role, one size, on every page.
+/// A page's own title (home, the computers).
+pub const TITLE: Points = px(20.0);
+/// A sheet's or a dialog's title.
+pub const HEADLINE: Points = px(18.0);
+/// What is typed, and the choices and buttons on sheets.
+pub const BODY: Points = px(16.0);
+/// A list row's title.
+pub const ROW: Points = px(15.0);
+/// Words beside a title or inside a row; small buttons.
+pub const CALLOUT: Points = px(14.0);
+/// Notes, empty lists, what went wrong.
+pub const FOOTNOTE: Points = px(13.0);
+/// Under a row's title; headings, times, footers.
+pub const CAPTION: Points = px(12.0);
+/// Badges, counts, the bottom bar's labels.
+pub const SMALL: Points = px(11.0);
+
+/// A card's room from the screen's edge, and its corners.
+pub const INSET: Points = px(16.0);
+pub const CARD_RADIUS: Points = px(14.0);

@@ -71,11 +71,11 @@ fn home_tab(label: &'static str, icon: &'static str, show_spaces: Signal<bool>, 
         .bg(move || if active() { theme::now(theme::CHROME) } else { Hsla::transparent_black() })
         .on_press(move || show_spaces.set(spaces))
         .child(dynamic(move || ui::glyph(icon, 22.0, ink()).into_element()))
-        .child(text(label).text_size(px(11.0)).font_weight(FontWeight::MEDIUM).text_color(move || theme::now(ink())))
+        .child(text(label).text_size(theme::SMALL).font_weight(FontWeight::MEDIUM).text_color(move || theme::now(ink())))
         .child(when(move || count() > 0, move || {
             view().absolute().left(px(53.0)).top(px(1.0)).rounded(px(9.0)).min_w(px(16.0)).h(px(16.0))
                 .px(px(3.0)).items_center().justify_center().bg(move || theme::now(color())).pointer_events(PointerEvents::None)
-                .child(text(move || count().to_string()).text_size(px(10.0)).text_color(theme::SOLID_FOREGROUND))
+                .child(text(move || count().to_string()).text_size(theme::SMALL).text_color(theme::SOLID_FOREGROUND))
         }))
 }
 
@@ -84,7 +84,7 @@ fn top_bar(live: Live, show_spaces: Signal<bool>, reorder: Signal<bool>) -> impl
     let new_space = live.clone();
     ui::top_bar()
         .border_b(px(0.0))
-        .child(text(name).flex_1().pl(px(12.0)).text_size(px(20.0)).font_weight(FontWeight::BOLD).text_color(theme::FOREGROUND).number_of_lines(1))
+        .child(text(name).flex_1().pl(px(12.0)).text_size(theme::TITLE).font_weight(FontWeight::BOLD).text_color(theme::FOREGROUND).number_of_lines(1))
         .child(when(move || !reorder.get(), || ui::icon_button("search", t!("Jump to a terminal"), || nav::push(Route::Search))))
         // New space where the spaces are; the rest (the agents' sort, the
         // computer's connection, machines, commands, leaving) in Settings.
@@ -101,7 +101,7 @@ fn top_bar(live: Live, show_spaces: Signal<bool>, reorder: Signal<bool>) -> impl
                 .role(AccessibilityRole::Button)
                 .label(t!("Done"))
                 .on_press(move || reorder.set(false))
-                .child(text(t!("Done")).text_size(px(15.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::ACCENT))
+                .child(text(t!("Done")).text_size(theme::ROW).font_weight(FontWeight::SEMIBOLD).text_color(theme::ACCENT))
         }))
 }
 
@@ -114,7 +114,7 @@ pub fn section(title: &'static str, right: impl IntoElement) -> View {
         .pr(px(4.0))
         .pt(px(10.0))
         .h(px(44.0))
-        .child(text(title).flex_1().text_size(px(13.0)).font_weight(FontWeight::MEDIUM).text_color(theme::DIM))
+        .child(text(title).flex_1().text_size(theme::FOOTNOTE).font_weight(FontWeight::MEDIUM).text_color(theme::DIM))
         .child(right)
 }
 
@@ -220,7 +220,7 @@ fn spaces(live: Live, reorder: Signal<bool>) -> impl IntoElement {
                                 }
                             })
                             .child(when(move || several.get() && g.with(|g| !g.loading), || ui::glyph("plus", 13.0, theme::DIM)))
-                            .child(text(move || if g.with(|g| g.loading) { t!("Loading…") } else if several.get() { t!("New space there") } else { t!("No spaces yet") }).text_size(px(13.0)).text_color(theme::DIM))
+                            .child(text(move || if g.with(|g| g.loading) { t!("Loading…") } else if several.get() { t!("New space there") } else { t!("No spaces yet") }).text_size(theme::FOOTNOTE).text_color(theme::DIM))
                     }))
             },
         ))
@@ -256,10 +256,10 @@ fn machine_heading(live: Live, g: ReadSignal<Group>, folded: Signal<Vec<String>>
             if set.contains(&key) { set.retain(|k| k != &key); } else { set.push(key); }
         }))
         .child(dynamic(move || ui::glyph(if is_folded.get() { "chevron-right" } else { "chevron-down" }, 14.0, theme::DIM).into_element()))
-        .child(text(move || g.with(|g| g.name.clone())).flex_1().text_size(px(13.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::MUTED).number_of_lines(1))
+        .child(text(move || g.with(|g| g.name.clone())).flex_1().text_size(theme::FOOTNOTE).font_weight(FontWeight::SEMIBOLD).text_color(theme::MUTED).number_of_lines(1))
         .child(when(move || !connected.get(), move || {
             text(move || g.with(|g| match g.state.as_str() { "connecting" => t!("Connecting…"), "needs_login" => t!("Needs login"), "needs_update" => t!("Needs update"), _ => t!("Not connected") }))
-                .text_size(px(12.0))
+                .text_size(theme::CAPTION)
                 .text_color(theme::DIM)
         }))
         .child(when(move || connected.get(), move || {
@@ -382,8 +382,8 @@ fn space_row(live: Live, s: ReadSignal<SpaceView>, g: ReadSignal<Group>, drag: S
             });
         })
         .child(ui::space_mark(move || s.with(|s| s.name.clone()), color))
-        .child(text(move || s.with(|s| s.name.clone())).flex_shrink(0.0).max_w(percentage(0.55)).text_size(px(15.0)).text_color(theme::FOREGROUND).number_of_lines(1))
-        .child(text(move || s.with(|s| branch(s).unwrap_or_default().to_owned())).flex_1().text_right().text_size(px(12.0)).text_color(theme::DIM).number_of_lines(1))
+        .child(text(move || s.with(|s| s.name.clone())).flex_shrink(0.0).max_w(percentage(0.55)).text_size(theme::ROW).text_color(theme::FOREGROUND).number_of_lines(1))
+        .child(text(move || s.with(|s| branch(s).unwrap_or_default().to_owned())).flex_1().text_right().text_size(theme::CAPTION).text_color(theme::DIM).number_of_lines(1))
         .child(ui::tab_status(move || s.with(|s| s.status)))
         .child(when(move || reorder.get(), move || {
             let live = mover.clone();

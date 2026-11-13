@@ -160,8 +160,8 @@ fn action_saying(icon: &'static str, title: &'static str, said: String, act: Act
             view()
                 .flex_1()
                 .gap(px(2.0))
-                .child(text(title).text_size(px(15.0)).text_color(ink).number_of_lines(1))
-                .children((!said.is_empty()).then(|| text(said).text_size(px(12.0)).text_color(theme::MUTED).number_of_lines(1))),
+                .child(text(title).text_size(theme::ROW).text_color(ink).number_of_lines(1))
+                .children((!said.is_empty()).then(|| text(said).text_size(theme::CAPTION).text_color(theme::MUTED).number_of_lines(1))),
         )
         .children((act == Act::Go).then(|| ui::glyph("chevron-right", 16.0, theme::DIM)))
 }
@@ -237,10 +237,10 @@ fn setting(icon: &'static str, title: impl Fn() -> String + 'static, now: impl F
             view()
                 .flex_1()
                 .gap(px(2.0))
-                .child(text(title).text_size(px(15.0)).text_color(theme::FOREGROUND))
+                .child(text(title).text_size(theme::ROW).text_color(theme::FOREGROUND))
                 .child(dynamic(move || {
                     let now = now();
-                    if now.is_empty() { view().into_element() } else { text(now).text_size(px(12.0)).text_color(theme::MUTED).into_element() }
+                    if now.is_empty() { view().into_element() } else { text(now).text_size(theme::CAPTION).text_color(theme::MUTED).into_element() }
                 })),
         )
 }

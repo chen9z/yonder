@@ -145,14 +145,14 @@ pub fn files_page(live: Live, place: Place) -> Screen {
                         .child(
                             text(move || row().map(|r| r.name).unwrap_or_default())
                                 .flex_1()
-                                .text_size(px(15.0))
+                                .text_size(theme::ROW)
                                 .text_color(theme::FOREGROUND)
                                 .number_of_lines(1),
                         )
                         .child(
                             text(move || row().and_then(|r| r.mark).map(String::from).unwrap_or_default())
                                 .font_family(theme::MONO)
-                                .text_size(px(13.0))
+                                .text_size(theme::FOOTNOTE)
                                 .text_color(move || theme::now(mark_color(row().and_then(|r| r.mark)))),
                         )
                 })
@@ -168,7 +168,7 @@ pub fn files_page(live: Live, place: Place) -> Screen {
                             None if !tree.read.get() => t!("Loading files…").into(),
                             None => t!("No files").into(),
                         })
-                        .text_size(px(15.0))
+                        .text_size(theme::ROW)
                         .text_color(theme::MUTED),
                     ),
                 )
@@ -180,7 +180,7 @@ pub fn files_page(live: Live, place: Place) -> Screen {
                     .py(px(8.0))
                     .pb(move || px(safe_area().bottom.0 + 8.0))
                     .bg(theme::RAISED)
-                    .child(text(t!("File list limited to {} entries per folder and {} total", PER_FOLDER, TOTAL)).text_size(px(12.0)).text_color(theme::MUTED))
+                    .child(text(t!("File list limited to {} entries per folder and {} total", PER_FOLDER, TOTAL)).text_size(theme::CAPTION).text_color(theme::MUTED))
             })),
     )
 }
@@ -296,13 +296,13 @@ pub fn file_page(live: Live, place: Place, path: String, line: Option<u32>) -> S
                 .role(AccessibilityRole::Button)
                 .label(move || if reading.get() { t!("Show the source") } else { t!("Show as it reads") })
                 .on_press(move || reading.update(|r| *r = !*r))
-                .child(text(move || if reading.get() { t!("Source") } else { t!("Preview") }).text_size(px(15.0)).text_color(theme::FOREGROUND))
+                .child(text(move || if reading.get() { t!("Source") } else { t!("Preview") }).text_size(theme::ROW).text_color(theme::FOREGROUND))
         }))
         .child(view().flex_1().bg(theme::BACKGROUND).pb(move || px(safe_area().bottom.0)).child(dynamic(move || {
             if code().is_none() {
                 return view().p(px(32.0)).items_center().child(
                     text(move || shown.with(|p| p.as_ref().map_or(t!("Loading file…"), |p| p.said().unwrap_or(t!("Empty file"))).to_owned()))
-                        .text_size(px(15.0))
+                        .text_size(theme::ROW)
                         .text_color(theme::MUTED),
                 ).into_element();
             }
@@ -313,7 +313,7 @@ pub fn file_page(live: Live, place: Place, path: String, line: Option<u32>) -> S
                         .selectable(true)
                         .gap_3()
                         .p(px(16.0))
-                        .text_size(px(15.0))
+                        .text_size(theme::ROW)
                         .line_height(px(22.0))
                         .text_color(theme::FOREGROUND),
                 ).into_element();

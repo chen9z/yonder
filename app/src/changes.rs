@@ -98,7 +98,7 @@ pub fn changes_page(live: Live, place: Place) -> Screen {
         .header_right(
             text(move || found.with(|c| c.as_ref().map(|c| format!("+{}  −{}", c.added(), c.deleted())).unwrap_or_default()))
                 .font_family(theme::MONO)
-                .text_size(px(13.0))
+                .text_size(theme::FOOTNOTE)
                 .text_color(theme::MUTED),
         )
         .child(
@@ -131,15 +131,15 @@ pub fn changes_page(live: Live, place: Place) -> Screen {
                                 text(move || file().map(|f| f.status.to_string()).unwrap_or_default())
                                     .w(px(14.0))
                                     .font_family(theme::MONO)
-                                    .text_size(px(13.0))
+                                    .text_size(theme::FOOTNOTE)
                                     .text_color(move || theme::now(mark_color(file().map(|f| f.status)))),
                             )
                             .child(
                                 view()
                                     .flex_1()
                                     .flex_row()
-                                    .child(text(dir).text_size(px(14.0)).text_color(theme::DIM).number_of_lines(1).flex_shrink(1.0))
-                                    .child(text(name).text_size(px(14.0)).text_color(theme::FOREGROUND).number_of_lines(1).flex_shrink_0()),
+                                    .child(text(dir).text_size(theme::ROW).text_color(theme::DIM).number_of_lines(1).flex_shrink(1.0))
+                                    .child(text(name).text_size(theme::ROW).text_color(theme::FOREGROUND).number_of_lines(1).flex_shrink_0()),
                             )
                             .child(count(move || file().map_or(0, |f| f.add), "+", theme::ADDED))
                             .child(count(move || file().map_or(0, |f| f.del), "−", theme::REMOVED))
@@ -154,7 +154,7 @@ pub fn changes_page(live: Live, place: Place) -> Screen {
                                 (None, false) => t!("Loading changes…").into(),
                                 (None, true) => t!("No uncommitted changes").into(),
                             })
-                            .text_size(px(15.0))
+                            .text_size(theme::ROW)
                             .text_color(theme::MUTED),
                         ),
                     )
@@ -162,10 +162,10 @@ pub fn changes_page(live: Live, place: Place) -> Screen {
                     .flex_1(),
                 )
                 .child(when(move || found.with(|c| c.as_ref().is_some_and(|c| c.limited)), || {
-                    view().px(px(16.0)).py(px(6.0)).bg(theme::RAISED).child(text(t!("Showing the first {} changed files", FILES)).text_size(px(12.0)).text_color(theme::MUTED))
+                    view().px(px(16.0)).py(px(6.0)).bg(theme::RAISED).child(text(t!("Showing the first {} changed files", FILES)).text_size(theme::CAPTION).text_color(theme::MUTED))
                 }))
                 .child(when(move || note.with(Option::is_some), move || {
-                    view().px(px(16.0)).py(px(6.0)).child(text(move || note.get().unwrap_or_default()).text_size(px(13.0)).text_color(theme::REMOVED).number_of_lines(4))
+                    view().px(px(16.0)).py(px(6.0)).child(text(move || note.get().unwrap_or_default()).text_size(theme::FOOTNOTE).text_color(theme::REMOVED).number_of_lines(4))
                 }))
                 .child(when(move || files.get() > 0, move || commit_bar(message, busy, commit.clone()))),
         )
@@ -177,7 +177,7 @@ fn count(n: impl Fn() -> u64 + 'static, sign: &'static str, color: AdaptiveColor
         n => format!("{sign}{n}"),
     })
     .font_family(theme::MONO)
-    .text_size(px(12.0))
+    .text_size(theme::CAPTION)
     .text_color(color)
 }
 
@@ -209,7 +209,7 @@ fn commit_bar(message: Signal<String>, busy: Signal<bool>, commit: impl Fn() + C
                 .border_1()
                 .border_color(theme::INPUT)
                 .bg(theme::BACKGROUND)
-                .text_size(px(15.0))
+                .text_size(theme::ROW)
                 .text_color(theme::FOREGROUND),
         )
         .child(
@@ -222,7 +222,7 @@ fn commit_bar(message: Signal<String>, busy: Signal<bool>, commit: impl Fn() + C
                 .on_press(commit)
                 .child(
                     text(move || if busy.get() { t!("Committing…") } else { t!("Commit") })
-                        .text_size(px(15.0))
+                        .text_size(theme::ROW)
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(move || if message.with(|m| m.trim().is_empty()) { theme::now(theme::MUTED) } else { theme::now(theme::ACCENT_FOREGROUND) }),
                 ),
@@ -250,7 +250,7 @@ pub fn diff_page(live: Live, place: Place, changes: Arc<Changes>, at: usize) -> 
     let header = view()
         .flex_row()
         .items_center()
-        .child(text(t!("{} of {}", at + 1, total)).text_size(px(13.0)).text_color(theme::MUTED).mr(px(4.0)))
+        .child(text(t!("{} of {}", at + 1, total)).text_size(theme::FOOTNOTE).text_color(theme::MUTED).mr(px(4.0)))
         .child(turn("chevron-left", t!("Previous file"), at.checked_sub(1)))
         .child(turn("chevron-right", t!("Next file"), (at + 1 < total).then_some(at + 1)));
     if let Some(file) = file {
@@ -284,7 +284,7 @@ pub fn diff_page(live: Live, place: Place, changes: Arc<Changes>, at: usize) -> 
                 )
             })
             .estimated_item_size(px(18.0))
-            .empty(view().p(px(32.0)).items_center().child(text(t!("Loading diff…")).text_size(px(15.0)).text_color(theme::MUTED)))
+            .empty(view().p(px(32.0)).items_center().child(text(t!("Loading diff…")).text_size(theme::ROW).text_color(theme::MUTED)))
             // The last line clears the system's bar.
             .footer(view().h(move || px(safe_area().bottom.0)))
             .flex_1(),

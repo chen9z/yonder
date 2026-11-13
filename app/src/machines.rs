@@ -89,7 +89,7 @@ pub fn add_machine_page(live: Live) -> nsh_core::element::Screen {
                         .px(px(16.0))
                         .pt(px(16.0))
                         .pb(px(8.0))
-                        .text_size(px(14.0))
+                        .text_size(theme::CALLOUT)
                         .text_color(theme::MUTED),
                 )
                 .child(each(move || page.added.with(|all| all.iter().filter_map(|m| {
@@ -115,7 +115,7 @@ pub fn add_machine_page(live: Live) -> nsh_core::element::Screen {
                                 let (live, name) = (live.clone(), name.clone());
                                 spawn(async move { prefs.rename_machine(&live, &name).await; });
                             })
-                            .child(text(t!("Rename")).text_size(px(14.0)).text_color(theme::ACCENT))).child(said(details, page, move || target.clone()))
+                            .child(text(t!("Rename")).text_size(theme::CALLOUT).text_color(theme::ACCENT))).child(said(details, page, move || target.clone()))
                     }
                 }))
                 .child(ui::heading(move || match page.hosts.with(|h| h.as_ref().map(Vec::len)) {
@@ -143,7 +143,7 @@ pub fn add_machine_page(live: Live) -> nsh_core::element::Screen {
                                 .border_1()
                                 .border_color(theme::INPUT)
                                 .bg(theme::BACKGROUND)
-                                .text_size(px(16.0))
+                                .text_size(theme::BODY)
                                 .text_color(theme::FOREGROUND)
                                 .placeholder("user@host")
                                 .placeholder_color(move || theme::now(theme::DIM))
@@ -203,7 +203,7 @@ fn host_row(live: Live, page: Page, host: Host) -> impl IntoElement {
                 .on_press(press)
                 .child({
                     let state = state.clone();
-                    text(state.clone()).text_size(px(14.0)).text_color(move || {
+                    text(state.clone()).text_size(theme::CALLOUT).text_color(move || {
                         if state() == t!("Add") { theme::now(theme::ACCENT) } else { theme::now(theme::MUTED) }
                     })
                 }),
@@ -227,7 +227,7 @@ fn said(live: Live, page: Page, target: impl Fn() -> String + Clone + 'static) -
     };
     view()
         .child(when({ let words = words.clone(); move || words().is_some() }, move || {
-            text({ let words = words.clone(); move || words().unwrap_or_default() }).mx(px(16.0)).mb(px(8.0)).text_size(px(13.0)).text_color(theme::MUTED)
+            text({ let words = words.clone(); move || words().unwrap_or_default() }).mx(px(16.0)).mb(px(8.0)).text_size(theme::FOOTNOTE).text_color(theme::MUTED)
         }))
         .child(when({ let mac = mac.clone(); move || mac().is_some() }, move || {
             let (name, core) = mac().unwrap_or_default();
@@ -240,10 +240,10 @@ fn said(live: Live, page: Page, target: impl Fn() -> String + Clone + 'static) -
                 .gap(px(10.0))
                 .rounded(px(12.0))
                 .bg(theme::CHROME)
-                .child(text(t!("{} is a Mac: allow its folders once", name)).text_size(px(15.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::FOREGROUND))
+                .child(text(t!("{} is a Mac: allow its folders once", name)).text_size(theme::ROW).font_weight(FontWeight::SEMIBOLD).text_color(theme::FOREGROUND))
                 .child(
                     text(t!("macOS asks on its own screen before anything reads Desktop, Documents or Downloads, and waits. Give {} Full Disk Access there.", core))
-                        .text_size(px(13.0))
+                        .text_size(theme::FOOTNOTE)
                         .text_color(theme::MUTED),
                 )
                 .child(ui::ghost_button(t!("Open the setting there"), move || {

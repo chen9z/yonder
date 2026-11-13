@@ -132,7 +132,7 @@ pub fn search_page(live: Live) -> nsh_core::element::Screen {
                                 .auto_correct(false)
                                 .auto_capitalize(AutoCapitalize::None)
                                 .return_key_type(ReturnKeyType::Search)
-                                .text_size(px(16.0))
+                                .text_size(theme::BODY)
                                 .text_color(theme::FOREGROUND),
                         ),
                 ),
@@ -142,10 +142,10 @@ pub fn search_page(live: Live) -> nsh_core::element::Screen {
                     view()
                         .pb(move || ui::bottom_inset() + px(16.0))
                         .child(when(move || shown.with(Vec::is_empty), || {
-                            text(t!("No terminal is called that")).px(px(24.0)).py(px(16.0)).text_size(px(14.0)).text_color(theme::DIM)
+                            text(t!("No terminal is called that")).px(px(24.0)).py(px(16.0)).text_size(theme::CALLOUT).text_color(theme::DIM)
                         }))
                         .child(
-                            view().mx(px(12.0)).rounded(px(14.0)).overflow_hidden().bg(theme::POPOVER).child(each(
+                            view().mx(theme::INSET).rounded(theme::CARD_RADIUS).overflow_hidden().bg(theme::POPOVER).child(each(
                                 move || shown.get(),
                                 |f| f.address.clone(),
                                 move |f, at| {
@@ -185,10 +185,10 @@ pub fn search_page(live: Live) -> nsh_core::element::Screen {
                                                                 .flex_row()
                                                                 .items_center()
                                                                 .gap(px(6.0))
-                                                                .child(text(move || f.with(|f| f.space_name.clone())).flex_shrink(0.0).max_w(px(180.0)).text_size(px(15.0)).font_weight(FontWeight::MEDIUM).text_color(theme::FOREGROUND).number_of_lines(1))
-                                                                .child(text(move || f.with(|f| f.doing.clone())).flex_1().text_size(px(14.0)).text_color(theme::MUTED).number_of_lines(1)),
+                                                                .child(text(move || f.with(|f| f.space_name.clone())).flex_shrink(0.0).max_w(px(180.0)).text_size(theme::ROW).font_weight(FontWeight::MEDIUM).text_color(theme::FOREGROUND).number_of_lines(1))
+                                                                .child(text(move || f.with(|f| f.doing.clone())).flex_1().text_size(theme::CALLOUT).text_color(theme::MUTED).number_of_lines(1)),
                                                         )
-                                                        .child(text(move || f.with(|f| if f.helper { format!("{} · {}", t!("helper"), f.under) } else { f.under.clone() })).text_size(px(12.0)).text_color(theme::DIM).number_of_lines(1)),
+                                                        .child(text(move || f.with(|f| if f.helper { format!("{} · {}", t!("helper"), f.under) } else { f.under.clone() })).text_size(theme::CAPTION).text_color(theme::DIM).number_of_lines(1)),
                                                 )
                                                 .child(ui::status_mark(move || f.with(|f| f.status), || false)),
                                         )

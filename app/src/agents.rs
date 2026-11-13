@@ -302,7 +302,7 @@ pub fn agents_section(live: Live, inline: bool) -> impl IntoElement {
             text(t!("No agent status yet. Agents show up here when they report their status. Older versions and agents inside tmux may not."))
                 .px(px(16.0))
                 .py(px(8.0))
-                .text_size(px(13.0))
+                .text_size(theme::FOOTNOTE)
                 .text_color(theme::DIM)
         }))
         .child(each(move || lines.get(), Line::key, move |l, _| match l.get_untracked() {
@@ -326,7 +326,7 @@ fn heading(l: ReadSignal<Line>, fold: impl Fn(String) + Copy + 'static) -> impl 
         .flex_row()
         .items_center()
         .gap(px(8.0))
-        .mx(px(12.0))
+        .mx(theme::INSET)
         .mt(px(6.0))
         .px(px(12.0))
         .h(px(36.0))
@@ -338,12 +338,12 @@ fn heading(l: ReadSignal<Line>, fold: impl Fn(String) + Copy + 'static) -> impl 
         .child(
             text(move || head.with(|h| h.1.clone()))
                 .flex_shrink(1.0)
-                .text_size(px(12.0))
+                .text_size(theme::CAPTION)
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(move || head.with(|h| h.2).map_or(theme::now(theme::DIM), |s| theme::now(theme::status(s))))
                 .number_of_lines(1),
         )
-        .child(when(move || head.with(|h| h.6 || !h.4), move || text(move || head.with(|h| h.3.to_string())).text_size(px(12.0)).text_color(theme::DIM)))
+        .child(when(move || head.with(|h| h.6 || !h.4), move || text(move || head.with(|h| h.3.to_string())).text_size(theme::CAPTION).text_color(theme::DIM)))
         .child(view().flex_1())
         .child(when(move || head.with(|h| !h.4), move || {
             view()
@@ -359,11 +359,11 @@ fn heading(l: ReadSignal<Line>, fold: impl Fn(String) + Copy + 'static) -> impl 
 /// the card starts and ends, a line above it from the words on.
 fn on_card(edge: impl Fn() -> Edge + Copy + 'static, line: bool) -> View {
     view()
-        .mx(px(12.0))
+        .mx(theme::INSET)
         .bg(theme::POPOVER)
         .overflow_hidden()
-        .rounded_t(move || px(if edge().top { 14.0 } else { 0.0 }))
-        .rounded_b(move || px(if edge().bottom { 14.0 } else { 0.0 }))
+        .rounded_t(move || if edge().top { theme::CARD_RADIUS } else { px(0.0) })
+        .rounded_b(move || if edge().bottom { theme::CARD_RADIUS } else { px(0.0) })
         .child(when(move || line && !edge().top, || view().h(px(1.0)).ml(px(46.0)).bg(theme::BORDER)))
 }
 
@@ -435,7 +435,7 @@ fn agent_row(live: Live, l: ReadSignal<Line>, now: Signal<u64>, inline: bool, fo
                                     text(move || row.with(|r| r.as_ref().map(|r| r.4.clone()).unwrap_or_default()))
                                         .flex_shrink(0.0)
                                         .max_w(px(180.0))
-                                        .text_size(px(15.0))
+                                        .text_size(theme::ROW)
                                         .font_weight(FontWeight::MEDIUM)
                                         // An idle agent not shown is quieter.
                                         .text_color(move || if row.with(|r| r.as_ref().is_some_and(|r| r.1 == "idle" && !r.2)) { theme::now(theme::MUTED) } else { theme::now(theme::FOREGROUND) })
@@ -444,7 +444,7 @@ fn agent_row(live: Live, l: ReadSignal<Line>, now: Signal<u64>, inline: bool, fo
                                 .child(
                                     text(move || row.with(|r| r.as_ref().and_then(|r| r.5.clone()).unwrap_or_default()))
                                         .flex_1()
-                                        .text_size(px(14.0))
+                                        .text_size(theme::CALLOUT)
                                         .text_color(theme::MUTED)
                                         .number_of_lines(1),
                                 ),
@@ -452,7 +452,7 @@ fn agent_row(live: Live, l: ReadSignal<Line>, now: Signal<u64>, inline: bool, fo
                         // Where: its machine, else the computer.
                         .child(
                             text(move || row.with(|r| r.as_ref().map(|r| r.6.as_ref().map_or_else(|| here.clone(), |m| prefs.machine_name(&computer, m))).unwrap_or_default()))
-                                .text_size(px(12.0))
+                                .text_size(theme::CAPTION)
                                 .text_color(theme::DIM)
                                 .number_of_lines(1),
                         ),
@@ -471,9 +471,9 @@ fn agent_row(live: Live, l: ReadSignal<Line>, now: Signal<u64>, inline: bool, fo
                         .label(t!("Fold or unfold its sub-agents"))
                         .on_press(move || if let Some(r) = row.get_untracked() { fold(r.0) })
                         .child(dynamic(move || ui::glyph(if row.with(|r| r.as_ref().is_some_and(|r| r.8)) { "chevron-down" } else { "chevron-right" }, 12.0, theme::DIM).into_element()))
-                        .child(text(move || row.with(|r| r.as_ref().filter(|r| !r.8).map(|r| r.7.to_string()).unwrap_or_default())).text_size(px(11.0)).text_color(theme::DIM))
+                        .child(text(move || row.with(|r| r.as_ref().filter(|r| !r.8).map(|r| r.7.to_string()).unwrap_or_default())).text_size(theme::SMALL).text_color(theme::DIM))
                 }))
-                .child(text(move || agent().map(|a| elapsed(a.since, now.get())).unwrap_or_default()).text_size(px(12.0)).text_color(theme::DIM))
+                .child(text(move || agent().map(|a| elapsed(a.since, now.get())).unwrap_or_default()).text_size(theme::CAPTION).text_color(theme::DIM))
                 .child(when(move || row.with(|r| r.as_ref().is_some_and(|r| r.3)), || ui::glyph("pin", 13.0, theme::DIM)))
                 .child(ui::status_mark(move || row.with(|r| r.as_ref().map(|r| r.1)), move || row.with(|r| r.as_ref().is_some_and(|r| r.9)))),
         )
@@ -496,7 +496,7 @@ fn more_row(l: ReadSignal<Line>, all: Signal<bool>) -> impl IntoElement {
             .role(AccessibilityRole::Button)
             .label(said)
             .on_press(move || all.update(|a| *a = !*a))
-            .child(text(said).text_size(px(14.0)).text_color(theme::ACCENT)),
+            .child(text(said).text_size(theme::CALLOUT).text_color(theme::ACCENT)),
     )
 }
 
@@ -531,9 +531,9 @@ fn sub_row(live: Live, l: ReadSignal<Line>, inline: bool) -> impl IntoElement {
                 nav::push(Route::Peek(address));
             }
         })
-        .child(text(move || if sub.with(|s| s.as_ref().is_some_and(|s| s.1)) { "└" } else { "├" }).text_size(px(13.0)).text_color(theme::DIM))
+        .child(text(move || if sub.with(|s| s.as_ref().is_some_and(|s| s.1)) { "└" } else { "├" }).text_size(theme::FOOTNOTE).text_color(theme::DIM))
         .child(ui::program_icon(move || sub.with(|s| s.as_ref().map(|s| s.0.program.clone()).unwrap_or_default()), 15.0))
-        .child(text(move || sub.with(|s| s.as_ref().map(|s| s.0.name.clone()).unwrap_or_default())).flex_1().text_size(px(14.0)).text_color(theme::MUTED).number_of_lines(1))
+        .child(text(move || sub.with(|s| s.as_ref().map(|s| s.0.name.clone()).unwrap_or_default())).flex_1().text_size(theme::CALLOUT).text_color(theme::MUTED).number_of_lines(1))
         .child(ui::status_mark(move || sub.with(|s| s.as_ref().and_then(|s| s.0.status)), move || sub.with(|s| s.as_ref().is_some_and(|s| s.2)))))
 }
 
@@ -574,7 +574,7 @@ pub fn peek_page(live: Live, address: String) -> nsh_core::element::Screen {
                 .justify_center()
                 .role(AccessibilityRole::Button)
                 .on_press(act)
-                .child(text(move || if in_pane.get() { t!("Go to") } else { t!("Keep") }).text_size(px(16.0)).text_color(theme::ACCENT)),
+                .child(text(move || if in_pane.get() { t!("Go to") } else { t!("Keep") }).text_size(theme::BODY).text_color(theme::ACCENT)),
         )
         .child(crate::terminal::terminal(live.engine.clone(), address, crate::terminal::Swipes::Nothing))
 }

@@ -73,7 +73,7 @@ pub fn more_sheet(live: Live, open: Signal<bool>) -> impl IntoElement {
                             .role(AccessibilityRole::Button)
                             .label(t!("Close pane"))
                             .on_press(pick("close"))
-                            .child(text(t!("Close pane")).text_size(px(16.0)).text_color(theme::BLOCKED)),
+                            .child(text(t!("Close pane")).text_size(theme::BODY).text_color(theme::BLOCKED)),
                     ),
             ),
         )
@@ -93,7 +93,7 @@ fn tile(glyph: impl Fn() -> &'static str + 'static, label: impl Fn() -> String +
         .label(label.clone())
         .on_press(press)
         .child(dynamic(move || ui::glyph(glyph(), 22.0, theme::FOREGROUND).into_element()))
-        .child(text(label).text_size(px(12.0)).text_color(theme::MUTED).number_of_lines(1))
+        .child(text(label).text_size(theme::CAPTION).text_color(theme::MUTED).number_of_lines(1))
 }
 
 async fn act(live: Live, picked: &str) {

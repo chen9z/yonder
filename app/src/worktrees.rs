@@ -92,7 +92,7 @@ pub fn worktrees_page(live: Live, place: Place) -> Screen {
                             .bg(theme::BACKGROUND)
                             .px(px(12.0))
                             .h(px(44.0))
-                            .text_size(px(16.0))
+                            .text_size(theme::BODY)
                             .text_color(theme::FOREGROUND),
                     )
                 }))
@@ -133,10 +133,10 @@ pub fn worktrees_page(live: Live, place: Place) -> Screen {
                                 view()
                                     .flex_1()
                                     .gap(px(2.0))
-                                    .child(text(move || checkout().map(|c| c.branch.unwrap_or_else(|| t!("detached").into())).unwrap_or_default()).text_size(px(16.0)).text_color(theme::FOREGROUND).number_of_lines(1))
-                                    .child(text(move || checkout().map(|c| tilde(&c.path, &home())).unwrap_or_default()).text_size(px(12.0)).text_color(theme::MUTED).number_of_lines(1)),
+                                    .child(text(move || checkout().map(|c| c.branch.unwrap_or_else(|| t!("detached").into())).unwrap_or_default()).text_size(theme::ROW).text_color(theme::FOREGROUND).number_of_lines(1))
+                                    .child(text(move || checkout().map(|c| tilde(&c.path, &home())).unwrap_or_default()).text_size(theme::CAPTION).text_color(theme::MUTED).number_of_lines(1)),
                             )
-                            .child(text(move || state().unwrap_or_default()).text_size(px(12.0)).text_color(move || if open_now() { theme::now(theme::ACCENT) } else { theme::now(theme::DIM) }))
+                            .child(text(move || state().unwrap_or_default()).text_size(theme::CAPTION).text_color(move || if open_now() { theme::now(theme::ACCENT) } else { theme::now(theme::DIM) }))
                         .on_press(move || {
                             let Some(c) = checkout() else { return };
                             let all = found.with_untracked(|r| r.as_ref().and_then(|r| r.as_ref().ok()).map(|r| r.all.clone()).unwrap_or_default());
@@ -151,7 +151,7 @@ pub fn worktrees_page(live: Live, place: Place) -> Screen {
                                 Some(Err(e)) => tr_string(&e),
                                 Some(Ok(_)) => t!("No worktree matches").to_owned(),
                             })
-                            .text_size(px(15.0))
+                            .text_size(theme::ROW)
                             .text_color(theme::MUTED),
                         ),
                     )

@@ -437,7 +437,7 @@ fn compose(viewer: Rc<Viewer>, writing: Signal<bool>, draft: Signal<String>) -> 
                         view()
                             .flex_row()
                             .items_center()
-                            .child(text(t!("Write a message")).flex_1().text_size(px(13.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::MUTED))
+                            .child(text(t!("Write a message")).flex_1().text_size(theme::FOOTNOTE).font_weight(FontWeight::SEMIBOLD).text_color(theme::MUTED))
                             .child(
                                 view()
                                     .flex_row()
@@ -458,7 +458,7 @@ fn compose(viewer: Rc<Viewer>, writing: Signal<bool>, draft: Signal<String>) -> 
                                         });
                                     })
                                     .child(ui::glyph("clipboard", 15.0, theme::MUTED))
-                                    .child(text(t!("Paste")).text_size(px(14.0)).text_color(theme::MUTED)),
+                                    .child(text(t!("Paste")).text_size(theme::CALLOUT).text_color(theme::MUTED)),
                             ),
                     )
                     .child(
@@ -478,7 +478,7 @@ fn compose(viewer: Rc<Viewer>, writing: Signal<bool>, draft: Signal<String>) -> 
                             .border_1()
                             .border_color(theme::INPUT)
                             .bg(theme::BACKGROUND)
-                            .text_size(px(16.0))
+                            .text_size(theme::BODY)
                             .line_height(px(22.0))
                             .text_color(theme::FOREGROUND),
                     )
@@ -487,7 +487,7 @@ fn compose(viewer: Rc<Viewer>, writing: Signal<bool>, draft: Signal<String>) -> 
                             .flex_row()
                             .items_center()
                             .gap(px(12.0))
-                            .child(text(t!("It goes in as one paste, then Enter.")).flex_1().text_size(px(12.0)).text_color(theme::DIM))
+                            .child(text(t!("It goes in as one paste, then Enter.")).flex_1().text_size(theme::CAPTION).text_color(theme::DIM))
                             .child(
                                 view()
                                     .flex_row()
@@ -504,7 +504,7 @@ fn compose(viewer: Rc<Viewer>, writing: Signal<bool>, draft: Signal<String>) -> 
                                     .disabled_style(|s| s.opacity(0.35))
                                     .on_press(send)
                                     .child(ui::glyph("send", 15.0, theme::SOLID_FOREGROUND))
-                                    .child(text(t!("Send")).text_size(px(15.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::SOLID_FOREGROUND)),
+                                    .child(text(t!("Send")).text_size(theme::ROW).font_weight(FontWeight::SEMIBOLD).text_color(theme::SOLID_FOREGROUND)),
                             ),
                     ),
             )
@@ -705,8 +705,8 @@ fn latest(viewer: Rc<Viewer>, snapshot: Signal<Arc<Snapshot>>) -> impl IntoEleme
             .role(AccessibilityRole::Button)
             .label(t!("Back to the latest output"))
             .on_press(move || viewer.scroll(-(back.get_untracked() as i32)))
-            .child(text(move || t!("{} lines back", back.get())).text_size(px(13.0)).text_color(theme::MUTED))
-            .child(text("↓").text_size(px(16.0)).text_color(theme::FOREGROUND))
+            .child(text(move || t!("{} lines back", back.get())).text_size(theme::FOOTNOTE).text_color(theme::MUTED))
+            .child(text("↓").text_size(theme::BODY).text_color(theme::FOREGROUND))
     })
 }
 
@@ -734,7 +734,7 @@ fn status(info: Signal<Info>) -> impl IntoElement {
             .border_1()
             .border_color(theme::BORDER)
             .pointer_events(PointerEvents::None)
-            .child(text(move || said().unwrap_or_default()).text_size(px(12.0)).text_color(theme::MUTED))
+            .child(text(move || said().unwrap_or_default()).text_size(theme::CAPTION).text_color(theme::MUTED))
     })
 }
 
@@ -855,7 +855,7 @@ pub fn text_page(live: crate::live::Live, words: Arc<String>) -> nsh_core::eleme
                     live.say(herdc_engine::Note::info(t!("Copied"), t!("The terminal's text is on the clipboard.")));
                     nav::back();
                 })
-                .child(text(t!("Copy all")).text_size(px(16.0)).text_color(theme::ACCENT)),
+                .child(text(t!("Copy all")).text_size(theme::BODY).text_color(theme::ACCENT)),
         )
         .child(
             scroll().element_ref(&list).flex_1().bg(theme::BACKGROUND).child(
@@ -978,10 +978,10 @@ fn key_face(label: &str, ink: impl Fn() -> Hsla + 'static) -> View {
                 .flex_row()
                 .items_center()
                 .gap(px(4.0))
-                .child(text(keybar::words(label).0.to_owned()).text_size(px(14.0)).font_family(theme::MONO).text_color(ink))
+                .child(text(keybar::words(label).0.to_owned()).text_size(theme::CALLOUT).font_family(theme::MONO).text_color(ink))
                 .child(ui::glyph("corner-down-left", 13.0, theme::MUTED))
                 .into_element(),
-            _ => text(label.to_owned()).text_size(px(14.0)).font_family(theme::MONO).text_color(ink).into_element(),
+            _ => text(label.to_owned()).text_size(theme::CALLOUT).font_family(theme::MONO).text_color(ink).into_element(),
         })
 }
 

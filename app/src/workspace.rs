@@ -102,7 +102,7 @@ fn header(
                         .items_center()
                         .justify_center()
                         .pointer_events(PointerEvents::None)
-                        .child(text(move || waiting.get().0.to_string()).text_size(px(10.0)).text_color(rgb(0xffffff)))
+                        .child(text(move || waiting.get().0.to_string()).text_size(theme::SMALL).text_color(rgb(0xffffff)))
                 })),
         )
         .child(
@@ -138,13 +138,13 @@ fn header(
                         .child(
                             text(move || space.with(|s| s.as_ref().map_or_else(|| "Yonder".to_owned(), |s| s.1.clone())))
                                 .flex_shrink(1.0)
-                                .text_size(px(16.0))
+                                .text_size(theme::BODY)
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(theme::FOREGROUND)
                                 .number_of_lines(1),
                         )
                         // The status after where it is: a spare gap when there is none.
-                        .child(text(move || format!("· {}", machine.get())).flex_shrink(1.0).text_size(px(13.0)).text_color(theme::MUTED).number_of_lines(1))
+                        .child(text(move || format!("· {}", machine.get())).flex_shrink(1.0).text_size(theme::FOOTNOTE).text_color(theme::MUTED).number_of_lines(1))
                         .child(ui::tab_status(move || space.with(|s| s.as_ref().and_then(|s| s.2)))),
                 )
                 .child(when(move || many.get(), {
@@ -328,7 +328,7 @@ fn tab_dots(live: Live) -> impl IntoElement {
                     });
                 })
                 .child(ui::glyph("archive", 11.0, theme::DIM))
-                .child(text(move || settled.with(Vec::len).to_string()).text_size(px(11.0)).text_color(theme::DIM))
+                .child(text(move || settled.with(Vec::len).to_string()).text_size(theme::SMALL).text_color(theme::DIM))
         }))
 }
 
@@ -380,7 +380,7 @@ fn tab_said(live: Live) -> impl IntoElement {
                     .border_1()
                     .border_color(theme::BORDER)
                     .shadow_lg()
-                    .child(text(move || said.get().unwrap_or_default()).text_size(px(13.0)).text_color(theme::FOREGROUND).number_of_lines(1).max_w(px(280.0))),
+                    .child(text(move || said.get().unwrap_or_default()).text_size(theme::FOOTNOTE).text_color(theme::FOREGROUND).number_of_lines(1).max_w(px(280.0))),
             )
     })
 }
@@ -408,7 +408,7 @@ pub fn link_banner(live: Live) -> impl IntoElement {
             .flex_row()
             .items_center()
             .gap(px(8.0))
-            .child(text(move || said.get().unwrap_or_default()).flex_1().text_size(px(13.0)).text_color(theme::MUTED).number_of_lines(2))
+            .child(text(move || said.get().unwrap_or_default()).flex_1().text_size(theme::FOOTNOTE).text_color(theme::MUTED).number_of_lines(2))
             .child(when(move || refused.get(), {
                 let live = live.clone();
                 move || {
@@ -555,7 +555,7 @@ fn pane_strip(live: Live, panes: Memo<Vec<Chip>>) -> impl IntoElement {
                     .accessibility_state(move || AccessibilityState { selected: p.with(|p| p.focused), ..Default::default() })
                     .on_press(move || live.run("pane.focus", serde_json::json!({ "pane": p.get_untracked().pane })))
                     .child(ui::program_icon(move || p.with(|p| p.program.clone()), 14.0))
-                    .child(text(move || p.with(|p| p.title.clone())).text_size(px(13.0)).text_color(theme::FOREGROUND).number_of_lines(1).max_w(px(120.0)))
+                    .child(text(move || p.with(|p| p.title.clone())).text_size(theme::FOOTNOTE).text_color(theme::FOREGROUND).number_of_lines(1).max_w(px(120.0)))
                     .child(ui::tab_status(move || p.with(|p| p.status)))
             },
         )),
@@ -708,8 +708,8 @@ fn mod_pane(live: Live, name: String) -> impl IntoElement {
         .gap(px(12.0))
         .p(px(24.0))
         .bg(theme::CANVAS)
-        .child(text(t!("The {} pane", name)).text_size(px(16.0)).text_color(theme::FOREGROUND))
-        .child(text(t!("It shows on the desktop.")).text_size(px(13.0)).text_color(theme::MUTED))
+        .child(text(t!("The {} pane", name)).text_size(theme::BODY).text_color(theme::FOREGROUND))
+        .child(text(t!("It shows on the desktop.")).text_size(theme::FOOTNOTE).text_color(theme::MUTED))
         .children(page.map(|r| ui::ghost_button(t!("Open"), move || nav::push(r.clone()))))
         .into_element()
 }
@@ -738,7 +738,7 @@ fn empty(live: Live) -> impl IntoElement {
         .p(px(24.0))
         .child(
             text(move || said.with(|s| s.clone().unwrap_or_else(|e| e)))
-                .text_size(px(18.0))
+                .text_size(theme::HEADLINE)
                 .text_center()
                 .text_color(theme::FOREGROUND),
         )
@@ -785,7 +785,7 @@ pub fn notes(live: Live) -> impl IntoElement {
                     .active(|s| s.bg(theme::HOVER))
                     .role(AccessibilityRole::Button)
                     .on_press(move || all_shown.update(|a| *a = !*a))
-                    .child(text(move || if hidden.get() > 0 { t!("{} more", hidden.get()) } else { t!("Fewer").to_owned() }).text_size(px(13.0)).text_color(theme::MUTED))
+                    .child(text(move || if hidden.get() > 0 { t!("{} more", hidden.get()) } else { t!("Fewer").to_owned() }).text_size(theme::FOOTNOTE).text_color(theme::MUTED))
             }))
             .child(each(move || shown.get(), |(id, _)| *id, move |n, _| note(live.clone(), n)))
             .into_element()
@@ -822,8 +822,8 @@ fn note(live: Live, n: ReadSignal<(u64, herdc_engine::Note)>) -> impl IntoElemen
                                 live.notes.update(|all| all.retain(|(i, _)| *i != id));
                             }
                         })
-                        .child(text(move || n.with(|n| n.1.title.clone())).text_size(px(14.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::FOREGROUND))
-                        .child(text(move || n.with(|n| n.1.body.clone().unwrap_or_default())).text_size(px(13.0)).text_color(theme::MUTED).number_of_lines(3)),
+                        .child(text(move || n.with(|n| n.1.title.clone())).text_size(theme::CALLOUT).font_weight(FontWeight::SEMIBOLD).text_color(theme::FOREGROUND))
+                        .child(text(move || n.with(|n| n.1.body.clone().unwrap_or_default())).text_size(theme::FOOTNOTE).text_color(theme::MUTED).number_of_lines(3)),
                 )
                 .child({
                     let notes = live.notes;
