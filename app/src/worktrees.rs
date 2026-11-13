@@ -105,9 +105,9 @@ pub fn worktrees_page(live: Live, place: Place) -> Screen {
                             let c = checkout()?;
                             let all = shown.get();
                             Some(if c.main {
-                                "main checkout".to_owned()
+                                t!("main checkout").to_owned()
                             } else if world.with(|v| worktree::space_of(&c.path, &all, on.as_deref(), &v.spaces).is_some()) {
-                                "open".to_owned()
+                                t!("open").to_owned()
                             } else if c.at > 0 {
                                 worktree::ago(now() - c.at)
                             } else {
@@ -115,7 +115,7 @@ pub fn worktrees_page(live: Live, place: Place) -> Screen {
                             })
                         };
                         ui::row(
-                            move || checkout().map(|c| c.branch.unwrap_or_else(|| "detached".into())).unwrap_or_default(),
+                            move || checkout().map(|c| c.branch.unwrap_or_else(|| t!("detached").into())).unwrap_or_default(),
                             move || checkout().map(|c| format!("{} · {}", state().unwrap_or_default(), tilde(&c.path, &home()))).unwrap_or_default(),
                         )
                         .border_b_1()
@@ -245,11 +245,29 @@ pub async fn remove_worktree(live: Live, space: String, place: Place) {
     }
 }
 
+/// What [`kind`] found, by machine and folder.
+type Kinds = std::collections::HashMap<(Option<String>, String), Option<bool>>;
+
+thread_local! {
+    /// What [`kind`] found: a space's menu is shown at once the next time.
+    static KINDS: std::cell::RefCell<Kinds> = Default::default();
+}
+
+/// What [`kind`] found for the folder before, if it looked.
+pub fn known_kind(place: &Place) -> Option<Option<bool>> {
+    KINDS.with(|k| k.borrow().get(&(place.on.clone(), place.folder.clone())).copied())
+}
+
 /// Whether a folder's repo is the main checkout or a linked worktree;
-/// None outside git.
+/// None outside git (or out of reach).
 pub async fn kind(live: &Live, place: &Place) -> Option<bool> {
     let there = live.there(place.on.clone()).ok()?;
     let folder = place.folder.clone();
-    let repo = off(async move { worktree::repo_of(&there, &folder).await }).await?.ok()??;
-    Some(repo.linked)
+    let read = off(async move { worktree::repo_of(&there, &folder).await }).await?;
+    let linked = match read {
+        Ok(repo) => repo.map(|r| r.linked),
+        Err(_) => return None,
+    };
+    KINDS.with(|k| k.borrow_mut().insert((place.on.clone(), place.folder.clone()), linked));
+    linked
 }

@@ -13,7 +13,7 @@ use nsh_core::prelude::*;
 pub fn settings_page(live: Live) -> nsh_core::element::Screen {
     let prefs = use_context::<Prefs>().expect("prefs");
     let world = live.view;
-    let public = link::phone_key().map(|(_, public)| public).unwrap_or_else(|error| format!("Cannot load phone key: {error}"));
+    let public = link::phone_key().map(|(_, public)| public).unwrap_or_else(|error| t!("Cannot load the phone's key: {}", error));
     let about = live.clone();
     let core = computed(move || {
         world.with(|v| match &v.link {

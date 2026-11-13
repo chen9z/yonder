@@ -59,7 +59,7 @@ fn adds_a_computer_then_works_there() {
 
     // A space starts a terminal on the computer.
     app.press("role:button[New space]").unwrap();
-    app.wait_for_within("label:New tab", SLOW).unwrap();
+    app.wait_for_within("label:More", SLOW).unwrap();
     app.wait_until("a terminal on the computer", SLOW, |_| !hc_terminals(&session).is_empty()).unwrap();
     // It starts at the phone's grid, not the core's 200x120.
     let first = hc_terminals(&session)[0]["address"].as_str().unwrap().to_owned();
@@ -139,7 +139,14 @@ fn adds_a_computer_then_works_there() {
     app.wait_until("the program's copy", SLOW, |screen| screen.clipboard() == Some("hello")).unwrap();
 
     // A swipe across goes between tabs: right to the one before, left to the next.
-    app.press("label:New tab").unwrap();
+    // (`+` offers a terminal, the agents installed, a space or a worktree.)
+    answer(&mut app, "Terminal", "New space");
+    app.press("label:New").unwrap();
+    app.wait_for_within("text:2 · Studio", SLOW).unwrap();
+    // The tabs are on a strip, the shown one selected; a tap shows another.
+    app.press("role:tab[1]").unwrap();
+    app.wait_for_within("text:1 · Studio", SLOW).unwrap();
+    app.press("role:tab[2]").unwrap();
     app.wait_for_within("text:2 · Studio", SLOW).unwrap();
     app.drag("id:terminal", point(px(200.0), px(0.0))).unwrap();
     app.wait_for_within("text:1 · Studio", SLOW).unwrap();
@@ -173,7 +180,7 @@ fn adds_a_computer_then_works_there() {
     app.wait_for_within("text:No agent status yet. Agents show up here when they report their status. Older versions and agents inside tmux may not.", SLOW).unwrap();
     app.press("label:Spaces").unwrap();
     app.press("text:home").unwrap();
-    app.wait_for_within("label:New tab", SLOW).unwrap();
+    app.wait_for_within("label:More", SLOW).unwrap();
 
     // Wide (a tablet, landscape): split right, then drag the seam left; the
     // panes share the tab anew, and the terminals are sized to them.
@@ -418,11 +425,13 @@ fn edits_a_saved_connection_only_after_it_works() {
     app.press("label:New space").unwrap();
     app.wait_for_within("label:More", SLOW).unwrap();
     app.press("label:More").unwrap();
+    app.press("label:Settings").unwrap();
     app.press("label:Edit connection").unwrap();
     app.type_text("id:password", "incorrect").unwrap();
     app.press("text:Test and save").unwrap();
     app.wait_for_within("text:Wrong user name or password.", SLOW).unwrap();
     app.press("text:Cancel").unwrap();
+    app.back().unwrap();
     app.wait_for_within("id:terminal-input", SLOW).unwrap();
     app.type_text("id:terminal-input", "touch still-connected\n").unwrap();
     app.wait_until("original terminal still accepts input", SLOW, |_| session.path("still-connected").exists()).unwrap();
@@ -482,7 +491,7 @@ fn another_session_is_a_computer_of_its_own() {
     app.press("label:Spaces").unwrap();
     app.wait_for_within("text:No spaces yet", SLOW).unwrap();
     app.press("role:button[New space]").unwrap();
-    app.wait_for_within("label:New tab", SLOW).unwrap();
+    app.wait_for_within("label:More", SLOW).unwrap();
     // Its terminal is that session's: the default one has none.
     std::thread::sleep(Duration::from_secs(1));
     assert!(hc_terminals(&session).is_empty(), "{:?}", hc_terminals(&session));
@@ -490,7 +499,8 @@ fn another_session_is_a_computer_of_its_own() {
     assert!(stored.contains(&format!("me@127.0.0.1:{}/two", served.port)), "{stored}");
 
     // At home, a space's handle drags it below the next.
-    app.press("label:New tab").unwrap();
+    answer(&mut app, "Terminal", "New space");
+    app.press("label:New").unwrap();
     app.wait_for_within("text:2 · Studio · two", SLOW).unwrap();
     app.press("label:Spaces and agents").unwrap();
     answer(&mut app, "Rename", "Rename");

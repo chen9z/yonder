@@ -65,11 +65,26 @@ fn computer_list(known: Signal<Vec<Computer>>, edit: impl Fn(Computer) + Copy + 
                     // The most urgent of its spaces, as they were.
                     let status = spaces.iter().map(|s| s.status).max_by_key(|s| priority(*s)).flatten();
                     let then = seen.map(|s| t!("{} ago", ago(now() - s.at as i64)));
+                    // Two of one name are told apart by where they are.
+                    let twin = c.with_untracked(|c| known.with_untracked(|all| all.iter().filter(|o| o.name == c.name).count() > 1));
+                    let then = move || {
+                        let at = twin.then(|| c.with(|c| format!("{}@{}:{}", c.user, c.host, c.port)));
+                        [at, then.clone()].into_iter().flatten().collect::<Vec<_>>().join(" · ")
+                    };
+                    // The most urgent few, in their order; the rest are counted.
+                    let mut first: Vec<usize> = (0..spaces.len()).collect();
+                    first.sort_by_key(|&i| (std::cmp::Reverse(priority(spaces[i].status)), i));
+                    first.truncate(SEEN_SPACES);
+                    first.sort_unstable();
+                    let more = spaces.len() - first.len();
                     view()
                         .child(computer_row(c, status, then, known, editing, asking, edit))
-                        .children(spaces.into_iter().map(move |s| {
+                        .children(first.into_iter().map(|i| &spaces[i]).map(move |s| {
                             let id = s.id.clone();
-                            seen_space(&s).on_press(move || live::open_at(c.get_untracked(), id.clone()))
+                            seen_space(s).on_press(move || live::open_at(c.get_untracked(), id.clone()))
+                        }))
+                        .children((more > 0).then(|| {
+                            text(t!("{} more spaces", more)).pl(px(49.0)).pb(px(6.0)).text_size(px(12.0)).text_color(theme::DIM)
                         }))
                 },
             ))
@@ -93,13 +108,16 @@ fn computer_list(known: Signal<Vec<Computer>>, edit: impl Fn(Computer) + Copy + 
     }))
 }
 
+/// How many of the spaces it showed last a computer lists.
+const SEEN_SPACES: usize = 4;
+
 fn now() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
 }
 
 /// A computer: its name and address, how its agents were when last seen.
-fn computer_row(c: ReadSignal<Computer>, status: Option<&'static str>, then: Option<String>, known: Signal<Vec<Computer>>, editing: Stored<Option<Computer>>, asking: Signal<Option<ui::Prompt>>, edit: impl Fn(Computer) + Copy + 'static) -> View {
-    ui::row(move || c.with(|c| c.name.clone()), move || then.clone().unwrap_or_default())
+fn computer_row(c: ReadSignal<Computer>, status: Option<&'static str>, then: impl Fn() -> String + 'static, known: Signal<Vec<Computer>>, editing: Stored<Option<Computer>>, asking: Signal<Option<ui::Prompt>>, edit: impl Fn(Computer) + Copy + 'static) -> View {
+    ui::row(move || c.with(|c| c.name.clone()), then)
         .child(ui::dot(move || status))
         .on_press(move || live::open(c.get_untracked(), None))
         .label(move || c.with(|c| c.name.clone()))
@@ -225,7 +243,7 @@ fn connection_form(
                 "{}\n{}\n\nCompare it with what the computer shows for\nssh-keygen -lf /etc/ssh/ssh_host_*_key.pub",
                 key.algorithm, key.fingerprint
             );
-            if computer.fingerprint.is_none() && !ui::confirm(&t!("Trust {}?", computer.host), &message, t!("Trust")).await {
+            if computer.fingerprint.is_none() && !ui::agree(&t!("Trust {}?", computer.host), &message, t!("Trust")).await {
                 return step.set(Step::Form);
             }
             step.set(Step::Busy(t!("Logging in…")));

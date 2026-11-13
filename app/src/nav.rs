@@ -61,6 +61,14 @@ pub fn truncate(depth: usize) {
     routes().update(|r| r.0.truncate(depth));
 }
 
+/// The page shown instead by another (the next file's diff).
+pub fn replace(route: Route) {
+    routes().update(|r| {
+        r.0.pop();
+        r.0.push(route);
+    });
+}
+
 /// Back one page.
 pub fn back() {
     routes().update(|r| { r.0.pop(); });

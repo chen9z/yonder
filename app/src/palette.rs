@@ -40,7 +40,8 @@ fn entries(live: &Live) -> Vec<Entry> {
         }
     });
     for c in COMMANDS {
-        out.push(Entry { title: c.name.to_owned(), detail: tr(c.about).to_owned(), command: c.name, args: json!({}) });
+        // What it does, in the person's words; its name (as the desktop's) under it.
+        out.push(Entry { title: tr(c.about).to_owned(), detail: c.name.to_owned(), command: c.name, args: json!({}) });
     }
     out
 }
@@ -116,15 +117,37 @@ async fn run(live: Live, e: Entry) {
     live.run(e.command, args);
 }
 
+/// The agents each machine had (None: the core's own), as last looked.
+type Known = std::collections::HashMap<Option<String>, Vec<agents::Known>>;
+
+thread_local! {
+    static KNOWN: std::cell::RefCell<Known> = Default::default();
+}
+
+/// The agents machine `on` has: as last looked, at once (looked again for
+/// the next time), else looked for now.
+async fn known_agents(live: &Live, on: Option<String>) -> Vec<agents::Known> {
+    let look = |there| async move { off(async move { agents::known(&there).await }).await.and_then(Result::ok) };
+    let Ok(there) = live.there(on.clone()) else { return Vec::new() };
+    if let Some(kept) = KNOWN.with(|k| k.borrow().get(&on).cloned()) {
+        spawn(async move {
+            if let Some(found) = look(there).await {
+                KNOWN.with(|k| k.borrow_mut().insert(on, found));
+            }
+        });
+        return kept;
+    }
+    let found = look(there).await.unwrap_or_default();
+    KNOWN.with(|k| k.borrow_mut().insert(on, found.clone()));
+    found
+}
+
 /// The new-menu: a terminal, an agent the space's machine has, a space,
 /// or a worktree.
 pub async fn new_terminal(live: Live) {
     let (space, place) = live.view.with_untracked(|v| (v.active_space().map(|s| s.id.clone()), v.location()));
     let on = place.as_ref().and_then(|p| p.on.clone());
-    let known = match live.there(on) {
-        Ok(there) => off(async move { agents::known(&there).await }).await.and_then(Result::ok).unwrap_or_default(),
-        Err(_) => Vec::new(),
-    };
+    let known = known_agents(&live, on).await;
     let installed: Vec<&agents::Known> = known.iter().filter(|k| k.installed).collect();
     let mut actions: Vec<(String, String)> = vec![("terminal".into(), t!("Terminal").into())];
     actions.extend(installed.iter().map(|k| (format!("agent:{}", k.key()), k.name().to_owned())));

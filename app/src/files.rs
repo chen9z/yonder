@@ -90,6 +90,19 @@ pub fn files_page(live: Live, place: Place) -> Screen {
         });
     }
     let title = root.rsplit('/').find(|p| !p.is_empty()).unwrap_or("/").to_owned();
+    // Pulled down, read again now rather than in up to 10 s.
+    let refreshing = signal(false);
+    let pulled = {
+        let (live, place) = (live.clone(), place.clone());
+        move || {
+            refreshing.set(true);
+            let (live, place) = (live.clone(), place.clone());
+            spawn(async move {
+                refresh(&live, &place, tree).await;
+                refreshing.set(false);
+            });
+        }
+    };
     ui::page(title).child(
         view()
             .flex_1()
@@ -145,6 +158,8 @@ pub fn files_page(live: Live, place: Place) -> Screen {
                         )
                 })
                 .estimated_item_size(px(44.0))
+                .refreshing(move || refreshing.get())
+                .on_refresh(pulled)
                 // The last row clears the system's bar (the note on the limit does, if shown).
                 .footer(view().h(move || px(if tree.limited() { 0.0 } else { safe_area().bottom.0 })))
                 .empty(
@@ -265,6 +280,8 @@ pub fn file_page(live: Live, place: Place, path: String) -> Screen {
         _ => None,
     });
     let name = path.rsplit('/').next().unwrap_or(&path).to_owned();
+    // As large as the terminal's text (Settings, or a pinch there).
+    let font = use_context::<crate::prefs::Prefs>().expect("prefs").font.get_untracked();
     // The editor reads the language from the file's name (`main.rs`, `Dockerfile`).
     let language = SharedString::from(name.clone());
     let markdown = [".md", ".markdown"].iter().any(|e| name.to_ascii_lowercase().ends_with(e));
@@ -308,15 +325,17 @@ pub fn file_page(live: Live, place: Place, path: String) -> Screen {
                 .active_line(false)
                 .scroll_beyond_last_line(EditorScrollBeyond::from(false))
                 .font_family(Some(SharedString::from(theme::MONO)))
-                .font_size(px(12.0))
-                .line_height(px(18.0))
+                .font_size(px(font))
+                .line_height(px((font * 1.5).round()))
                 .flex_1()
                 .into_element()
         })))
 }
 
-/// A line of code: its number in the gutter, the text wrapped after.
+/// A line of code at `font` points: its number in the gutter, the text
+/// wrapped after.
 pub fn code_line(
+    font: f32,
     number: impl Fn() -> Option<u64> + 'static,
     line: impl Fn() -> String + 'static,
     row: impl Fn() -> AdaptiveColor + 'static,
@@ -328,13 +347,13 @@ pub fn code_line(
         .px(px(4.0))
         .child(
             text(move || number().map(|n| n.to_string()).unwrap_or_default())
-                .w(px(40.0))
+                .w(px((font * 3.4).round()))
                 .pr(px(8.0))
                 .text_right()
                 .font_family(theme::MONO)
-                .text_size(px(12.0))
-                .line_height(px(18.0))
+                .text_size(px(font))
+                .line_height(px((font * 1.5).round()))
                 .text_color(theme::DIM),
         )
-        .child(text(line).flex_1().font_family(theme::MONO).text_size(px(12.0)).line_height(px(18.0)).text_color(move || theme::now(color())).selectable(true))
+        .child(text(line).flex_1().font_family(theme::MONO).text_size(px(font)).line_height(px((font * 1.5).round())).text_color(move || theme::now(color())).selectable(true))
 }

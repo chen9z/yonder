@@ -191,6 +191,20 @@ pub fn wheel(lines: i32, col: u16, row: u16, modes: Modes) -> Option<Vec<u8>> {
     None
 }
 
+/// A tap at a cell as a left click, pressed and let go: what to send the
+/// program, or None when it didn't ask for the mouse.
+pub fn click(col: u16, row: u16, modes: Modes) -> Option<Vec<u8>> {
+    if !modes.mouse {
+        return None;
+    }
+    if modes.sgr_mouse {
+        let (x, y) = (col + 1, row + 1);
+        return Some(format!("\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m").into_bytes());
+    }
+    let (x, y) = ((col + 33).min(255) as u8, (row + 33).min(255) as u8);
+    Some(vec![0x1b, b'[', b'M', 32, x, y, 0x1b, b'[', b'M', 35, x, y])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -266,5 +280,15 @@ mod tests {
         assert_eq!(s(wheel(-1, 0, 0, sgr).unwrap()), "\x1b[<65;1;1M");
         let alt = Modes { alt_screen: true, alternate_scroll: true, ..m };
         assert_eq!(s(wheel(-2, 0, 0, alt).unwrap()), "\x1b[B\x1b[B");
+    }
+
+    #[test]
+    fn a_tap_clicks_only_where_the_program_wants_the_mouse() {
+        let m = Modes::default();
+        assert_eq!(click(3, 4, m), None);
+        let sgr = Modes { mouse: true, sgr_mouse: true, ..m };
+        assert_eq!(s(click(3, 4, sgr).unwrap()), "\x1b[<0;4;5M\x1b[<0;4;5m");
+        let x10 = Modes { mouse: true, ..m };
+        assert_eq!(click(0, 0, x10).unwrap(), b"\x1b[M !!\x1b[M#!!");
     }
 }

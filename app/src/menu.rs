@@ -2,7 +2,7 @@
 //! menus offer, grouped, from the bottom of the screen where a thumb is.
 //! Closing the pane sits apart, in red.
 
-use crate::live::{self, Live};
+use crate::live::Live;
 use crate::nav::{self, Route};
 use crate::i18n::tr;
 use crate::{theme, ui};
@@ -10,12 +10,14 @@ use nsh_base::sheet;
 use nsh_core::prelude::*;
 use serde_json::json;
 
-/// An action of the sheet: id, glyph, label.
+/// An action of the sheet: id, glyph (`assets/chrome`), label.
 type Action = (&'static str, &'static str, &'static str);
 
-const PANE: [Action; 4] = [("terminal", "+", "New terminal"), ("right", "◨", "Split right"), ("down", "⬓", "Split down"), ("zoom", "⇱", "Zoom")];
-const HERE: [Action; 4] = [("files", "▤", "Files"), ("changes", "±", "Changes"), ("worktrees", "⎇", "Worktrees"), ("rename", "✎", "Rename tab")];
-const APP: [Action; 4] = [("commands", "⌘", "Commands"), ("edit", "✎", "Edit connection"), ("settings", "⚙", "Settings"), ("leave", "⏏", "Leave")];
+// New terminals are the header's `+`; the connection's own actions are in
+// Settings (and the home menu).
+const PANE: [Action; 4] = [("right", "columns-2", "Split right"), ("down", "rows-2", "Split down"), ("zoom", "maximize-2", "Zoom"), ("rename", "pencil", "Rename tab")];
+const HERE: [Action; 4] = [("files", "folder", "Files"), ("changes", "file-diff", "Changes"), ("worktrees", "branch", "Worktrees"), ("settle", "archive", "Put away tab")];
+const APP: [Action; 2] = [("commands", "command", "Commands"), ("settings", "settings", "Settings")];
 
 pub fn more_sheet(live: Live, open: Signal<bool>) -> impl IntoElement {
     let zoomed = {
@@ -36,6 +38,7 @@ pub fn more_sheet(live: Live, open: Signal<bool>) -> impl IntoElement {
             let pick = pick.clone();
             view().flex_row().flex_wrap().px(px(8.0)).children(actions.iter().map(move |&(id, glyph, label)| {
                 let label = move || if id == "zoom" && zoomed.get() { t!("Unzoom").to_owned() } else { tr(label).to_owned() };
+                let glyph = move || if id == "zoom" && zoomed.get() { "minimize-2" } else { glyph };
                 tile(glyph, label, pick(id))
             }))
         }
@@ -77,7 +80,7 @@ pub fn more_sheet(live: Live, open: Signal<bool>) -> impl IntoElement {
 }
 
 /// One action: its glyph over its name, a quarter of a row.
-fn tile(glyph: &'static str, label: impl Fn() -> String + Clone + 'static, press: impl Fn() + 'static) -> impl IntoElement {
+fn tile(glyph: impl Fn() -> &'static str + 'static, label: impl Fn() -> String + Clone + 'static, press: impl Fn() + 'static) -> impl IntoElement {
     view()
         .w(percentage(0.25))
         .h(px(76.0))
@@ -89,13 +92,12 @@ fn tile(glyph: &'static str, label: impl Fn() -> String + Clone + 'static, press
         .role(AccessibilityRole::Button)
         .label(label.clone())
         .on_press(press)
-        .child(text(glyph).text_size(px(22.0)).text_color(theme::FOREGROUND))
+        .child(dynamic(move || ui::glyph(glyph(), 22.0, theme::FOREGROUND).into_element()))
         .child(text(label).text_size(px(12.0)).text_color(theme::MUTED).number_of_lines(1))
 }
 
 async fn act(live: Live, picked: &str) {
     match picked {
-        "terminal" => crate::palette::new_terminal(live.clone()).await,
         "right" | "down" => live.run("pane.split", json!({ "direction": picked })),
         "zoom" => live.run("pane.zoom", json!({})),
         "close" => {
@@ -109,6 +111,7 @@ async fn act(live: Live, picked: &str) {
             live.run("pane.close", json!({}))
         }
         "rename" => live.run("tab.rename", json!({})),
+        "settle" => live.run("tab.settle", json!({})),
         "files" | "changes" | "worktrees" => {
             let Some(place) = live.view.with_untracked(|v| v.location()) else { return };
             nav::push(match picked {
@@ -118,9 +121,7 @@ async fn act(live: Live, picked: &str) {
             });
         }
         "commands" => nav::push(Route::Commands),
-        "edit" => nav::push(Route::EditConnection),
         "settings" => nav::push(Route::Settings),
-        "leave" => live::close(),
         _ => {}
     }
 }

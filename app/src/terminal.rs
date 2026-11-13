@@ -10,7 +10,7 @@
 use crate::prefs::Prefs;
 use crate::nav::{self, Route};
 use crate::keybar::{self, Does};
-use crate::{link, theme};
+use crate::{link, theme, ui};
 use herdc_engine::{Engine, Info, Mode, Viewer};
 use herdc_term::{CursorKind, Key, Mods, Snapshot};
 use nsh_core::canvas::CanvasTextBaseline;
@@ -81,21 +81,38 @@ impl Cell {
     }
 }
 
-/// Ctrl and Alt from the bar: they hold for the next key.
+/// How Ctrl or Alt of the bar holds: not, for the next key (a tap), or
+/// until tapped again (a second tap at once).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Hold {
+    Off,
+    Once,
+    Locked,
+}
+
+/// Ctrl and Alt from the bar.
 #[derive(Clone, Copy)]
 struct Latch {
-    ctrl: Signal<bool>,
-    alt: Signal<bool>,
+    ctrl: Signal<Hold>,
+    alt: Signal<Hold>,
 }
 
 impl Latch {
     fn take(&self) -> Mods {
-        let mods = Mods { shift: false, ctrl: self.ctrl.get_untracked(), alt: self.alt.get_untracked() };
-        self.ctrl.set(false);
-        self.alt.set(false);
-        mods
+        let held = |hold: Signal<Hold>| {
+            let now = hold.get_untracked();
+            if now == Hold::Once {
+                hold.set(Hold::Off);
+            }
+            now != Hold::Off
+        };
+        Mods { shift: false, ctrl: held(self.ctrl), alt: held(self.alt) }
     }
 }
+
+/// A key of the bar held down types again: after this long, this often.
+const REPEAT_AFTER: std::time::Duration = std::time::Duration::from_millis(450);
+const REPEAT_EVERY: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// What the person typed: text as it is (or keys, while Ctrl or Alt hold).
 fn send_text(viewer: &Viewer, latch: Latch, text: &str) {
@@ -205,7 +222,7 @@ pub fn terminal(engine: Engine, address: String, swipes: Swipes) -> impl IntoEle
         (w / (cols * c.width)).min(h / (rows * c.height)).clamp(0.05, 1.0)
     });
 
-    let latch = Latch { ctrl: signal(false), alt: signal(false) };
+    let latch = Latch { ctrl: signal(Hold::Off), alt: signal(Hold::Off) };
     let field = element_ref();
     let focused = signal(false);
     let tap = move || field.focus();
@@ -314,6 +331,9 @@ pub fn terminal(engine: Engine, address: String, swipes: Swipes) -> impl IntoEle
                         fling(flinger.clone(), snapshot, flung, e.gesture.vy, e.location, cell.get_untracked(), scale.get_untracked());
                     }
                     if !held.replace(false) && !pinched && d.x.0.abs() < 8.0 && d.y.0.abs() < 8.0 {
+                        // A program that asked for the mouse is clicked where tapped.
+                        let (c, s) = (cell.get_untracked(), scale.get_untracked());
+                        flinger.click((e.location.x.0 / (c.width * s)) as u16, (e.location.y.0 / (c.height * s)) as u16);
                         tap();
                     }
                     // Across, far enough: the next tab (to the left) or the one before.
@@ -640,13 +660,15 @@ pub fn text_page(live: crate::live::Live, words: Arc<String>) -> nsh_core::eleme
         )
 }
 
-/// The keys a phone keyboard lacks.
+/// The keys a phone keyboard lacks: Enter at one end, Hide keyboard at
+/// the other, the chosen ones scrolling between.
 fn key_bar(viewer: Rc<Viewer>, latch: Latch) -> impl IntoElement {
     let enter_viewer = viewer.clone();
     let keys = use_context::<Prefs>().expect("prefs").keys;
     view()
         .flex_row()
-        .h(px(40.0))
+        .items_center()
+        .h(px(44.0))
         .bg(theme::CHROME)
         .border_t_1()
         .border_color(theme::BORDER)
@@ -665,23 +687,32 @@ fn key_bar(viewer: Rc<Viewer>, latch: Latch) -> impl IntoElement {
                         .flex_row()
                         .items_center()
                         .px(px(4.0))
-                        .child(each(move || keys.get(), |id| id.clone(), move |id, _| bar_item(&id.get_untracked(), viewer.clone(), latch)))
-                        .child(bar_key("⌄", dismiss_keyboard)),
+                        .child(each(move || keys.get(), |id| id.clone(), move |id, _| bar_item(&id.get_untracked(), viewer.clone(), latch))),
                 ),
         )
+        .child(view().w(px(1.0)).h(px(24.0)).bg(theme::BORDER))
+        .child(bar_key("⌄", dismiss_keyboard))
+}
+
+/// Keys that type again while held.
+fn repeats(key: Key) -> bool {
+    matches!(key, Key::Left | Key::Right | Key::Up | Key::Down | Key::Delete | Key::PageUp | Key::PageDown | Key::Backspace)
 }
 
 /// Key `id` of the bar (Settings, Key bar), as it does.
 fn bar_item(id: &str, viewer: Rc<Viewer>, latch: Latch) -> View {
     let Some((shows, does)) = keybar::find(id) else { return view() };
-    let sticky = |on: Signal<bool>| bar_key(shows, move || on.update(|v| *v = !*v)).bg(move || if on.get() { theme::now(theme::SELECTED) } else { Hsla::transparent_black() });
     match does {
+        Does::Key(key) if repeats(key) => repeating_key(shows, move || {
+            let mods = latch.take();
+            viewer.key(key, mods);
+        }),
         Does::Key(key) => bar_key(shows, move || {
             let mods = latch.take();
             viewer.key(key, mods);
         }),
-        Does::Ctrl => sticky(latch.ctrl),
-        Does::Alt => sticky(latch.alt),
+        Does::Ctrl => sticky_key(shows, latch.ctrl),
+        Does::Alt => sticky_key(shows, latch.alt),
         Does::Text => bar_key(shows, move || send_text(&viewer, latch, shows)),
         Does::Paste => bar_key(t!("Paste"), move || {
             let viewer = viewer.clone();
@@ -695,10 +726,11 @@ fn bar_item(id: &str, viewer: Rc<Viewer>, latch: Latch) -> View {
     }
 }
 
-fn bar_key(label: &'static str, press: impl Fn() + 'static) -> View {
+/// A key's face: what it shows, in `ink`.
+fn key_face(label: &'static str, ink: impl Fn() -> Hsla + 'static) -> View {
     view()
-        .min_w(px(40.0))
-        .h(px(32.0))
+        .min_w(px(42.0))
+        .h(px(36.0))
         .px(px(8.0))
         .mx(px(1.0))
         .rounded(px(6.0))
@@ -707,8 +739,82 @@ fn bar_key(label: &'static str, press: impl Fn() + 'static) -> View {
         .active(|s| s.bg(theme::HOVER))
         .role(AccessibilityRole::Button)
         .label(keybar::spoken(label))
-        .on_press(press)
-        .child(text(label).text_size(px(14.0)).font_family(theme::MONO).text_color(theme::FOREGROUND))
+        // The ends' signs are thin in the terminal's font: drawn as glyphs.
+        .child(match label {
+            "↵" => ui::glyph("corner-down-left", 18.0, theme::FOREGROUND).into_element(),
+            "⌄" => ui::glyph("chevron-down", 18.0, theme::FOREGROUND).into_element(),
+            _ => text(label).text_size(px(14.0)).font_family(theme::MONO).text_color(ink).into_element(),
+        })
+}
+
+fn bar_key(label: &'static str, press: impl Fn() + 'static) -> View {
+    key_face(label, || theme::now(theme::FOREGROUND)).on_press(press)
+}
+
+/// A key that types again and again while held (an arrow through a line).
+fn repeating_key(label: &'static str, press: impl Fn() + 'static) -> View {
+    let press = Rc::new(press);
+    // Which hold is going (a new touch ends the one before), and whether
+    // this touch repeated (its press is then not one more).
+    let (turn, repeated) = (stored(0u32), stored(false));
+    let (tap, hold) = (press.clone(), press);
+    key_face(label, || theme::now(theme::FOREGROUND))
+        .on_press_down(move || {
+            turn.replace(turn.get().wrapping_add(1));
+            repeated.replace(false);
+        })
+        .on_press_up(move || {
+            turn.replace(turn.get().wrapping_add(1));
+        })
+        .on_press(move || {
+            if !repeated.replace(false) {
+                tap();
+            }
+        })
+        .long_press_delay(REPEAT_AFTER.as_millis() as f32)
+        .on_long_press(move || {
+            repeated.replace(true);
+            let (mine, hold) = (turn.get(), hold.clone());
+            spawn(async move {
+                // At most a while: a lost finger doesn't type forever.
+                for _ in 0..400 {
+                    if turn.get() != mine {
+                        break;
+                    }
+                    hold();
+                    timer(REPEAT_EVERY).await;
+                }
+            });
+        })
+}
+
+/// Ctrl or Alt: a tap holds it for the next key, a second tap at once
+/// until tapped again.
+fn sticky_key(label: &'static str, hold: Signal<Hold>) -> View {
+    let last = stored(None::<std::time::Instant>);
+    key_face(label, move || match hold.get() {
+        Hold::Off => theme::now(theme::FOREGROUND),
+        Hold::Once => theme::now(theme::ACCENT),
+        Hold::Locked => theme::now(theme::ACCENT_FOREGROUND),
+    })
+    .bg(move || match hold.get() {
+        Hold::Off => Hsla::transparent_black(),
+        Hold::Once => theme::now(theme::SELECTED),
+        Hold::Locked => theme::now(theme::ACCENT),
+    })
+    .border_1()
+    .border_color(move || if hold.get() == Hold::Once { theme::now(theme::ACCENT) } else { Hsla::transparent_black() })
+    .accessibility_state(move || AccessibilityState { selected: hold.get() != Hold::Off, ..Default::default() })
+    .on_press(move || {
+        let quick = last.replace(Some(std::time::Instant::now())).is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(400));
+        hold.update(|h| {
+            *h = match (*h, quick) {
+                (Hold::Off, _) => Hold::Once,
+                (Hold::Once, true) => Hold::Locked,
+                _ => Hold::Off,
+            }
+        });
+    })
 }
 
 /// The screen as drawing operations: backgrounds, then text, then the

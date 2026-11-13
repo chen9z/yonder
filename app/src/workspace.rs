@@ -7,7 +7,7 @@ use crate::live::{waits_on, Live};
 use crate::nav::{self, Route};
 use crate::terminal::{terminal, Swipes};
 use crate::{agents, menu, theme, ui};
-use herdc_engine::{rects, Link, PaneView, Rect, TabView};
+use herdc_engine::{rects, AgentView, Link, PaneView, Rect, TabView};
 use nsh_core::prelude::*;
 
 /// Wide enough to show a tab's split.
@@ -27,19 +27,26 @@ pub fn workspace_page(live: Live) -> impl IntoElement {
         .pl(move || safe_area().left)
         .pr(move || safe_area().right)
         .child(header(live.clone(), space, tab, more_open))
-        .child(link_banner(live.clone()))
+        .child(tab_strip(live.clone()))
         .child(
             // Above the keyboard: a terminal typed in fits what is left.
-            view().flex_1().pb(ui::bottom_inset).child(
-                when(move || tab.with(Option::is_some), {
-                    let live = live.clone();
-                    move || panes(live.clone(), tab)
-                })
-                .otherwise({
-                    let live = live.clone();
-                    move || empty(live.clone())
-                }),
-            ),
+            view()
+                .flex_1()
+                .pb(ui::bottom_inset)
+                .child(
+                    when(move || tab.with(Option::is_some), {
+                        let live = live.clone();
+                        move || panes(live.clone(), tab)
+                    })
+                    .otherwise({
+                        let live = live.clone();
+                        move || empty(live.clone())
+                    }),
+                )
+                // Over the panes, not above them: coming and going, it
+                // would resize every terminal shown (and the desktop's).
+                .child(view().absolute().top(px(0.0)).left(px(0.0)).right(px(0.0)).pointer_events(PointerEvents::BoxNone).child(link_banner(live.clone())))
+                .child(tab_said(live.clone())),
         )
         .child(menu::more_sheet(live.clone(), more_open))
 }
@@ -51,13 +58,15 @@ fn header(
     more_open: Signal<bool>,
 ) -> impl IntoElement {
     let world = live.view;
-    // Agents elsewhere that need you or are done: said on the way back.
-    let waiting = computed(move || world.with(|v| v.agents.iter().filter(|a| matches!(a.status, "blocked" | "done") && v.active_space().is_none_or(|s| s.id != a.space)).count()));
+    let prefs = use_context::<crate::prefs::Prefs>().unwrap();
+    // Agents elsewhere that need you, else that are done: said on the way
+    // back, in the color of what they are.
+    let waiting = computed(move || world.with(|v| waiting_elsewhere(v)));
     ui::top_bar()
         .child(
             view()
                 .child(ui::icon_button("‹", t!("Spaces and agents"), nav::home).pr(px(4.0)))
-                .child(when(move || waiting.get() > 0, move || {
+                .child(when(move || waiting.get().0 > 0, move || {
                     view()
                         .absolute()
                         .top(px(4.0))
@@ -66,33 +75,29 @@ fn header(
                         .h(px(16.0))
                         .px(px(4.0))
                         .rounded(px(8.0))
-                        .bg(theme::BLOCKED)
+                        .bg(move || theme::now(theme::status(waiting.get().1)))
                         .items_center()
                         .justify_center()
                         .pointer_events(PointerEvents::None)
-                        .child(text(move || waiting.get().to_string()).text_size(px(10.0)).text_color(rgb(0xffffff)))
+                        .child(text(move || waiting.get().0.to_string()).text_size(px(10.0)).text_color(rgb(0xffffff)))
                 })),
         )
         .child(
             view()
                 .flex_1()
                 .gap(px(1.0))
-                .on_press(nav::home)
+                .role(AccessibilityRole::Button)
+                .label(t!("Switch space"))
+                .on_press({
+                    let live = live.clone();
+                    move || switch_space(live.clone(), prefs)
+                })
                 .on_long_press({
                     let live = live.clone();
                     move || {
-                        let Some(id) = tab.with(|t| t.as_ref().map(|t| t.id.clone())) else { return };
-                        let live = live.clone();
-                        spawn(async move {
-                            let picked = ui::choose(t!("Tab"), &[("rename", t!("Rename")), ("settle", t!("Put away")), ("close", t!("Close"))]).await;
-                            let command = match picked.as_deref() {
-                                Some("rename") => "tab.rename",
-                                Some("settle") => "tab.settle",
-                                Some("close") => "tab.close",
-                                _ => return,
-                            };
-                            live.run(command, serde_json::json!({ "id": id }));
-                        });
+                        if let Some(id) = tab.with(|t| t.as_ref().map(|t| t.id.clone())) {
+                            tab_menu(live.clone(), id);
+                        }
                     }
                 })
                 .child(
@@ -113,7 +118,6 @@ fn header(
                     text({
                         // A machine's space says which, before the computer it's reached through.
                         let id = live.computer.id();
-                        let prefs = use_context::<crate::prefs::Prefs>().unwrap();
                         let computer = live.computer.name.clone();
                         move || {
                         let machine = world.with(|v| v.active_space().and_then(|s| s.machine.clone())).map_or(computer.clone(), |m| format!("{} · {computer}", prefs.machine_name(&id, &m)));
@@ -124,11 +128,219 @@ fn header(
                     .number_of_lines(1),
                 ),
         )
-        .child(ui::icon_button("+", t!("New tab"), move || live.run("tab.new", serde_json::json!({}))))
+        // The new-menu: a terminal, an agent, a space or a worktree.
+        .child(ui::icon_button("+", t!("New"), {
+            let live = live.clone();
+            move || {
+                dismiss_keyboard();
+                spawn(crate::palette::new_terminal(live.clone()));
+            }
+        }))
         .child(ui::icon_button("⋯", t!("More"), move || {
             dismiss_keyboard();
             more_open.set(true)
         }))
+}
+
+/// How many agents in other spaces wait for the person, and what they
+/// wait as: needing you before done.
+fn waiting_elsewhere(v: &herdc_engine::View) -> (usize, &'static str) {
+    let elsewhere = |a: &&AgentView| v.active_space().is_none_or(|s| s.id != a.space);
+    let count = |status: &str| v.agents.iter().filter(elsewhere).filter(|a| a.status == status).count();
+    match count("blocked") {
+        0 => (count("done"), "done"),
+        blocked => (blocked, "blocked"),
+    }
+}
+
+/// A tab's menu, as the desktop's tab bar offers it.
+fn tab_menu(live: Live, id: String) {
+    spawn(async move {
+        let picked = ui::choose(t!("Tab"), &[("rename", t!("Rename")), ("settle", t!("Put away")), ("close", t!("Close"))]).await;
+        let command = match picked.as_deref() {
+            Some("rename") => "tab.rename",
+            Some("settle") => "tab.settle",
+            Some("close") => "tab.close",
+            _ => return,
+        };
+        live.run(command, serde_json::json!({ "id": id }));
+    });
+}
+
+/// The spaces to go to, from the title: this computer's first, the shown
+/// one checked; or all of them, at home.
+fn switch_space(live: Live, prefs: crate::prefs::Prefs) {
+    let computer = live.computer.id();
+    let mut spaces: Vec<(bool, String, String, String)> = live.view.with_untracked(|v| {
+        v.spaces
+            .iter()
+            .map(|s| {
+                let machine = s.machine.as_deref().map(|m| prefs.machine_name(&computer, m)).unwrap_or_default();
+                let mut name = if machine.is_empty() { s.name.clone() } else { format!("{} · {machine}", s.name) };
+                if s.active {
+                    name.push_str(" ✓");
+                }
+                (s.machine.is_some(), machine, s.id.clone(), name)
+            })
+            .collect()
+    });
+    spaces.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
+    spawn(async move {
+        let mut actions: Vec<(&str, &str)> = spaces.iter().map(|(_, _, id, name)| (id.as_str(), name.as_str())).collect();
+        actions.push(("\0home", t!("All spaces and agents")));
+        match ui::choose(t!("Spaces"), &actions).await.as_deref() {
+            Some("\0home") => nav::home(),
+            Some(id) => live.run("space.select", serde_json::json!({ "id": id })),
+            None => {}
+        }
+    });
+}
+
+/// A tab as the strip shows it.
+#[derive(Clone, Debug, PartialEq)]
+struct TabChip {
+    id: String,
+    label: String,
+    status: Option<&'static str>,
+    active: bool,
+}
+
+/// The tabs the space shows (a tab put away, unless it is the shown one).
+fn shown_tabs(v: &herdc_engine::View) -> Vec<&TabView> {
+    v.active_space().map(|s| s.tabs.iter().filter(|t| !t.settled || t.active).collect()).unwrap_or_default()
+}
+
+/// The space's tabs, while it has more than one: a tap shows one, a hold
+/// offers its menu. The shown one is kept in view.
+fn tab_strip(live: Live) -> impl IntoElement {
+    let world = live.view;
+    let tabs = computed(move || world.with(|v| shown_tabs(v).into_iter().map(|t| TabChip { id: t.id.clone(), label: label(t), status: t.status, active: t.active }).collect::<Vec<_>>()));
+    when(move || tabs.with(|t| t.len() > 1), move || {
+        let live = live.clone();
+        let strip = element_ref();
+        // Where each chip is along the strip, to bring the shown one in.
+        let at = stored(std::collections::HashMap::<String, f32>::new());
+        let width = stored(0.0f32);
+        let active = computed(move || tabs.with(|t| t.iter().find(|t| t.active).map(|t| t.id.clone())));
+        // Brought in once each time another is shown (when it is laid out,
+        // if not yet): a strip scrolled by hand stays where it was put.
+        let pending = stored(false);
+        let bring = move || {
+            if !pending.get() {
+                return;
+            }
+            if let Some(x) = active.with_untracked(|a| a.as_ref().and_then(|a| at.with(|at| at.get(a).copied()))) {
+                pending.replace(false);
+                strip.scroll_to(point(px((x - width.get() / 3.0).max(0.0)), px(0.0)), true);
+            }
+        };
+        effect(move || {
+            active.with(|_| ());
+            pending.replace(true);
+            bring();
+        });
+        scroll()
+            .horizontal()
+            .scrollbar(false)
+            .element_ref(&strip)
+            .on_layout(move |b: &Bounds<Points>| { width.replace(b.size.width.0); })
+            .bg(theme::CHROME)
+            .border_b_1()
+            .border_color(theme::BORDER)
+            .child(view().flex_row().items_center().px(px(6.0)).h(px(40.0)).gap(px(2.0)).child(each(
+                move || tabs.get(),
+                |t| t.id.clone(),
+                move |t, _| {
+                    let (press, hold) = (live.clone(), live.clone());
+                    let id = t.with_untracked(|t| t.id.clone());
+                    view()
+                        .on_layout(move |b: &Bounds<Points>| {
+                            at.with(|at| at.insert(id.clone(), b.origin.x.0));
+                            bring();
+                        })
+                        .flex_row()
+                        .items_center()
+                        .gap(px(6.0))
+                        .h(px(34.0))
+                        .px(px(12.0))
+                        .rounded(px(8.0))
+                        .bg(move || if t.with(|t| t.active) { theme::now(theme::SELECTED) } else { Hsla::transparent_black() })
+                        .active(|s| s.bg(theme::HOVER))
+                        .role(AccessibilityRole::Tab)
+                        .label(move || t.with(|t| t.label.clone()))
+                        .accessibility_state(move || AccessibilityState { selected: t.with(|t| t.active), ..Default::default() })
+                        .on_press(move || {
+                            let t = t.get_untracked();
+                            if !t.active {
+                                press.run("tab.select", serde_json::json!({ "id": t.id }));
+                            }
+                        })
+                        .on_long_press(move || tab_menu(hold.clone(), t.with_untracked(|t| t.id.clone())))
+                        .child(ui::tab_status(move || t.with(|t| t.status)))
+                        .child(
+                            text(move || t.with(|t| t.label.clone()))
+                                .max_w(px(180.0))
+                                .number_of_lines(1)
+                                .text_size(px(13.0))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(move || if t.with(|t| t.active) { theme::now(theme::FOREGROUND) } else { theme::now(theme::MUTED) }),
+                        )
+                },
+            )))
+    })
+}
+
+/// Said a moment when the shown tab changes (a swipe says nothing else):
+/// which of how many, and its name.
+fn tab_said(live: Live) -> impl IntoElement {
+    let world = live.view;
+    let now = computed(move || {
+        world.with(|v| {
+            let tabs = shown_tabs(v);
+            let at = tabs.iter().position(|t| t.active)?;
+            let space = v.active_space()?.id.clone();
+            Some((space, tabs[at].id.clone(), format!("{}/{} · {}", at + 1, tabs.len(), label(tabs[at]))))
+        })
+    });
+    let said = signal(None::<String>);
+    let before = stored(None::<(String, String)>);
+    let turn = stored(0u32);
+    // The page's, not the effect's: a rerun must not cancel the one going.
+    let owner = Owner::current();
+    effect(move || {
+        let now = now.get();
+        let was = before.replace(now.as_ref().map(|(s, t, _)| (s.clone(), t.clone())));
+        let Some((space, tab, words)) = now else { return };
+        // Another tab of the same space: not the first look, nor another space.
+        if !was.is_some_and(|(s, t)| s == space && t != tab) {
+            return;
+        }
+        let mine = turn.get().wrapping_add(1);
+        turn.replace(mine);
+        said.set(Some(words));
+        owner.run(|| set_timeout(std::time::Duration::from_millis(1200), move || if turn.get() == mine { said.set(None) }));
+    });
+    when(move || said.with(Option::is_some), move || {
+        view()
+            .absolute()
+            .top(px(12.0))
+            .left(px(0.0))
+            .right(px(0.0))
+            .items_center()
+            .pointer_events(PointerEvents::None)
+            .child(
+                view()
+                    .px(px(14.0))
+                    .h(px(32.0))
+                    .justify_center()
+                    .rounded(px(16.0))
+                    .bg(theme::POPOVER)
+                    .border_1()
+                    .border_color(theme::BORDER)
+                    .shadow_lg()
+                    .child(text(move || said.get().unwrap_or_default()).text_size(px(13.0)).text_color(theme::FOREGROUND).number_of_lines(1).max_w(px(280.0))),
+            )
+    })
 }
 
 /// Said while the core is out of reach; a password refused is asked for
@@ -449,8 +661,10 @@ fn empty(live: Live) -> impl IntoElement {
         }))
 }
 
-/// Toasts over the page: newest at the bottom; a tap runs what they offer.
-/// A waiting agent has a reminder until it is shown or no longer blocked.
+/// Toasts over the page: newest at the bottom, the last two of them (the
+/// rest a tap away); a tap runs what they offer. While typing they are
+/// at the top, clear of the line typed in. A waiting agent has a reminder
+/// until it is shown or no longer blocked.
 pub fn notes(live: Live) -> impl IntoElement {
     let (all, world) = (live.notes, live.view);
     let notes = computed(move || {
@@ -460,59 +674,78 @@ pub fn notes(live: Live) -> impl IntoElement {
             all.with(|all| all.iter().filter(|(_, n)| waits_on(n).is_none_or(|a| waiting(&a) && shown.as_ref() != Some(&a))).cloned().collect::<Vec<_>>())
         })
     });
-    view()
-        .absolute()
-        .left(px(12.0))
-        .right(px(12.0))
-        .bottom(move || ui::bottom_inset() + px(56.0))
-        .gap(px(8.0))
-        .pointer_events(PointerEvents::BoxNone)
-        .child(each(
-            move || notes.get(),
-            |(id, _)| *id,
-            move |n, _| {
-                let live = live.clone();
+    let all_shown = signal(false);
+    let shown = computed(move || notes.with(|n| if all_shown.get() || n.len() <= SHOWN_NOTES { n.clone() } else { n[n.len() - SHOWN_NOTES..].to_vec() }));
+    let hidden = computed(move || notes.with(Vec::len) - shown.with(Vec::len));
+    let typing = computed(|| keyboard_height().0 > 0.0);
+    dynamic(move || {
+        let stack = view().absolute().left(px(12.0)).right(px(12.0)).gap(px(8.0)).pointer_events(PointerEvents::BoxNone);
+        let stack = if typing.get() { stack.top(move || px(safe_area().top.0 + 56.0)) } else { stack.bottom(move || ui::bottom_inset() + px(56.0)) };
+        let live = live.clone();
+        stack
+            .child(when(move || hidden.get() > 0 || (all_shown.get() && notes.with(Vec::len) > SHOWN_NOTES), move || {
                 view()
-                    .px(px(14.0))
-                    .py(px(10.0))
-                    .rounded(px(12.0))
+                    .self_end()
+                    .px(px(12.0))
+                    .h(px(32.0))
+                    .justify_center()
+                    .rounded(px(16.0))
                     .bg(theme::POPOVER)
                     .border_1()
-                    .border_color(move || if n.with(|n| n.1.level == "error") { theme::now(theme::BLOCKED) } else { theme::now(theme::BORDER) })
-                    .shadow_lg()
-                    .gap(px(8.0))
-                    .child(
-                        view()
-                            .flex_row()
-                            .items_start()
-                            .child(
-                                view()
-                                    .flex_1()
-                                    .on_press({
-                                        let live = live.clone();
-                                        move || {
-                                            let (id, note) = n.get_untracked();
-                                            if let Some(action) = note.action {
-                                                live.run(&action.name, action.args);
-                                            }
-                                            live.notes.update(|all| all.retain(|(i, _)| *i != id));
-                                        }
-                                    })
-                                    .child(text(move || n.with(|n| n.1.title.clone())).text_size(px(14.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::FOREGROUND))
-                                    .child(text(move || n.with(|n| n.1.body.clone().unwrap_or_default())).text_size(px(13.0)).text_color(theme::MUTED).number_of_lines(3)),
-                            )
-                            .child({
-                                let notes = live.notes;
-                                ui::icon_button("✕", t!("Not now"), move || {
-                                    let id = n.with_untracked(|n| n.0);
-                                    notes.update(|all| all.retain(|(i, _)| *i != id));
-                                })
-                                .w(px(36.0))
-                                .h(px(36.0))
-                                .mt(px(-6.0))
-                                .mr(px(-8.0))
-                            }),
-                    )
-            },
-        ))
+                    .border_color(theme::BORDER)
+                    .active(|s| s.bg(theme::HOVER))
+                    .role(AccessibilityRole::Button)
+                    .on_press(move || all_shown.update(|a| *a = !*a))
+                    .child(text(move || if hidden.get() > 0 { t!("{} more", hidden.get()) } else { t!("Fewer").to_owned() }).text_size(px(13.0)).text_color(theme::MUTED))
+            }))
+            .child(each(move || shown.get(), |(id, _)| *id, move |n, _| note(live.clone(), n)))
+            .into_element()
+    })
+}
+
+/// How many notes show at once.
+const SHOWN_NOTES: usize = 2;
+
+fn note(live: Live, n: ReadSignal<(u64, herdc_engine::Note)>) -> impl IntoElement {
+    view()
+        .px(px(14.0))
+        .py(px(10.0))
+        .rounded(px(12.0))
+        .bg(theme::POPOVER)
+        .border_1()
+        .border_color(move || if n.with(|n| n.1.level == "error") { theme::now(theme::BLOCKED) } else { theme::now(theme::BORDER) })
+        .shadow_lg()
+        .gap(px(8.0))
+        .child(
+            view()
+                .flex_row()
+                .items_start()
+                .child(
+                    view()
+                        .flex_1()
+                        .on_press({
+                            let live = live.clone();
+                            move || {
+                                let (id, note) = n.get_untracked();
+                                if let Some(action) = note.action {
+                                    live.run(&action.name, action.args);
+                                }
+                                live.notes.update(|all| all.retain(|(i, _)| *i != id));
+                            }
+                        })
+                        .child(text(move || n.with(|n| n.1.title.clone())).text_size(px(14.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::FOREGROUND))
+                        .child(text(move || n.with(|n| n.1.body.clone().unwrap_or_default())).text_size(px(13.0)).text_color(theme::MUTED).number_of_lines(3)),
+                )
+                .child({
+                    let notes = live.notes;
+                    ui::icon_button("✕", t!("Not now"), move || {
+                        let id = n.with_untracked(|n| n.0);
+                        notes.update(|all| all.retain(|(i, _)| *i != id));
+                    })
+                    .w(px(36.0))
+                    .h(px(36.0))
+                    .mt(px(-6.0))
+                    .mr(px(-8.0))
+                }),
+        )
 }

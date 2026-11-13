@@ -24,7 +24,13 @@ struct Group {
 pub fn home_page(live: Live) -> impl IntoElement {
     let show_spaces = use_context::<crate::prefs::Prefs>().unwrap().home_spaces;
     let world = live.view;
-    let blocked = computed(move || world.with(|v| v.agents.iter().filter(|a| a.status == "blocked").count()));
+    // Agents that need you, else that are done, in the color of what they are.
+    let waiting = computed(move || {
+        world.with(|v| match v.agents.iter().filter(|a| a.status == "blocked").count() {
+            0 => (v.agents.iter().filter(|a| a.status == "done").count(), "done"),
+            blocked => (blocked, "blocked"),
+        })
+    });
     let spaces_live = live.clone();
     view()
         .flex_1()
@@ -42,16 +48,17 @@ pub fn home_page(live: Live) -> impl IntoElement {
             view().items_center().pt(px(4.0)).pb(move || ui::bottom_inset() + px(6.0)).child(
                 view().flex_row().p(px(4.0)).rounded(px(32.0)).bg(theme::RAISED)
                     .border_1().border_color(theme::BORDER)
-                    .child(home_tab(t!("Agents"), "inbox", show_spaces, false, Some(blocked)))
+                    .child(home_tab(t!("Agents"), "inbox", show_spaces, false, Some(waiting)))
                     .child(home_tab(t!("Spaces"), "spaces", show_spaces, true, None)),
             ),
         )
 }
 
-fn home_tab(label: &'static str, icon: &'static str, show_spaces: Signal<bool>, spaces: bool, badge: Option<Memo<usize>>) -> impl IntoElement {
+fn home_tab(label: &'static str, icon: &'static str, show_spaces: Signal<bool>, spaces: bool, badge: Option<Memo<(usize, &'static str)>>) -> impl IntoElement {
     let active = move || show_spaces.get() == spaces;
     let ink = move || if active() { theme::ACCENT } else { theme::MUTED };
-    let count = move || badge.map_or(0, |b| b.get());
+    let count = move || badge.map_or(0, |b| b.get().0);
+    let color = move || badge.map_or(theme::BLOCKED, |b| theme::status(b.get().1));
     view().w(px(88.0)).h(px(50.0)).rounded(px(25.0))
         .items_center().justify_center().gap(px(2.0))
         .role(AccessibilityRole::Tab)
@@ -63,7 +70,7 @@ fn home_tab(label: &'static str, icon: &'static str, show_spaces: Signal<bool>, 
         .child(text(label).text_size(px(11.0)).font_weight(FontWeight::MEDIUM).text_color(move || theme::now(ink())))
         .child(when(move || count() > 0, move || {
             view().absolute().left(px(53.0)).top(px(1.0)).rounded(px(9.0)).min_w(px(16.0)).h(px(16.0))
-                .px(px(3.0)).items_center().justify_center().bg(theme::BLOCKED).pointer_events(PointerEvents::None)
+                .px(px(3.0)).items_center().justify_center().bg(move || theme::now(color())).pointer_events(PointerEvents::None)
                 .child(text(move || count().to_string()).text_size(px(10.0)).text_color(theme::SOLID_FOREGROUND))
         }))
 }
@@ -175,6 +182,8 @@ fn spaces(live: Live) -> impl IntoElement {
                 let open = computed(move || !(several.get() && folded.with(|set| g.with(|g| set.contains(&g.key)))));
                 let computer = computer.clone();
                 let (empty, add) = (live.clone(), live.clone());
+                // The space being dragged, and by how many rows: the others make room.
+                let drag = signal(None::<(String, isize)>);
                 view()
                     .child(when(move || several.get(), move || machine_heading(add.clone(), g, folded)))
                     .child(each(
@@ -182,7 +191,7 @@ fn spaces(live: Live) -> impl IntoElement {
                         |s| s.id.clone(),
                         move |s, _| {
                             let key = format!("{computer}\u{0}{}", s.with_untracked(|s| s.id.clone()));
-                            space_row(live.clone(), s, g, move || colors.with(|c| c.get(&key).copied().unwrap_or(0)))
+                            space_row(live.clone(), s, g, drag, move || colors.with(|c| c.get(&key).copied().unwrap_or(0)))
                         },
                     ))
                     // A machine without spaces: loading them, else the way to make one.
@@ -224,7 +233,7 @@ fn machine_heading(live: Live, g: ReadSignal<Group>, folded: Signal<Vec<String>>
         .mx(px(8.0))
         .pl(px(10.0))
         .pr(px(4.0))
-        .h(px(40.0))
+        .h(px(44.0))
         .rounded(px(8.0))
         .active(|s| s.bg(theme::HOVER))
         .role(AccessibilityRole::Button)
@@ -248,8 +257,8 @@ fn machine_heading(live: Live, g: ReadSignal<Group>, folded: Signal<Vec<String>>
         .child(when(move || connected.get(), move || {
             let live = live.clone();
             view()
-                .w(px(32.0))
-                .h(px(32.0))
+                .w(px(40.0))
+                .h(px(40.0))
                 .rounded(px(8.0))
                 .items_center()
                 .justify_center()
@@ -266,14 +275,29 @@ fn machine_heading(live: Live, g: ReadSignal<Group>, folded: Signal<Vec<String>>
         .child(dynamic(move || ui::glyph(if is_folded.get() { "chevron-right" } else { "chevron-down" }, 13.0, theme::DIM).mx(px(6.0)).into_element()))
 }
 
-fn space_row(live: Live, s: ReadSignal<SpaceView>, g: ReadSignal<Group>, color: impl Fn() -> usize + 'static) -> impl IntoElement {
+fn space_row(live: Live, s: ReadSignal<SpaceView>, g: ReadSignal<Group>, drag: Signal<Option<(String, isize)>>, color: impl Fn() -> usize + 'static) -> impl IntoElement {
     let (press, hold) = (live.clone(), live.clone());
     // How far its handle is dragged, and a row's height to count rows by.
     let dragged = signal(0.0f32);
     let tall = stored(48.0f32);
+    // Another being dragged past it: a row up or down, to make its room.
+    let room = move || {
+        drag.with(|d| {
+            let (other, rows) = d.as_ref()?;
+            let me = s.with(|s| s.id.clone());
+            g.with(|g| {
+                let from = g.spaces.iter().position(|o| o.id == *other)? as isize;
+                let at = g.spaces.iter().position(|o| o.id == me)? as isize;
+                let to = (from + rows).clamp(0, g.spaces.len() as isize - 1);
+                Some(if from < at && at <= to { -1.0 } else if to <= at && at < from { 1.0 } else { 0.0 })
+            })
+        })
+        .unwrap_or(0.0)
+    };
+    let rows = move |by: f32| (by / tall.get().max(1.0)).round() as isize;
     view()
         .on_layout(move |b: &Bounds<Points>| { tall.replace(b.size.height.0); })
-        .translate_y(move || px(dragged.get()))
+        .translate_y(move || px(if dragged.get() != 0.0 { dragged.get() } else { room() * tall.get() }))
         .z_index(move || i32::from(dragged.get() != 0.0))
         .flex_row()
         .items_center()
@@ -292,17 +316,39 @@ fn space_row(live: Live, s: ReadSignal<SpaceView>, g: ReadSignal<Group>, color: 
             let (live, space) = (hold.clone(), s.get_untracked());
             let (id, place) = (space.id.clone(), Place { on: space.machine.clone(), folder: space.place() });
             spawn(async move {
-                // The desktop's space menu: worktrees where the folder is in git.
+                // The desktop's space menu: worktrees where the folder is in
+                // git. Asking git takes a while on another machine: known
+                // from before, or briefly waited for, else the menu shows at
+                // once with what may be (the pages say when it isn't git).
+                let known = match worktrees::known_kind(&place) {
+                    Some(kind) => Some(kind),
+                    None => {
+                        let mut looked = std::pin::pin!(worktrees::kind(&live, &place));
+                        let mut waited = std::pin::pin!(timer(std::time::Duration::from_millis(350)));
+                        let found = std::future::poll_fn(|cx| match looked.as_mut().poll(cx) {
+                            std::task::Poll::Ready(kind) => std::task::Poll::Ready(Some(kind)),
+                            std::task::Poll::Pending => waited.as_mut().poll(cx).map(|_| None),
+                        })
+                        .await;
+                        if found.is_none() {
+                            // Found for the next time.
+                            let (live, place) = (live.clone(), place.clone());
+                            spawn(async move { worktrees::kind(&live, &place).await; });
+                        }
+                        found
+                    }
+                };
                 let mut actions = vec![("rename", t!("Rename")), ("tab", t!("New tab here"))];
-                match worktrees::kind(&live, &place).await {
-                    Some(linked) => {
+                match known {
+                    Some(Some(linked)) => {
                         actions.extend([("new", t!("New worktree…")), ("open", t!("Open worktree…"))]);
                         if linked {
                             actions.push(("remove", t!("Remove worktree…")));
                         }
                         actions.extend([("files", t!("Files")), ("changes", t!("Changes"))]);
                     }
-                    None => actions.push(("files", t!("Files"))),
+                    Some(None) => actions.push(("files", t!("Files"))),
+                    None => actions.extend([("open", t!("Worktrees…")), ("files", t!("Files")), ("changes", t!("Changes"))]),
                 }
                 actions.push(("close", t!("Close")));
                 match ui::choose(&space.name, &actions).await.as_deref() {
@@ -332,10 +378,21 @@ fn space_row(live: Live, s: ReadSignal<SpaceView>, g: ReadSignal<Group>, color: 
                 .role(AccessibilityRole::Adjustable)
                 .label(move || t!("Move {}", s.with(|s| s.name.clone())))
                 .claim_touches(TouchClaim::on_start())
-                .on_responder_move(move |e: &ResponderEvent| dragged.set(e.gesture.delta.y.0))
-                .on_responder_release(move |_: &ResponderEvent| {
-                    let rows = (dragged.get_untracked() / tall.get().max(1.0)).round() as isize;
+                .on_responder_move(move |e: &ResponderEvent| {
+                    dragged.set(e.gesture.delta.y.0);
+                    let moved = (s.with_untracked(|s| s.id.clone()), rows(e.gesture.delta.y.0));
+                    if drag.with_untracked(|d| d.as_ref() != Some(&moved)) {
+                        drag.set(Some(moved));
+                    }
+                })
+                .on_responder_terminate(move |_: &ResponderEvent| {
                     dragged.set(0.0);
+                    drag.set(None);
+                })
+                .on_responder_release(move |_: &ResponderEvent| {
+                    let rows = rows(dragged.get_untracked());
+                    dragged.set(0.0);
+                    drag.set(None);
                     let id = s.with_untracked(|s| s.id.clone());
                     let to = g.with_untracked(|g| {
                         let from = g.spaces.iter().position(|o| o.id == id)?;

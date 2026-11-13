@@ -279,6 +279,18 @@ pub async fn confirm(title: &str, message: &str, yes: &str) -> bool {
     answer.ok().and_then(|a| a.action).is_some_and(|a| a == "yes")
 }
 
+/// Asks yes or no where yes loses nothing (trusting, going on); true for yes.
+pub async fn agree(title: &str, message: &str, yes: &str) -> bool {
+    let answer = alert_dialog()
+        .title(title.to_owned())
+        .description(message.to_owned())
+        .cancel("no", t!("Cancel"))
+        .action("yes", yes.to_owned())
+        .show()
+        .await;
+    answer.ok().and_then(|a| a.action).is_some_and(|a| a == "yes")
+}
+
 /// Picks one of `actions` (id, label) from a sheet.
 pub async fn choose(title: &str, actions: &[(&str, &str)]) -> Option<String> {
     let mut sheet = alert_dialog().title(title.to_owned()).action_sheet().cancel("cancel", t!("Cancel"));

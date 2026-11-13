@@ -255,6 +255,18 @@ impl Viewer {
         }
     }
 
+    /// A tap at a cell: a click for a program that asked for the mouse
+    /// (true), else nothing.
+    pub fn click(&self, col: u16, row: u16) -> bool {
+        match self.with_screen(|s| herdc_term::keys::click(col, row, s.modes())) {
+            Some(bytes) => {
+                self.input(&bytes);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// How long since this screen typed or scrolled: what changes soon
     /// after is the answer, drawn at once.
     pub fn idle(&self) -> Duration {

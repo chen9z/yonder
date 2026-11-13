@@ -56,6 +56,7 @@ pub fn changes_page(live: Live, place: Place) -> Screen {
             }
         });
     }
+    let pulled_scan = rescan.clone();
     let commit = {
         let (live, place) = (live.clone(), place.clone());
         move || {
@@ -80,6 +81,19 @@ pub fn changes_page(live: Live, place: Place) -> Screen {
         }
     };
     let files = computed(move || found.with(|c| c.as_ref().map_or(0, |c| c.files.len())));
+    // Pulled down, read again now rather than in up to 10 s.
+    let refreshing = signal(false);
+    let pulled = {
+        let rescan = pulled_scan;
+        move || {
+            refreshing.set(true);
+            let rescan = rescan.clone();
+            spawn(async move {
+                rescan().await;
+                refreshing.set(false);
+            });
+        }
+    };
     ui::page(t!("Changes"))
         .header_right(
             text(move || found.with(|c| c.as_ref().map(|c| format!("+{}  −{}", c.added(), c.deleted())).unwrap_or_default()))
@@ -131,6 +145,8 @@ pub fn changes_page(live: Live, place: Place) -> Screen {
                             .child(count(move || file().map_or(0, |f| f.del), "−", theme::REMOVED))
                     })
                     .estimated_item_size(px(48.0))
+                    .refreshing(move || refreshing.get())
+                    .on_refresh(pulled)
                     .empty(
                         view().p(px(32.0)).items_center().child(
                             text(move || match (error.get(), found.with(Option::is_some)) {
@@ -213,11 +229,30 @@ fn commit_bar(message: Signal<String>, busy: Signal<bool>, commit: impl Fn() + C
         )
 }
 
-/// A changed file's diff.
+/// A changed file's diff; the file before or after it a tap away.
 pub fn diff_page(live: Live, place: Place, changes: Arc<Changes>, at: usize) -> Screen {
     let lines = signal(None::<Vec<Line>>);
     let file = changes.files.get(at).cloned();
     let title = file.as_ref().map(|f| f.path.rsplit('/').next().unwrap_or_default().to_owned()).unwrap_or_default();
+    let font = use_context::<crate::prefs::Prefs>().expect("prefs").font.get_untracked();
+    let total = changes.files.len();
+    let step = {
+        let (place, changes) = (place.clone(), changes.clone());
+        move |to: usize| {
+            let (place, changes) = (place.clone(), changes.clone());
+            move || nav::replace(Route::Diff { place: place.clone(), changes: changes.clone(), file: to })
+        }
+    };
+    let turn = |glyph: &'static str, label: &'static str, to: Option<usize>| match to {
+        Some(to) => ui::icon_button(glyph, label, step(to)),
+        None => ui::icon_button(glyph, label, || {}).disabled(true).opacity(0.3),
+    };
+    let header = view()
+        .flex_row()
+        .items_center()
+        .child(text(t!("{} of {}", at + 1, total)).text_size(px(13.0)).text_color(theme::MUTED).mr(px(4.0)))
+        .child(turn("‹", t!("Previous file"), at.checked_sub(1)))
+        .child(turn("›", t!("Next file"), (at + 1 < total).then_some(at + 1)));
     if let Some(file) = file {
         spawn(async move {
             let Ok(there) = live.there(place.on.clone()) else { return lines.set(Some(Vec::new())) };
@@ -227,12 +262,13 @@ pub fn diff_page(live: Live, place: Place, changes: Arc<Changes>, at: usize) -> 
         });
     }
     let count = computed(move || lines.with(|l| l.as_ref().map_or(0, Vec::len)));
-    ui::page(title).child(
+    ui::page(title).header_right(header).child(
         view().flex_1().bg(theme::BACKGROUND).child(
             virtual_list(move || count.get(), move |at| {
                 let line = move || lines.with(|l| l.as_ref().and_then(|l| l.get(at.index()).cloned()));
                 let kind = move || line().map_or(Kind::Other, |l| l.kind);
                 code_line(
+                    font,
                     move || line().and_then(|l| l.number),
                     move || line().map(|l| l.text).unwrap_or_default(),
                     move || match kind() {
@@ -249,7 +285,8 @@ pub fn diff_page(live: Live, place: Place, changes: Arc<Changes>, at: usize) -> 
             })
             .estimated_item_size(px(18.0))
             .empty(view().p(px(32.0)).items_center().child(text(t!("Loading diff…")).text_size(px(15.0)).text_color(theme::MUTED)))
-            .pb(move || px(safe_area().bottom.0))
+            // The last line clears the system's bar.
+            .footer(view().h(move || px(safe_area().bottom.0)))
             .flex_1(),
         ),
     )
