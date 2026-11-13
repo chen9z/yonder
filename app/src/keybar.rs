@@ -137,9 +137,26 @@ pub fn keybar_page() -> nsh_core::element::Screen {
                         },
                     )),
                 )
-                .child(view().px(px(16.0)).pt(px(16.0)).child(ui::ghost_button(t!("As at first"), move || keys.set(at_first())))),
+                .child(ui::action_row(t!("As at first"), ui::Act::Do, move || keys.set(at_first())).mt(px(12.0))),
         ),
     )
+}
+
+/// One of a key's quiet controls; nothing to do (the first one up), faint.
+fn control(icon: &'static str, label: String, ink: AdaptiveColor, idle: impl Fn() -> bool + 'static, press: impl Fn() + 'static) -> View {
+    view()
+        .w(px(40.0))
+        .h(px(40.0))
+        .rounded(px(10.0))
+        .items_center()
+        .justify_center()
+        .active(|s| s.bg(theme::HOVER))
+        .role(AccessibilityRole::Button)
+        .label(label)
+        .disabled(idle)
+        .disabled_style(|s| s.opacity(0.25))
+        .on_press(press)
+        .child(ui::glyph(icon, 18.0, ink))
 }
 
 /// A key on the bar: earlier, later, off.
@@ -149,6 +166,10 @@ fn on_bar(keys: Signal<Vec<String>>, id: ReadSignal<String>) -> View {
     let at = {
         let id = id.clone();
         move |k: &Vec<String>| k.iter().position(|o| *o == id)
+    };
+    let (first, last) = {
+        let (a, b) = (at.clone(), at.clone());
+        (move || keys.with(|k| a(k) == Some(0)), move || keys.with(|k| b(k).is_some_and(|i| i + 1 == k.len())))
     };
     let step = move |by: isize| {
         let at = at.clone();
@@ -170,7 +191,7 @@ fn on_bar(keys: Signal<Vec<String>>, id: ReadSignal<String>) -> View {
         .min_h(px(48.0))
         .child(text(shows).font_family(theme::MONO).text_size(px(15.0)).text_color(theme::FOREGROUND).w(px(56.0)))
         .child(text(if name == shows { String::new() } else { name.to_owned() }).flex_1().text_size(px(13.0)).text_color(theme::MUTED))
-        .child(ui::icon_button("arrow-up", t!("Earlier"), step(-1)).label(t!("{} earlier", name)))
-        .child(ui::icon_button("arrow-down", t!("Later"), step(1)).label(t!("{} later", name)))
-        .child(ui::icon_button("x", t!("Take off"), move || keys.update(|k| k.retain(|o| *o != id))).label(t!("Take {} off", name)))
+        .child(control("arrow-up", t!("{} earlier", name), theme::MUTED, first, step(-1)))
+        .child(control("arrow-down", t!("{} later", name), theme::MUTED, last, step(1)))
+        .child(control("x", t!("Take {} off", name), theme::DIM, || false, move || keys.update(|k| k.retain(|o| *o != id))))
 }

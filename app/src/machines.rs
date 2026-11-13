@@ -88,6 +88,7 @@ pub fn add_machine_page(live: Live) -> nsh_core::element::Screen {
                     text(t!("Its terminals and spaces show here beside this computer's. The computer dials it over ssh, so it is reached as the computer reaches it."))
                         .px(px(16.0))
                         .pt(px(16.0))
+                        .pb(px(8.0))
                         .text_size(px(14.0))
                         .text_color(theme::MUTED),
                 )
@@ -102,11 +103,19 @@ pub fn add_machine_page(live: Live) -> nsh_core::element::Screen {
                         let shown = name.clone();
                         let live = live.clone();
                         let details = live.clone();
-                        view().child(ui::row(move || prefs.machine_name(&id, &shown), || t!("Added").into())
-                            .child(ui::ghost_button(t!("Rename"), move || {
+                        // A tap renames it, as the config's hosts say Add.
+                        let called = {
+                            let (id, shown) = (id.clone(), shown.clone());
+                            move || prefs.machine_name(&id, &shown)
+                        };
+                        view().child(ui::row(called.clone(), || t!("Added").into())
+                            .role(AccessibilityRole::Button)
+                            .label(move || t!("Rename {}", called()))
+                            .on_press(move || {
                                 let (live, name) = (live.clone(), name.clone());
                                 spawn(async move { prefs.rename_machine(&live, &name).await; });
-                            }))).child(said(details, page, move || target.clone()))
+                            })
+                            .child(text(t!("Rename")).text_size(px(14.0)).text_color(theme::ACCENT))).child(said(details, page, move || target.clone()))
                     }
                 }))
                 .child(ui::heading(move || match page.hosts.with(|h| h.as_ref().map(Vec::len)) {
