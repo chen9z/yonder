@@ -335,6 +335,34 @@ pub fn row(title: impl Fn() -> String + 'static, detail: impl Fn() -> String + '
         )
 }
 
+/// A group's heading over its card, the same on Agents and Spaces: the
+/// fold's chevron, its title in `ink`, how many, then what the caller adds
+/// at its end. A tap folds the group (the caller's `on_press`).
+pub fn group_heading(open: impl Fn() -> bool + 'static, title: impl Fn() -> String + 'static, ink: impl Fn() -> Hsla + 'static, count: impl Fn() -> usize + 'static) -> View {
+    view()
+        .flex_row()
+        .items_center()
+        .gap(px(6.0))
+        .mx(theme::INSET)
+        .mt(px(10.0))
+        .pl(px(10.0))
+        .pr(px(4.0))
+        .h(px(36.0))
+        .rounded(px(8.0))
+        .active(|s| s.bg(theme::HOVER))
+        .role(AccessibilityRole::Button)
+        .child(chevron(open, 12.0))
+        .child(text(title).flex_shrink(1.0).text_size(theme::CAPTION).font_weight(FontWeight::SEMIBOLD).text_color(ink).number_of_lines(1))
+        .child(text(move || count().to_string()).text_size(theme::CAPTION).text_color(theme::DIM))
+        .child(view().flex_1())
+}
+
+/// A row's line on its card, above it, from where its words start (after
+/// a 22 pt mark): for rows that move on their own (a space dragged).
+pub fn row_line() -> View {
+    view().absolute().top(px(0.0)).left(px(46.0)).right(px(0.0)).h(px(1.0)).bg(theme::BORDER)
+}
+
 /// What a card's rows need said, under it in small words.
 pub fn card_footer(said: &'static str) -> View {
     view().px(px(32.0)).pt(px(8.0)).child(text(said).text_size(theme::CAPTION).line_height(px(17.0)).text_color(theme::DIM))

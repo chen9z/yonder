@@ -334,37 +334,16 @@ fn heading(l: ReadSignal<Line>, fold: impl Fn(String) + Copy + 'static) -> impl 
         Line::Heading { id, label, word, status, count, open, top, priority } => (id, word.map_or(label, |w| tr(w).to_owned()), status, count, open, top, priority),
         _ => Default::default(),
     });
-    view()
-        .flex_row()
-        .items_center()
-        .gap(px(8.0))
-        .mx(theme::INSET)
-        .mt(px(6.0))
-        .px(px(12.0))
-        .h(px(36.0))
-        .rounded(px(8.0))
-        .active(|s| s.bg(theme::HOVER))
-        .role(AccessibilityRole::Button)
-        .label(move || head.with(|h| t!("Fold or unfold {}", h.1)))
-        .on_press(move || fold(head.with_untracked(|h| h.0.clone())))
-        .child(
-            text(move || head.with(|h| h.1.clone()))
-                .flex_shrink(1.0)
-                .text_size(theme::CAPTION)
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(move || head.with(|h| h.2).map_or(theme::now(theme::DIM), |s| theme::now(theme::status(s))))
-                .number_of_lines(1),
-        )
-        .child(when(move || head.with(|h| h.6 || !h.4), move || text(move || head.with(|h| h.3.to_string())).text_size(theme::CAPTION).text_color(theme::DIM)))
-        .child(view().flex_1())
-        .child(when(move || head.with(|h| !h.4), move || {
-            view()
-                .flex_row()
-                .items_center()
-                .gap(px(8.0))
-                .child(ui::status_mark(move || head.with(|h| h.5.filter(|s| !h.6 && *s != "idle")), || true))
-                .child(ui::glyph("chevron-right", 12.0, theme::DIM))
-        }))
+    ui::group_heading(
+        move || head.with(|h| h.4),
+        move || head.with(|h| h.1.clone()),
+        move || head.with(|h| h.2).map_or(theme::now(theme::DIM), |s| theme::now(theme::status(s))),
+        move || head.with(|h| h.3),
+    )
+    .label(move || head.with(|h| t!("Fold or unfold {}", h.1)))
+    .on_press(move || fold(head.with_untracked(|h| h.0.clone())))
+    // Folded by space: the most urgent status in it.
+    .child(when(move || head.with(|h| !h.4 && !h.6), move || ui::status_mark(move || head.with(|h| h.5.filter(|s| *s != "idle")), || true)))
 }
 
 /// A row's piece of its group's card: the card's color, rounded where

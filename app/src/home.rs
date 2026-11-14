@@ -202,12 +202,20 @@ fn spaces(live: Live, reorder: Signal<bool>) -> impl IntoElement {
                 let drag = signal(None::<(String, isize)>);
                 view()
                     .child(when(move || several.get(), move || machine_heading(add.clone(), g, folded)))
-                    .child(each(
+                    // Its spaces on a card, as Agents' groups are.
+                    .child(
+                        view()
+                            .mx(theme::INSET)
+                            .mt(move || px(if several.get() { 0.0 } else { 10.0 }))
+                            .rounded(theme::CARD_RADIUS)
+                            .overflow_hidden()
+                            .bg(theme::POPOVER)
+                            .child(each(
                         move || if open.get() { g.with(|g| g.spaces.clone()) } else { Vec::new() },
                         |s| s.id.clone(),
-                        move |s, _| {
+                        move |s, at| {
                             let key = format!("{computer}\u{0}{}", s.with_untracked(|s| s.id.clone()));
-                            space_row(live.clone(), s, g, drag, reorder, move || colors.with(|c| c.get(&key).copied().unwrap_or(0)))
+                            space_row(live.clone(), s, g, drag, reorder, move || at.get() > 0, move || colors.with(|c| c.get(&key).copied().unwrap_or(0)))
                         },
                     ))
                     // A machine without spaces: loading them, else the way to make one.
@@ -217,10 +225,8 @@ fn spaces(live: Live, reorder: Signal<bool>) -> impl IntoElement {
                             .flex_row()
                             .items_center()
                             .gap(px(10.0))
-                            .mx(px(8.0))
-                            .px(px(12.0))
-                            .h(px(40.0))
-                            .rounded(px(10.0))
+                            .px(px(16.0))
+                            .h(px(48.0))
                             .active(|s| s.bg(theme::HOVER))
                             .on_press(move || {
                                 if several.get_untracked() && g.with_untracked(|g| !g.loading) {
@@ -230,7 +236,8 @@ fn spaces(live: Live, reorder: Signal<bool>) -> impl IntoElement {
                             })
                             .child(when(move || several.get() && g.with(|g| !g.loading), || ui::glyph("plus", 13.0, theme::DIM)))
                             .child(text(move || if g.with(|g| g.loading) { t!("Loading…") } else if several.get() { t!("New space there") } else { t!("No spaces yet") }).text_size(theme::FOOTNOTE).text_color(theme::DIM))
-                    }))
+                    })),
+                    )
             },
         ))
 }
@@ -242,18 +249,7 @@ fn machine_heading(live: Live, g: ReadSignal<Group>, folded: Signal<Vec<String>>
     let prefs = use_context::<crate::prefs::Prefs>().unwrap();
     let connected = computed(move || g.with(|g| g.state == "connected"));
     let is_folded = computed(move || folded.with(|set| g.with(|g| set.contains(&g.key))));
-    view()
-        .flex_row()
-        .items_center()
-        .gap(px(8.0))
-        .mx(px(8.0))
-        .mt(px(12.0))
-        .pl(px(10.0))
-        .pr(px(4.0))
-        .h(px(40.0))
-        .rounded(px(8.0))
-        .active(|s| s.bg(theme::HOVER))
-        .role(AccessibilityRole::Button)
+    ui::group_heading(move || !is_folded.get(), move || g.with(|g| g.name.clone()), || theme::now(theme::DIM), move || g.with(|g| g.spaces.len()))
         .label(move || g.with(|g| t!("Fold or unfold {}", g.name)))
         .on_long_press(move || {
             let live = rename.clone();
@@ -267,8 +263,6 @@ fn machine_heading(live: Live, g: ReadSignal<Group>, folded: Signal<Vec<String>>
                 if set.contains(&key) { set.retain(|k| k != &key); } else { set.push(key); }
             })
         })
-        .child(ui::chevron(move || !is_folded.get(), 14.0))
-        .child(text(move || g.with(|g| g.name.clone())).flex_1().text_size(theme::FOOTNOTE).font_weight(FontWeight::SEMIBOLD).text_color(theme::MUTED).number_of_lines(1))
         .child(when(move || !connected.get(), move || {
             text(move || g.with(|g| match g.state.as_str() { "connecting" => t!("Connecting…"), "needs_login" => t!("Needs login"), "needs_update" => t!("Needs update"), _ => t!("Not connected") }))
                 .text_size(theme::CAPTION)
@@ -277,8 +271,8 @@ fn machine_heading(live: Live, g: ReadSignal<Group>, folded: Signal<Vec<String>>
         .child(when(move || connected.get(), move || {
             let live = live.clone();
             view()
-                .w(px(40.0))
-                .h(px(40.0))
+                .w(px(36.0))
+                .h(px(36.0))
                 .rounded(px(8.0))
                 .items_center()
                 .justify_center()
@@ -295,7 +289,7 @@ fn machine_heading(live: Live, g: ReadSignal<Group>, folded: Signal<Vec<String>>
 
 /// A space's row: a tap opens it, a long press its menu (where reordering
 /// starts: then each row has a handle to drag).
-fn space_row(live: Live, s: ReadSignal<SpaceView>, g: ReadSignal<Group>, drag: Signal<Option<(String, isize)>>, reorder: Signal<bool>, color: impl Fn() -> usize + 'static) -> impl IntoElement {
+fn space_row(live: Live, s: ReadSignal<SpaceView>, g: ReadSignal<Group>, drag: Signal<Option<(String, isize)>>, reorder: Signal<bool>, below: impl Fn() -> bool + 'static, color: impl Fn() -> usize + 'static) -> impl IntoElement {
     let world = live.view;
     let (press, hold, mover) = (live.clone(), live.clone(), live);
     // How far its handle is dragged, and a row's height to count rows by.
@@ -322,12 +316,10 @@ fn space_row(live: Live, s: ReadSignal<SpaceView>, g: ReadSignal<Group>, drag: S
         .z_index(move || i32::from(dragged.get() != 0.0))
         .flex_row()
         .items_center()
-        .gap(px(10.0))
-        .mx(px(8.0))
-        .pl(px(10.0))
+        .gap(px(12.0))
+        .pl(px(12.0))
         .pr(move || px(if reorder.get() { 0.0 } else { 12.0 }))
-        .h(px(48.0))
-        .rounded(px(10.0))
+        .h(px(52.0))
         .bg(move || if dragged.get() != 0.0 { theme::now(theme::HOVER) } else if s.with(|s| s.active) { theme::now(theme::SELECTED) } else { Hsla::transparent_black() })
         .active(|st| st.bg(theme::HOVER))
         .on_press(move || {
@@ -401,7 +393,8 @@ fn space_row(live: Live, s: ReadSignal<SpaceView>, g: ReadSignal<Group>, drag: S
         .child(text(move || s.with(|s| s.name.clone())).flex_shrink(0.0).max_w(percentage(0.55)).text_size(theme::ROW).text_color(theme::FOREGROUND).number_of_lines(1))
         // The home folder by name: `~` alone reads as a stray mark.
         .child(text(move || s.with(|s| g.with(|g| world.with(|v| Some(aside(s, &g.spaces, &v.home)).filter(|a| a != "~").unwrap_or_else(|| t!("Home folder").into()))))).flex_1().text_right().text_size(theme::CAPTION).text_color(theme::DIM).number_of_lines(1))
-        .child(ui::tab_status(move || s.with(|s| s.status)))
+        .child(when(below, ui::row_line))
+        .child(ui::status_mark(move || s.with(|s| s.status), || true))
         .child(when(move || reorder.get(), move || {
             let live = mover.clone();
             view()
