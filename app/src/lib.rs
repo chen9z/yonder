@@ -11,6 +11,7 @@ mod changes;
 mod connect;
 mod files;
 mod home;
+mod lead;
 mod link;
 mod live;
 mod machines;

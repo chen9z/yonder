@@ -209,7 +209,12 @@ pub fn switch_connection(computer: Computer, first: Option<Session>, replacing: 
         live
     }));
     debug_assert_eq!(owner, live.owner);
-    crate::nav::routes().set(crate::nav::Routes(if reopened { vec![crate::nav::Route::Workspace] } else { Vec::new() }));
+    // Opened afresh, it shows the main agent, when there is one.
+    let lead = replacing.is_none() && crate::prefs::Prefs::kept_lead(&live.computer.id());
+    if replacing.is_none() {
+        crate::home::shown().set(if lead { crate::home::Home::Lead } else { crate::home::Home::Agents });
+    }
+    crate::nav::routes().set(crate::nav::Routes(if reopened && !lead { vec![crate::nav::Route::Workspace] } else { Vec::new() }));
     current().set(Current(Some(live)));
     Ok(())
 }

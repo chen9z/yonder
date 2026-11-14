@@ -811,3 +811,67 @@ fn an_agent_s_row_pulled_left_shows_its_buttons_and_stopping_is_asked() {
     app.wait_until("closed by a tap", SLOW, |s| s.count("id:swipe-stop") == Ok(0)).unwrap();
     app.wait_for("text:Fix the build").unwrap();
 }
+
+#[test]
+fn an_agent_made_the_main_one_has_a_tab_of_its_own_and_the_app_opens_on_it() {
+    // Drawn from what the computer showed last; nobody answers on its port.
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let computer = serde_json::json!({ "name": "desk", "host": "127.0.0.1", "port": port, "user": "me", "fingerprint": "SHA256:x" });
+    let root = serde_json::to_value(herdc_model::model::Tab::new("tab", "1", "p1", "t1").root).unwrap();
+    let agent = serde_json::json!({ "address": "t1", "pane": "p1", "space": "s1", "space_name": "proj", "machine": null,
+        "tab": "tab", "tab_index": 1, "tab_name": "1", "status": "working", "app": "pi", "program": {},
+        "title": "Fix the build", "seq": 1, "pinned": false, "focused": false });
+    // What it handed work to: a terminal it started.
+    let helper = serde_json::json!({ "address": "t2", "parent": "t1", "state": "live", "status": "working", "name": "helper", "program": {} });
+    let seen = serde_json::json!({ "at": 0, "view": {
+        "link": { "state": "connected", "core": "desk", "version": "0.1.18" }, "home": "/home/me",
+        "machines": [{ "name": null, "state": "connected", "layout": "ready", "error": null, "host": "desk" }],
+        "spaces": [{ "id": "s1", "index": 1, "name": "proj", "named": true, "folder": "~", "machine": null, "branch": "main",
+            "active": true, "status": "working",
+            "tabs": [{ "id": "tab", "index": 1, "name": "1", "named": false, "active": true, "status": "working",
+                "settled": false, "settled_at": null, "changed_at": null, "working_since": null, "focused": "p1", "zoomed": null,
+                "root": root, "panes": [] }] }],
+        "agents": [agent], "terminals": [helper], "focused": null,
+    }});
+    let storage = MemoryStorage::new(vec![
+        ("computers".to_owned(), serde_json::json!([computer]).to_string()),
+        (format!("seen.me@127.0.0.1:{port}"), seen.to_string()),
+    ]);
+    let mut config = EngineConfig::new(Root::of::<herdc_app::App>());
+    config.storage = Some(storage.clone());
+    let mut app = Headless::start(config).unwrap();
+    app.wait_for("label:proj").unwrap();
+    app.press("label:proj").unwrap();
+    app.wait_for_within("label:Spaces and agents", SLOW).unwrap();
+    app.press("label:Spaces and agents").unwrap();
+
+    // None yet: its tab says what it is for.
+    app.wait_for_within("label:Main", SLOW).unwrap();
+    app.press("label:Main").unwrap();
+    app.wait_for_within("id:choose-lead", SLOW).unwrap();
+    // An agent's menu makes it the one, and its tab shows: the agent, what
+    // works for it, a field to write to it.
+    app.press("label:Agents").unwrap();
+    app.wait_for_within("text:Fix the build", SLOW).unwrap();
+    app.long_press("text:Fix the build").unwrap();
+    pick(&mut app, "lead");
+    app.wait_for_within("label:Main agent: proj", SLOW).unwrap();
+    app.wait_for("id:talk").unwrap();
+    app.wait_for("label:helper, sub-agent").unwrap();
+    app.type_text("id:talk", "hello").unwrap();
+    app.press("label:Send").unwrap();
+    drop(app);
+
+    // Opened again, the app shows it, not the space it was on.
+    let mut config = EngineConfig::new(Root::of::<herdc_app::App>());
+    config.storage = Some(storage);
+    let mut app = Headless::start(config).unwrap();
+    app.wait_for_within("id:talk", SLOW).unwrap();
+    assert_eq!(app.screen().count("label:Spaces and agents"), Ok(0));
+    // Settings let it go.
+    app.press("label:Settings").unwrap();
+    app.wait_for_within("text:Main agent", SLOW).unwrap();
+    app.press("text:Main agent").unwrap();
+    pick(&mut app, "none");
+    app.wait_for_within("text:None", SLOW).unwrap();
+}

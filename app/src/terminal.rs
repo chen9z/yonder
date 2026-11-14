@@ -137,6 +137,17 @@ fn typed(old: &str, new: &str) -> (usize, String) {
 /// else watched at the desktop's until a tap brings the keyboard, unless
 /// this phone started it. Another screen typing takes it back.
 pub fn terminal(engine: Engine, address: String, swipes: Swipes) -> impl IntoElement {
+    shown(engine, address, swipes, None)
+}
+
+/// The terminal as a conversation (the main agent's): a field to write
+/// to it always under it, saying to whom (`name`); a tap on the terminal
+/// still types into it, key by key.
+pub fn talk(engine: Engine, address: String, name: String) -> impl IntoElement {
+    shown(engine, address, Swipes::Nothing, Some(name))
+}
+
+fn shown(engine: Engine, address: String, swipes: Swipes, talk: Option<String>) -> impl IntoElement {
     let prefs = use_context::<Prefs>().expect("prefs");
     let viewer = {
         let _entered = link::runtime().enter();
@@ -243,6 +254,8 @@ pub fn terminal(engine: Engine, address: String, swipes: Swipes) -> impl IntoEle
     // A message written before it goes in, kept while not sent.
     let writing = signal(false);
     let draft = signal(String::new());
+    // Talked to, its field under it is where a message is written.
+    let talks = talk.is_some();
     let select = {
         let viewer = viewer.clone();
         move || {
@@ -255,7 +268,10 @@ pub fn terminal(engine: Engine, address: String, swipes: Swipes) -> impl IntoEle
                 use crate::pick::{self, Item};
                 let mut items: Vec<Item> = links.iter().enumerate().map(|(i, l)| Item::glyph(format!("link:{i}"), t!("Open {}", short_url(&l.url)), "external-link")).collect();
                 items.extend(paths.iter().enumerate().map(|(i, p)| Item::glyph(format!("file:{i}"), t!("Open {}", short_path(&p.url)), "file")));
-                items.extend([Item::glyph("select", t!("Select text"), "copy"), Item::glyph("paste", t!("Paste"), "clipboard"), Item::glyph("write", t!("Write a message"), "pencil")]);
+                items.extend([Item::glyph("select", t!("Select text"), "copy"), Item::glyph("paste", t!("Paste"), "clipboard")]);
+                if !talks {
+                    items.push(Item::glyph("write", t!("Write a message"), "pencil"));
+                }
                 let picked = pick::one(t!("Terminal"), items).await;
                 match picked.as_deref() {
                     Some(link) if link.starts_with("link:") => {
@@ -387,7 +403,87 @@ pub fn terminal(engine: Engine, address: String, swipes: Swipes) -> impl IntoEle
                 key_bar(viewer.clone(), latch, writing)
             }
         }))
-        .child(compose(viewer.clone(), writing, draft))
+        .child(match talk {
+            None => compose(viewer.clone(), writing, draft).into_element(),
+            // Typed into key by key, the key bar is under it instead.
+            Some(name) => {
+                let viewer = viewer.clone();
+                when(move || !focused.get(), move || talk_bar(viewer.clone(), name.clone())).into_element()
+            }
+        })
+}
+
+/// What is written to the main agent and not sent yet: kept while its
+/// tab is left.
+#[derive(Clone, Default, PartialEq)]
+struct Unsent(String);
+
+/// The field under a terminal talked to: what is written goes as a
+/// message does (one paste, then Enter), and the keyboard stays for the
+/// next.
+fn talk_bar(viewer: Rc<Viewer>, name: String) -> impl IntoElement {
+    let draft = global::<Unsent>();
+    let owner = Owner::current();
+    let send = move || {
+        let words = draft.with_untracked(|d| d.0.trim_end().to_owned());
+        if words.trim().is_empty() {
+            return;
+        }
+        viewer.paste(&words);
+        let viewer = viewer.clone();
+        owner.run(|| set_timeout(ENTER_AFTER, move || viewer.key(Key::Enter, Mods::NONE)));
+        draft.set(Unsent(String::new()));
+    };
+    let none = move || draft.with(|d| d.0.trim().is_empty());
+    view()
+        .flex_row()
+        .items_end()
+        .gap(px(8.0))
+        .px(px(12.0))
+        .pt(px(8.0))
+        .pb(px(8.0))
+        .border_t(px(1.0))
+        .border_color(theme::BORDER)
+        .bg(theme::CHROME)
+        .child(
+            input()
+                .test_id("talk")
+                .multiline(true)
+                .value(move || draft.with(|d| d.0.clone()))
+                .on_change(move |t: &str| draft.set(Unsent(t.to_owned())))
+                .placeholder(t!("Message {}", name))
+                .placeholder_color(move || theme::now(theme::DIM))
+                .flex_1()
+                .min_h(px(40.0))
+                .max_h(px(132.0))
+                .px(px(14.0))
+                .py(px(9.0))
+                .rounded(px(20.0))
+                .border_1()
+                .border_color(theme::INPUT)
+                .bg(theme::BACKGROUND)
+                .text_size(theme::BODY)
+                .line_height(px(22.0))
+                .text_color(theme::FOREGROUND),
+        )
+        .child(
+            view()
+                .w(px(40.0))
+                .h(px(40.0))
+                .rounded(px(20.0))
+                .items_center()
+                .justify_center()
+                .bg(theme::SOLID)
+                .active(|s| s.opacity(0.7).scale(ui::PRESSED))
+                .transition()
+                .duration(ui::QUICK)
+                .role(AccessibilityRole::Button)
+                .label(t!("Send"))
+                .disabled(none)
+                .disabled_style(|s| s.opacity(0.35))
+                .on_press(send)
+                .child(ui::glyph("arrow-up", 20.0, theme::SOLID_FOREGROUND)),
+        )
 }
 
 /// A message written whole before it goes in (more than a few words, a

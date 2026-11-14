@@ -196,7 +196,7 @@ pub fn subs(terminals: &[Value], parent: &str) -> Vec<Sub> {
 
 /// Kept children use their listed status before done becomes idle.
 // Adapted from herdr-app defaults/mods/agents/main.js, Apache-2.0.
-fn listed_subs(terminals: &[Value], agents: &[AgentView], parent: &str) -> Vec<Sub> {
+pub fn listed_subs(terminals: &[Value], agents: &[AgentView], parent: &str) -> Vec<Sub> {
     let mut children = subs(terminals, parent);
     for child in &mut children {
         if let Some(kept) = agents.iter().find(|a| a.address == child.address) {
@@ -659,14 +659,19 @@ fn agent_row(live: Live, l: ReadSignal<Line>, now: Signal<u64>, inline: bool, fo
                     }
                     let Some(a) = agent() else { return };
                     let live = hold.clone();
+                    let lead = live.view.with_untracked(|v| prefs.lead(&live.computer.id()).and_then(|l| l.find(&v.agents).map(|f| f.address.clone())));
                     // Called as its row says it, not by its raw title.
                     let called = row.with_untracked(|r| r.as_ref().map(|r| [Some(r.4.clone()), r.5.clone()].into_iter().flatten().collect::<Vec<_>>().join(" · ")).unwrap_or_default());
                     spawn(async move {
                         use crate::pick::{self, Item};
                         let pin = if a.pinned { Item::glyph("unpin", t!("Unpin"), "pin-off") } else { Item::glyph("pin", t!("Pin to the top"), "pin") };
-                        match pick::one(&called, vec![pin, Item::glyph("kill", t!("Stop it"), "square").danger()]).await.as_deref() {
+                        let main = lead == Some(a.address.clone());
+                        let lead = if main { Item::glyph("unlead", t!("No longer the main agent"), "x") } else { Item::glyph("lead", t!("Make it the main agent"), "lead") };
+                        match pick::one(&called, vec![pin, lead, Item::glyph("kill", t!("Stop it"), "square").danger()]).await.as_deref() {
                             Some("pin") => live.run("terminal.pin", json!({ "terminal": a.address, "pinned": true })),
                             Some("unpin") => live.run("terminal.pin", json!({ "terminal": a.address, "pinned": false })),
+                            Some("lead") => crate::lead::set(prefs, &live, Some(&a)),
+                            Some("unlead") => crate::lead::set(prefs, &live, None),
                             Some("kill") => stop(live, a.address).await,
                             _ => {}
                         }

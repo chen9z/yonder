@@ -86,8 +86,8 @@ it with the screenshot's name and go on.
    (COMPUTER, TERMINAL, GENERAL, THIS PHONE'S KEY, ABOUT), each row with a
    line icon, and Leave this computer (red) alone on the last card.
    COMPUTER has the computer (a green dot, "herdr-core" and its version),
-   Edit connection and Add a machine… (no Commands); GENERAL has Language and
-   Sort agents (Priority). "Fit terminals to the phone" shows a switch,
+   Edit connection and Add a machine… (no Commands); GENERAL has Main agent
+   (None), Language and Sort agents (Priority). "Fit terminals to the phone" shows a switch,
    on, and small words under the card say what it does. The font size −
    and + change the size shown; the terminal's text follows when back.
    Put it back as it was. The key is one row, "Copy the public key" over
@@ -116,5 +116,12 @@ it with the screenshot's name and go on.
    it: a sheet titled as its row reads (not a title with `| space`);
    Back. Tap the space under "Spaces"
    to go back.
+7a. ‹ to the home page: three tabs at the bottom, "Main" first. Press
+   it: "Your main agent", why, and "Choose an agent". Back on "Agents",
+   hold an agent's row: its sheet offers "Make it the main agent"; press
+   it. The first tab shows, called as the agent's space: the space's
+   square, its name and program at the top, the agent's terminal, and
+   under it a field "Message <name>" with an ↑. Settings → GENERAL → Main
+   agent → "No main agent": the first tab says "Your main agent" again.
 
 End with a table: step, as said (yes/no), what differed, screenshot.

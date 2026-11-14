@@ -16,6 +16,7 @@ pub fn settings_page(live: Live) -> nsh_core::element::Screen {
     let world = live.view;
     let public = link::phone_key().map(|(_, public)| public).unwrap_or_else(|error| t!("Cannot load the phone's key: {}", error));
     let about = live.clone();
+    let lead_live = live.clone();
     let core = computed(move || {
         world.with(|v| match &v.link {
             Link::Connected { version, .. } => format!("herdr-core {version}"),
@@ -61,6 +62,14 @@ pub fn settings_page(live: Live) -> nsh_core::element::Screen {
                 .child(ui::card_footer(t!("Fitted, the terminal you look at takes the phone's rows and columns; else it keeps the desktop's size, drawn smaller.")))
                 .child(ui::card_heading(t!("GENERAL")))
                 .child(ui::card(vec![
+                    // The agent the person talks to, on a tab of its own.
+                    leads(
+                        setting("lead", || t!("Main agent").into(), {
+                            let computer = lead_live.computer.id();
+                            move || prefs.lead(&computer).map(|l| l.name()).unwrap_or_else(|| t!("None").into())
+                        }),
+                        move || crate::lead::choose(prefs, lead_live.clone()),
+                    ),
                     leads(
                         setting("languages", || t!("Language").into(), move || match prefs.language.get() {
                             Language::System => t!("System").into(),

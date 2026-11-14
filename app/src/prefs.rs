@@ -24,7 +24,8 @@ pub struct Prefs {
     pub colors: Signal<std::collections::BTreeMap<String, usize>>,
     /// Agents by priority, else grouped by space.
     pub grouped: Signal<bool>,
-    pub home_spaces: Signal<bool>,
+    /// Each computer's main agent, by computer.
+    pub leads: Signal<std::collections::BTreeMap<String, crate::lead::Lead>>,
     aliases: Signal<std::collections::BTreeMap<String, String>>,
 }
 
@@ -38,13 +39,13 @@ struct Kept {
     folded: Vec<String>,
     colors: std::collections::BTreeMap<String, usize>,
     grouped: bool,
-    home_spaces: bool,
+    leads: std::collections::BTreeMap<String, crate::lead::Lead>,
     aliases: std::collections::BTreeMap<String, String>,
 }
 
 impl Default for Kept {
     fn default() -> Self {
-        Kept { font: 12.0, fit: true, language: Language::System, keys: crate::keybar::at_first(), folded: Vec::new(), colors: Default::default(), grouped: false, home_spaces: false, aliases: Default::default() }
+        Kept { font: 12.0, fit: true, language: Language::System, keys: crate::keybar::at_first(), folded: Vec::new(), colors: Default::default(), grouped: false, leads: Default::default(), aliases: Default::default() }
     }
 }
 
@@ -62,14 +63,25 @@ impl Prefs {
         }
     }
 
+    /// The main agent chosen on `computer`.
+    pub fn lead(self, computer: &str) -> Option<crate::lead::Lead> {
+        self.leads.with(|l| l.get(computer).cloned())
+    }
+
+    /// Whether `computer` has a main agent, as kept (before the prefs are
+    /// read: the app opens on it).
+    pub fn kept_lead(computer: &str) -> bool {
+        Storage::get_item(PREFS).and_then(|t| serde_json::from_str::<Kept>(&t).ok()).is_some_and(|k| k.leads.contains_key(computer))
+    }
+
     /// Loads them, and keeps them as they change.
     pub fn provide() -> Prefs {
         let kept: Kept = Storage::get_item(PREFS).and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
         let language = i18n::chosen();
         language.set(kept.language);
-        let prefs = Prefs { font: signal(kept.font), fit: signal(kept.fit), language, keys: signal(kept.keys), folded: signal(kept.folded), colors: signal(kept.colors), grouped: signal(kept.grouped), home_spaces: signal(kept.home_spaces), aliases: signal(kept.aliases) };
+        let prefs = Prefs { font: signal(kept.font), fit: signal(kept.fit), language, keys: signal(kept.keys), folded: signal(kept.folded), colors: signal(kept.colors), grouped: signal(kept.grouped), leads: signal(kept.leads), aliases: signal(kept.aliases) };
         effect(move || {
-            let kept = Kept { font: prefs.font.get(), fit: prefs.fit.get(), language: prefs.language.get(), keys: prefs.keys.get(), folded: prefs.folded.get(), colors: prefs.colors.get(), grouped: prefs.grouped.get(), home_spaces: prefs.home_spaces.get(), aliases: prefs.aliases.get() };
+            let kept = Kept { font: prefs.font.get(), fit: prefs.fit.get(), language: prefs.language.get(), keys: prefs.keys.get(), folded: prefs.folded.get(), colors: prefs.colors.get(), grouped: prefs.grouped.get(), leads: prefs.leads.get(), aliases: prefs.aliases.get() };
             let _ = Storage::set_item(PREFS, serde_json::to_string(&kept).unwrap_or_default());
         });
         provide_context(prefs);
