@@ -30,6 +30,8 @@ pub enum Route {
     AddMachine,
     /// A terminal's text, to select from.
     Text(Arc<String>),
+    /// One step the main agent took (a tool it used), whole.
+    Step(Arc<herdc_engine::tools::transcript::Call>),
     /// The key bar's keys, to choose.
     KeyBar,
     /// Every terminal on every machine, found by typing.
@@ -41,6 +43,7 @@ impl Route {
         match self {
             Route::Diff { changes, file, .. } => format!("Diff {} {file}", changes.root),
             Route::Text(text) => format!("Text {:p}", Arc::as_ptr(text)),
+            Route::Step(call) => format!("Step {:p}", Arc::as_ptr(call)),
             other => format!("{other:?}"),
         }
     }

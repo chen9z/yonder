@@ -135,7 +135,7 @@ async fn a_pi_session_is_found_by_its_label_or_folder_and_read_as_it_grows() {
     // The end of it first; then what was added, a line half written held back.
     let mut t = Transcript::default();
     t.take(&transcript::read(&there, &path, 0).await.unwrap());
-    assert!(t.cut);
+    assert!(t.cut());
     assert_eq!(t.read, transcript::TAIL + 6);
     assert_eq!(t.lines().len(), transcript::TAIL);
     let mut more = std::fs::OpenOptions::new().append(true).open(&file).unwrap();
@@ -146,4 +146,17 @@ async fn a_pi_session_is_found_by_its_label_or_folder_and_read_as_it_grows() {
     t.take(&got);
     assert_eq!(t.read, transcript::TAIL + 7);
     assert_eq!(t.lines().last().map(|l| &l.said), Some(&Said::You { text: "later".into(), images: 0 }));
+    // What came before, asked for: all of it now.
+    t.take(&transcript::earlier(&there, &path, t.start).await.unwrap());
+    assert!(!t.cut());
+    assert_eq!(t.lines().len(), transcript::TAIL + 6);
+    assert_eq!(t.lines()[0].said, Said::You { text: "n1".into(), images: 0 });
+
+    // A picture put beside a terminal lands on its machine.
+    let ran = there.core.call("terminal.run", serde_json::json!({"argv": ["cat"]})).await.unwrap();
+    let address = ran["address"].as_str().unwrap().to_owned();
+    let landed = transcript::put(&there, &address, "shot.png", b"\x89PNG").await.unwrap();
+    assert!(landed.ends_with("shot.png"), "{landed}");
+    assert_eq!(std::fs::read(&landed).unwrap(), b"\x89PNG");
+    there.core.call("terminal.kill", serde_json::json!({"terminal": address})).await.unwrap();
 }

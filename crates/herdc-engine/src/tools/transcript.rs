@@ -17,6 +17,9 @@ pub const TAIL: usize = 800;
 /// How much of a tool's result is kept (it is shown on its own page).
 const RESULT: usize = 6000;
 
+/// How much of what a tool was given is kept (a file written, an edit).
+const INPUT: usize = 20000;
+
 /// One thing said, as the conversation shows it.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Said {
@@ -34,21 +37,27 @@ pub enum Said {
     Stopped,
 }
 
-/// A tool used: its name, what it was given (a line), and what came back.
-#[derive(Clone, Debug, PartialEq)]
+/// A tool used: its name, what it was given (`said` in a line, `input`
+/// whole: the command, the file written, an edit as `- `/`+ ` lines when
+/// `diff`), and what came back.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Call {
     pub id: String,
     pub name: String,
     pub said: String,
+    pub input: String,
+    pub diff: bool,
     pub result: Option<String>,
     pub error: bool,
 }
 
-/// A piece of the conversation, keyed to stay the same row as it grows.
+/// A piece of the conversation, keyed to stay the same row as it grows;
+/// `at` when it was said (ms since the epoch, 0: not known).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Line {
     pub id: String,
     pub said: Said,
+    pub at: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -65,39 +74,49 @@ enum Kind {
 #[derive(Clone, Debug)]
 enum Part {
     Words(String),
-    Call { id: String, name: String, said: String },
+    Call(Call),
 }
 
 #[derive(Clone, Debug)]
 struct Entry {
     parent: Option<String>,
     kind: Kind,
+    at: u64,
 }
 
-/// A session as read so far.
+/// A session as read so far: from line `start` to line `read` of its
+/// file (earlier lines can be read in later, before them).
 #[derive(Clone, Debug, Default)]
 pub struct Transcript {
     entries: HashMap<String, Entry>,
-    last: Option<String>,
+    /// The entry on the last line read, and that line.
+    last: Option<(usize, String)>,
     /// Lines of the file read (the next read starts after them).
     pub read: usize,
-    /// It began before the lines read: older entries aren't known.
-    pub cut: bool,
+    /// The first line read (0: none yet).
+    pub start: usize,
 }
 
 impl Transcript {
-    /// Takes in the lines a read gave (`first`: the first one's number).
-    pub fn take(&mut self, read: &Read) {
-        if read.first > self.read + 1 {
-            self.cut = true;
-        }
-        for line in read.text.lines() {
-            self.add(line);
-        }
-        self.read = read.first.saturating_sub(1) + read.text.lines().count();
+    /// It began before the lines read: older entries aren't known.
+    pub fn cut(&self) -> bool {
+        self.start > 1
     }
 
-    fn add(&mut self, line: &str) {
+    /// Takes in the lines a read gave (`first`: the first one's number),
+    /// after those read or before them.
+    pub fn take(&mut self, read: &Read) {
+        let count = read.text.lines().count();
+        for (i, line) in read.text.lines().enumerate() {
+            self.add(line, read.first + i);
+        }
+        if self.start == 0 || read.first < self.start {
+            self.start = read.first.max(1);
+        }
+        self.read = self.read.max(read.first.saturating_sub(1) + count);
+    }
+
+    fn add(&mut self, line: &str, n: usize) {
         let Ok(v) = serde_json::from_str::<Value>(line) else { return };
         let Some(id) = v["id"].as_str() else { return };
         let parent = v["parentId"].as_str().map(str::to_owned);
@@ -106,14 +125,17 @@ impl Transcript {
             Some("compaction") => Kind::Compacted,
             _ => Kind::Other,
         };
-        self.entries.insert(id.to_owned(), Entry { parent, kind });
-        self.last = Some(id.to_owned());
+        let at = v["timestamp"].as_str().and_then(epoch_ms).unwrap_or(0);
+        self.entries.insert(id.to_owned(), Entry { parent, kind, at });
+        if self.last.as_ref().is_none_or(|(m, _)| n >= *m) {
+            self.last = Some((n, id.to_owned()));
+        }
     }
 
     /// What is said now: the branch the last entry is on, oldest first.
     pub fn lines(&self) -> Vec<Line> {
         let mut branch = Vec::new();
-        let mut at = self.last.clone();
+        let mut at = self.last.as_ref().map(|(_, id)| id.clone());
         while let Some(id) = at {
             let Some(entry) = self.entries.get(&id) else { break };
             branch.push((id, entry));
@@ -132,33 +154,35 @@ impl Transcript {
             .collect();
         let mut out: Vec<Line> = Vec::new();
         // One run of tools between words, however many answers it spans.
-        let tool = |out: &mut Vec<Line>, call: Call| match out.last_mut() {
+        let tool = |out: &mut Vec<Line>, call: Call, at: u64| match out.last_mut() {
             Some(Line { said: Said::Tools(calls), .. }) => calls.push(call),
-            _ => out.push(Line { id: call.id.clone(), said: Said::Tools(vec![call]) }),
+            _ => out.push(Line { id: call.id.clone(), said: Said::Tools(vec![call]), at }),
         };
         for (id, entry) in branch {
+            let at = entry.at;
             match &entry.kind {
-                Kind::You { text, images } => out.push(Line { id, said: Said::You { text: text.clone(), images: *images } }),
+                Kind::You { text, images } => out.push(Line { id, said: Said::You { text: text.clone(), images: *images }, at }),
                 Kind::Answer { parts, failed, stopped } => {
                     for (i, part) in parts.iter().enumerate() {
                         match part {
-                            Part::Words(words) => out.push(Line { id: format!("{id}:{i}"), said: Said::Reply(words.clone()) }),
-                            Part::Call { id, name, said } => {
-                                let result = results.get(id.as_str());
-                                tool(&mut out, Call { id: id.clone(), name: name.clone(), said: said.clone(), result: result.map(|r| r.0.to_owned()), error: result.is_some_and(|r| r.1) });
+                            Part::Words(words) => out.push(Line { id: format!("{id}:{i}"), said: Said::Reply(words.clone()), at }),
+                            Part::Call(call) => {
+                                let result = results.get(call.id.as_str());
+                                tool(&mut out, Call { result: result.map(|r| r.0.to_owned()), error: result.is_some_and(|r| r.1), ..call.clone() }, at);
                             }
                         }
                     }
                     if let Some(why) = failed {
-                        out.push(Line { id: format!("{id}:failed"), said: Said::Failed(why.clone()) });
+                        out.push(Line { id: format!("{id}:failed"), said: Said::Failed(why.clone()), at });
                     } else if *stopped {
-                        out.push(Line { id: format!("{id}:stopped"), said: Said::Stopped });
+                        out.push(Line { id: format!("{id}:stopped"), said: Said::Stopped, at });
                     }
                 }
                 Kind::Shell { command, output, failed } => {
-                    tool(&mut out, Call { id: id.clone(), name: "!".into(), said: command.clone(), result: Some(output.clone()), error: *failed });
+                    let call = Call { id: id.clone(), name: "!".into(), said: cut(command.lines().next().unwrap_or_default(), 160), input: command.clone(), result: Some(output.clone()), error: *failed, ..Call::default() };
+                    tool(&mut out, call, at);
                 }
-                Kind::Compacted => out.push(Line { id, said: Said::Compacted }),
+                Kind::Compacted => out.push(Line { id, said: Said::Compacted, at }),
                 Kind::Result { .. } | Kind::Other => {}
             }
         }
@@ -181,11 +205,18 @@ fn message(m: &Value) -> Kind {
                 .iter()
                 .filter_map(|p| match p["type"].as_str() {
                     Some("text") => p["text"].as_str().map(str::trim).filter(|t| !t.is_empty()).map(|t| Part::Words(t.to_owned())),
-                    Some("toolCall") => Some(Part::Call {
-                        id: p["id"].as_str().unwrap_or_default().to_owned(),
-                        name: p["name"].as_str().unwrap_or_default().to_owned(),
-                        said: given(p["name"].as_str().unwrap_or_default(), &p["arguments"]),
-                    }),
+                    Some("toolCall") => {
+                        let name = p["name"].as_str().unwrap_or_default();
+                        let (input, diff) = input(name, &p["arguments"]);
+                        Some(Part::Call(Call {
+                            id: p["id"].as_str().unwrap_or_default().to_owned(),
+                            name: name.to_owned(),
+                            said: given(name, &p["arguments"]),
+                            input,
+                            diff,
+                            ..Call::default()
+                        }))
+                    }
                     _ => None,
                 })
                 .collect();
@@ -215,6 +246,51 @@ fn given(name: &str, args: &Value) -> String {
     };
     let said = said.or_else(|| args.as_object()?.values().find_map(Value::as_str)).unwrap_or_default();
     cut(said.lines().find(|l| !l.trim().is_empty()).unwrap_or_default().trim(), 160)
+}
+
+/// What a tool was given, whole: the command, the file and what was
+/// written to it, an edit as the lines it took out (`- `) and put in
+/// (`+ `: a diff, then); else its arguments as they were.
+fn input(name: &str, args: &Value) -> (String, bool) {
+    let s = |k: &str| args[k].as_str().unwrap_or_default();
+    let (text, diff) = match name {
+        "bash" => (s("command").to_owned(), false),
+        "read" => (s("path").to_owned(), false),
+        "write" => (format!("{}\n\n{}", s("path"), s("content")), false),
+        "edit" => {
+            let edits = args["edits"].as_array().cloned().unwrap_or_else(|| vec![args.clone()]);
+            let mut out = s("path").to_owned();
+            for e in edits {
+                out.push('\n');
+                for (sign, key) in [("- ", "oldText"), ("+ ", "newText")] {
+                    for line in e[key].as_str().unwrap_or_default().lines() {
+                        out.push_str(&format!("\n{sign}{line}"));
+                    }
+                }
+            }
+            (out, true)
+        }
+        _ => (serde_json::to_string_pretty(args).unwrap_or_default(), false),
+    };
+    (cut(&text, INPUT), diff)
+}
+
+/// An entry's time (`2026-11-05T17:59:34.063Z`), in ms since the epoch.
+fn epoch_ms(iso: &str) -> Option<u64> {
+    let n = |r: std::ops::Range<usize>| iso.get(r)?.parse::<i64>().ok();
+    let (y, m, d) = (n(0..4)?, n(5..7)?, n(8..10)?);
+    let (h, min, s) = (n(11..13)?, n(14..16)?, n(17..19)?);
+    // Its fraction of a second, in ms: `.5` is 500.
+    let fraction: String = iso.get(19..).and_then(|f| f.strip_prefix('.')).unwrap_or_default().chars().take_while(char::is_ascii_digit).take(3).collect();
+    let ms = format!("{fraction:0<3}").parse::<i64>().unwrap_or(0);
+    // Days since 1970-01-01 of a civil date (Howard Hinnant's).
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * ((m + 9) % 12) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146097 + doe - 719468;
+    u64::try_from(((days * 24 + h) * 60 + min) * 60 * 1000 + s * 1000 + ms).ok()
 }
 
 fn cut(text: &str, at: usize) -> String {
@@ -268,6 +344,33 @@ pub async fn read(there: &There, path: &str, from: usize) -> Result<Read, String
     Ok(Read { text, first: start, lines: got["lines"].as_u64().unwrap_or(0) as usize })
 }
 
+/// The lines before line `before` (from 1), at most [`TAIL`] of them:
+/// what came before what was read.
+pub async fn earlier(there: &There, path: &str, before: usize) -> Result<Read, String> {
+    let first = before.saturating_sub(TAIL).max(1);
+    if before <= first {
+        return Ok(Read { first, ..Read::default() });
+    }
+    let got = there.core.call_timeout("file.read", json!({ "path": path, "on": there.on, "offset": first, "limit": before - first }), Duration::from_secs(30)).await.map_err(|e| e.to_string())?;
+    Ok(Read { text: got["text"].as_str().unwrap_or_default().to_owned(), first, lines: got["lines"].as_u64().unwrap_or(0) as usize })
+}
+
+/// Stops the agent at `terminal` (Esc, as the core's interrupt presses
+/// it): what came of it (`stopped`, `still_working`, ...).
+pub async fn interrupt(there: &There, terminal: &str) -> Result<String, String> {
+    let got = there.core.call_timeout("terminal.interrupt", json!({ "terminal": terminal, "timeout": 5 }), Duration::from_secs(20)).await.map_err(|e| e.to_string())?;
+    Ok(got["outcome"].as_str().unwrap_or_default().to_owned())
+}
+
+/// Puts a file (a picture) beside the agent at `terminal`, on its
+/// machine: where it landed, for the message to say.
+pub async fn put(there: &There, terminal: &str, name: &str, bytes: &[u8]) -> Result<String, String> {
+    use base64::Engine as _;
+    let data = base64::engine::general_purpose::STANDARD.encode(bytes);
+    let got = there.core.call_timeout("terminal.put", json!({ "terminal": terminal, "name": name, "data": data }), Duration::from_secs(120)).await.map_err(|e| e.to_string())?;
+    got["path"].as_str().map(str::to_owned).ok_or_else(|| "terminal.put: no path".to_owned())
+}
+
 /// Says `text` to the agent at `terminal` as `hc send` does: pasted,
 /// then Enter, once nobody is typing to it.
 pub async fn send(there: &There, terminal: &str, text: &str) -> Result<(), String> {
@@ -303,14 +406,14 @@ mod tests {
         let mut t = Transcript::default();
         t.take(&read(&lines, 1));
         assert_eq!(t.read, 8);
-        assert!(!t.cut);
+        assert!(!t.cut());
         let said: Vec<Said> = t.lines().into_iter().map(|l| l.said).collect();
         assert_eq!(said, vec![
             Said::You { text: "check the disk".into(), images: 1 },
             Said::Reply("Looking.".into()),
             Said::Tools(vec![
-                Call { id: "c1".into(), name: "bash".into(), said: "df -h".into(), result: Some("90% used".into()), error: false },
-                Call { id: "c2".into(), name: "read".into(), said: "/etc/fstab".into(), result: Some("denied".into()), error: true },
+                Call { id: "c1".into(), name: "bash".into(), said: "df -h".into(), input: "df -h\nexit".into(), result: Some("90% used".into()), ..Call::default() },
+                Call { id: "c2".into(), name: "read".into(), said: "/etc/fstab".into(), input: "/etc/fstab".into(), result: Some("denied".into()), error: true, ..Call::default() },
             ]),
             Said::Reply("**90%** used.".into()),
         ]);
@@ -324,7 +427,7 @@ mod tests {
             json!({"type": "message", "id": "a", "parentId": "x", "message": {"role": "user", "content": "first"}}),
             json!({"type": "message", "id": "b", "parentId": "a", "message": {"role": "assistant", "stopReason": "error", "errorMessage": "502", "content": []}}),
         ], 10));
-        assert!(t.cut);
+        assert!(t.cut());
         assert_eq!(t.read, 11);
         // Gone back to `a`'s parent: a new branch; then compacted, stopped.
         t.take(&read(&[
@@ -338,6 +441,33 @@ mod tests {
         t.take(&read(&[json!({"type": "message", "id": "f", "parentId": "a", "message": {"role": "assistant", "stopReason": "error", "errorMessage": "502", "content": []}})], 15));
         let said: Vec<Said> = t.lines().into_iter().map(|l| l.said).collect();
         assert_eq!(said, vec![Said::You { text: "first".into(), images: 0 }, Said::Failed("502".into())]);
+    }
+
+    #[test]
+    fn earlier_lines_read_in_later_go_before_and_the_last_stays_last() {
+        let user = |id: &str, parent: &str, text: &str| json!({"type": "message", "id": id, "parentId": parent, "timestamp": "2026-11-05T17:59:34.063Z", "message": {"role": "user", "content": text}});
+        let mut t = Transcript::default();
+        t.take(&read(&[user("c", "b", "three")], 3));
+        assert!(t.cut());
+        t.take(&read(&[user("a", "", "one"), user("b", "a", "two")], 1));
+        assert!(!t.cut());
+        assert_eq!(t.read, 3);
+        let said: Vec<String> = t.lines().into_iter().map(|l| match l.said { Said::You { text, .. } => text, _ => String::new() }).collect();
+        assert_eq!(said, ["one", "two", "three"]);
+        assert_eq!(t.lines()[0].at, 1_793_901_574_063);
+    }
+
+    #[test]
+    fn an_edit_is_given_as_the_lines_it_took_out_and_put_in() {
+        let (input, diff) = input("edit", &json!({"path": "a.md", "edits": [{"oldText": "x\ny", "newText": "z"}]}));
+        assert!(diff);
+        assert_eq!(input, "a.md\n\n- x\n- y\n+ z");
+        assert_eq!(input_of("bash", json!({"command": "ls\npwd", "timeout": 5})), "ls\npwd");
+        assert_eq!(epoch_ms("1970-01-02T00:00:01.5Z"), Some(86_401_500));
+    }
+
+    fn input_of(name: &str, args: Value) -> String {
+        input(name, &args).0
     }
 
     #[test]

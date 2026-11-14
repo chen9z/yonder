@@ -148,6 +148,7 @@ pub fn talk(engine: Engine, address: String, name: String) -> impl IntoElement {
 }
 
 fn shown(engine: Engine, address: String, swipes: Swipes, talk: Option<String>) -> impl IntoElement {
+    let talked_to = address.clone();
     let prefs = use_context::<Prefs>().expect("prefs");
     let viewer = {
         let _entered = link::runtime().enter();
@@ -409,13 +410,15 @@ fn shown(engine: Engine, address: String, swipes: Swipes, talk: Option<String>) 
             Some(name) => {
                 let viewer = viewer.clone();
                 let owner = Owner::current();
+                let attach = crate::chat::attach(talked_to.clone());
                 when(move || !focused.get(), move || {
                     let viewer = viewer.clone();
-                    talk_bar(t!("Message {}", name.clone()), move |words: String| {
+                    let placeholder = t!("Message {}", name.clone());
+                    talk_bar(move || placeholder.clone(), move |words: String| {
                         viewer.paste(&words);
                         let viewer = viewer.clone();
                         owner.run(|| set_timeout(ENTER_AFTER, move || viewer.key(Key::Enter, Mods::NONE)));
-                    })
+                    }, Offers { stop: None, attach: Some(attach.clone()) })
                 })
                 .into_element()
             }
@@ -433,20 +436,40 @@ pub fn unsent(words: &str) {
     global::<Unsent>().update(|d| d.0 = if d.0.trim().is_empty() { words.to_owned() } else { format!("{words}\n{}", d.0) });
 }
 
+/// Words added at the end of what is written (a picture's path).
+pub fn add_to_draft(words: &str) {
+    global::<Unsent>().update(|d| d.0 = if d.0.trim().is_empty() { words.to_owned() } else { format!("{}\n{words}", d.0.trim_end()) });
+}
+
+/// Something a button does.
+pub type Act = Rc<dyn Fn()>;
+
+/// What the field under the main agent offers besides sending.
+#[derive(Clone, Default)]
+pub struct Offers {
+    /// While the first says it works and nothing is written, its button
+    /// stops it instead.
+    pub stop: Option<(Memo<bool>, Act)>,
+    /// Pictures to send: a button before the field, turning while they go.
+    pub attach: Option<(Signal<bool>, Act)>,
+}
+
 /// The field under the main agent (its terminal or its conversation):
 /// what is written goes to `send` as a message does, and the keyboard
 /// stays for the next.
-pub fn talk_bar(placeholder: String, send: impl Fn(String) + 'static) -> impl IntoElement {
+pub fn talk_bar(placeholder: impl Fn() -> String + 'static, send: impl Fn(String) + 'static, offers: Offers) -> impl IntoElement {
     let draft = global::<Unsent>();
-    let send = move || {
+    let send = Rc::new(move || {
         let words = draft.with_untracked(|d| d.0.trim_end().to_owned());
         if words.trim().is_empty() {
             return;
         }
         draft.set(Unsent(String::new()));
         send(words);
-    };
+    });
     let none = move || draft.with(|d| d.0.trim().is_empty());
+    let stop = offers.stop.clone();
+    let stopping = computed(move || stop.as_ref().is_some_and(|(working, _)| working.get()) && none());
     view()
         .flex_row()
         .items_end()
@@ -457,6 +480,29 @@ pub fn talk_bar(placeholder: String, send: impl Fn(String) + 'static) -> impl In
         .border_t(px(1.0))
         .border_color(theme::BORDER)
         .bg(theme::CHROME)
+        .child(match offers.attach.clone() {
+            None => view().into_element(),
+            Some((busy, attach)) => view()
+                .w(px(40.0))
+                .h(px(40.0))
+                .rounded(px(20.0))
+                .items_center()
+                .justify_center()
+                .active(|s| s.bg(theme::HOVER).scale(ui::PRESSED))
+                .transition()
+                .duration(ui::QUICK)
+                .role(AccessibilityRole::Button)
+                .label(t!("Send a picture"))
+                .test_id("attach")
+                .disabled(move || busy.get())
+                .on_press(move || attach())
+                .child(dynamic(move || if busy.get() {
+                    ui::glyph("spinner", 18.0, theme::MUTED).animate_spin().into_element()
+                } else {
+                    ui::glyph("image", 22.0, theme::MUTED).into_element()
+                }))
+                .into_element(),
+        })
         .child(
             input()
                 .test_id("talk")
@@ -467,7 +513,7 @@ pub fn talk_bar(placeholder: String, send: impl Fn(String) + 'static) -> impl In
                 .placeholder_color(move || theme::now(theme::DIM))
                 .flex_1()
                 .min_h(px(40.0))
-                .max_h(px(132.0))
+                .max_h(move || px((window().height.0 * 0.25).clamp(64.0, 132.0)))
                 .px(px(14.0))
                 .py(px(9.0))
                 .rounded(px(20.0))
@@ -478,8 +524,9 @@ pub fn talk_bar(placeholder: String, send: impl Fn(String) + 'static) -> impl In
                 .line_height(px(22.0))
                 .text_color(theme::FOREGROUND),
         )
-        .child(
-            view()
+        // Send; while the agent works and nothing is written, stop it.
+        .child(dynamic(move || {
+            let round = || view()
                 .w(px(40.0))
                 .h(px(40.0))
                 .rounded(px(20.0))
@@ -489,13 +536,92 @@ pub fn talk_bar(placeholder: String, send: impl Fn(String) + 'static) -> impl In
                 .active(|s| s.opacity(0.7).scale(ui::PRESSED))
                 .transition()
                 .duration(ui::QUICK)
-                .role(AccessibilityRole::Button)
-                .label(t!("Send"))
-                .disabled(none)
-                .disabled_style(|s| s.opacity(0.35))
-                .on_press(send)
-                .child(ui::glyph("arrow-up", 20.0, theme::SOLID_FOREGROUND)),
-        )
+                .role(AccessibilityRole::Button);
+            match offers.stop.clone().filter(|_| stopping.get()) {
+                Some((_, stop)) => round()
+                    .label(t!("Stop"))
+                    .test_id("stop")
+                    .on_press(move || stop())
+                    .child(view().w(px(13.0)).h(px(13.0)).rounded(px(3.0)).bg(theme::SOLID_FOREGROUND))
+                    .into_element(),
+                None => {
+                    let send = send.clone();
+                    round()
+                        .label(t!("Send"))
+                        .disabled(none)
+                        .disabled_style(|s| s.opacity(0.35))
+                        .on_press(move || send())
+                        .child(ui::glyph("arrow-up", 20.0, theme::SOLID_FOREGROUND))
+                        .into_element()
+                }
+            }
+        }))
+}
+
+/// How many rows a question shows at most.
+const ASKED_ROWS: usize = 14;
+
+/// What a program waiting for an answer asks: the bottom of its terminal
+/// with something on it, drawn as the terminal draws it, watched as it is
+/// (nothing resized; too wide, it scrolls across). Keys go to it through
+/// the viewer given back, at once.
+pub fn question(engine: Engine, address: &str) -> (View, Rc<Viewer>) {
+    let viewer = {
+        let _entered = link::runtime().enter();
+        Rc::new(engine.viewer(address, Mode::Watch, untracked(theme::palette)))
+    };
+    let shown = signal(Arc::new(asked(&viewer.snapshot())));
+    {
+        let (viewer, mut changes) = (viewer.clone(), viewer.changes());
+        spawn(async move {
+            while changes.changed().await.is_ok() {
+                next_frame().await;
+                changes.borrow_and_update();
+                shown.set(Arc::new(asked(&viewer.snapshot())));
+            }
+        });
+    }
+    let font = use_context::<Prefs>().expect("prefs").font;
+    let cell = computed(move || Cell::at(font.get()));
+    let width = signal(0.0f32);
+    // The whole width in the card, never larger, nor too small to read.
+    let scale = computed(move || {
+        let (cols, w) = (shown.with(|s| s.cols) as f32, width.get());
+        if w <= 0.0 || cols <= 0.0 { 1.0 } else { (w / (cols * cell.get().width)).clamp(0.6, 1.0) }
+    });
+    let background = computed(move || shown.with(|s| theme::rgb_of(s.background)));
+    let drawn = view()
+        .w_full()
+        .rounded(px(10.0))
+        .overflow_hidden()
+        .bg(move || background.get())
+        .on_layout(move |b: &Bounds<Points>| width.set(b.size.width.0 - 16.0))
+        .test_id("question")
+        .child(
+            scroll()
+                .horizontal()
+                .scrollbar(false)
+                .child(view().p(px(8.0)).child(terminal_rows(shown, cell, scale).pointer_events(PointerEvents::None))),
+        );
+    (drawn, viewer)
+}
+
+/// The rows of `s` a question shows: up to [`ASKED_ROWS`] ending at the
+/// last with something on it, as wide as what is on them.
+fn asked(s: &Snapshot) -> Snapshot {
+    let empty = |r: &herdc_term::Row| r.runs.iter().all(|run| run.text.trim().is_empty() && run.style.bg.is_none());
+    let end = s.lines.iter().rposition(|r| !empty(r)).map_or(0, |i| i + 1);
+    let mut start = end.saturating_sub(ASKED_ROWS);
+    while start < end && empty(&s.lines[start]) {
+        start += 1;
+    }
+    let lines = s.lines[start..end].to_vec();
+    let cols = lines
+        .iter()
+        .flat_map(|r| r.runs.iter().filter(|run| !run.text.trim_end().is_empty() || run.style.bg.is_some()).map(|run| run.col + run.width))
+        .max()
+        .unwrap_or(1);
+    Snapshot { cols, rows: lines.len().max(1) as u16, lines, cursor: None, scrolled: 0, history: 0, background: s.background, foreground: s.foreground }
 }
 
 /// A message written whole before it goes in (more than a few words, a
@@ -1061,7 +1187,7 @@ fn bar_item(id: &str, viewer: Rc<Viewer>, latch: Latch) -> View {
 }
 
 /// How long one's own key waits to press Enter after its words.
-const ENTER_AFTER: std::time::Duration = std::time::Duration::from_millis(250);
+pub const ENTER_AFTER: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// A key's face: what it shows, in `ink`.
 fn key_face(label: &str, ink: impl Fn() -> Hsla + 'static) -> View {

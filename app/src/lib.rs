@@ -146,5 +146,6 @@ fn page(live: Live, route: Route) -> Screen {
         Route::Search => search::search_page(live),
         Route::AddMachine => machines::add_machine_page(live),
         Route::Text(text) => terminal::text_page(live, text),
+        Route::Step(call) => chat::step_page(live, call),
     }
 }

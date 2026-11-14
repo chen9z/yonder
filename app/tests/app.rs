@@ -886,3 +886,117 @@ fn an_agent_made_the_main_one_has_a_tab_of_its_own_and_the_app_opens_on_it() {
     pick(&mut app, "none");
     app.wait_for_within("text:None", SLOW).unwrap();
 }
+
+/// A Pi as far as a phone can tell: it says it is Pi and how it is, and
+/// keeps its session in a file as Pi does. A line said to it is a turn
+/// (a step, then words); `ask` asks in its terminal until answered; `slow`
+/// works until a key comes (Esc, stopping it).
+const FAKE_PI: &str = r#"f="$HOME/.pi/agent/sessions/--fake--/2026-11-05T17-59-33-091Z_fake.jsonl"
+mkdir -p "${f%/*}"
+printf '{"type":"session","id":"s"}\n' > "$f"
+n=0; p=""
+say() { printf '\033]7501;state=%s:app=pi\033\\' "$1"; }
+add() { n=$((n+1)); printf '{"type":"message","id":"e%s","parentId":"%s","timestamp":"2026-11-05T17:59:34.063Z","message":%s}\n' "$n" "$p" "$1" >> "$f"; p="e$n"; }
+you() { add "{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"$1\"}]}"; }
+reply() { add "{\"role\":\"assistant\",\"stopReason\":\"${2:-stop}\",\"content\":[{\"type\":\"text\",\"text\":\"$1\"}]}"; }
+say idle
+while IFS= read -r m; do
+  case "$m" in
+    ask) you ask; reply "Which one?"; say blocked; printf 'Pick one:\n> yes\n  no\n'; IFS= read -r a; reply Answered; say idle;;
+    slow) you slow; say working; stty -icanon min 1 time 0; dd bs=1 count=1 >/dev/null 2>&1; stty icanon; reply "" aborted; say idle;;
+    *) you "$m"; say working
+       add '{"role":"assistant","stopReason":"toolUse","content":[{"type":"toolCall","id":"c1","name":"bash","arguments":{"command":"echo hi"}}]}'
+       add '{"role":"toolResult","toolCallId":"c1","content":[{"type":"text","text":"hi"}]}'
+       reply "Done with $m"; say idle;;
+  esac
+done"#;
+
+#[test]
+fn a_pi_main_agent_is_talked_to_as_a_conversation() {
+    use herdc_engine::{Engine, Options as Screen};
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let session = std::sync::Arc::new(Session::new());
+    let served = runtime.block_on(computer::serve(&session, Options::default())).unwrap();
+    // The agent, in a space of its own, started from another screen.
+    let address = runtime.block_on(async {
+        let made = session.clone();
+        let screen = Engine::start(std::sync::Arc::new(move || {
+            let session = made.clone();
+            Box::pin(async move { Ok(session.connect().await) })
+        }), Screen { size: Some((80, 30)), ..Default::default() });
+        let mut watch = screen.watch();
+        tokio::time::timeout(SLOW, async {
+            while !watch.borrow_and_update().machines.first().is_some_and(|m| m.layout == "ready") {
+                watch.changed().await.unwrap();
+            }
+        }).await.unwrap();
+        let made = screen.run("space.new", serde_json::json!({"argv": ["sh", "-c", FAKE_PI]})).await.unwrap();
+        let address = made["terminal"].as_str().unwrap().to_owned();
+        screen.client().unwrap().call("terminal.label", serde_json::json!({"terminal": address, "labels": {"alma.session": "pi:id:fake"}})).await.unwrap();
+        screen.close();
+        address
+    });
+
+    let mut config = EngineConfig::new(Root::of::<herdc_app::App>());
+    config.storage = Some(MemoryStorage::new(Vec::<(String, String)>::new()));
+    let mut app = Headless::start(config).unwrap();
+    app.wait_for("text:Connect").unwrap();
+    app.type_text("id:display name", "Studio").unwrap();
+    app.type_text("id:computer", "127.0.0.1").unwrap();
+    app.type_text("id:user", "me").unwrap();
+    app.clear("id:port").unwrap();
+    app.type_text("id:port", &served.port.to_string()).unwrap();
+    app.type_text("id:password", "open sesame").unwrap();
+    let fingerprint = Box::leak(served.fingerprint.clone().into_boxed_str());
+    answer(&mut app, "Trust", fingerprint);
+    app.press("text:Connect").unwrap();
+    app.wait_for_within("label:Settings", SLOW).unwrap();
+    app.press("label:Settings").unwrap();
+    app.wait_for_within("text:Main agent", SLOW).unwrap();
+    app.press("text:Main agent").unwrap();
+    pick(&mut app, &address);
+
+    // Its session, read: empty yet. Said to, the words wait, then show
+    // as it wrote them down, with the step it took and the time.
+    app.wait_for_within("id:talk", SLOW).unwrap();
+    app.wait_for_within("label:Send a picture", SLOW).unwrap();
+    app.type_text("id:talk", "hello").unwrap();
+    app.press("label:Send").unwrap();
+    app.wait_for_within("text:Sending…", SLOW).unwrap();
+    app.wait_for_within("text:Done with hello", SLOW).unwrap();
+    app.wait_until("no longer waiting", SLOW, |s| s.count("text:Sending…") == Ok(0) && s.count("text:Sent") == Ok(0)).unwrap();
+    app.wait_for("text:11/5 17:59").unwrap();
+    // Its step, whole, on a page of its own.
+    app.press("label:bash echo hi").unwrap();
+    app.wait_for_within("id:step-input", SLOW).unwrap();
+    app.wait_for("text:echo hi").unwrap();
+    app.wait_for("text:hi").unwrap();
+    app.back().unwrap();
+
+    // Asking in its terminal: the question shows here, and what is
+    // written answers it there.
+    app.wait_for_within("id:talk", SLOW).unwrap();
+    app.type_text("id:talk", "ask").unwrap();
+    app.press("label:Send").unwrap();
+    app.wait_for_within("id:asked", SLOW).unwrap();
+    app.wait_for("id:question").unwrap();
+    app.press("label:Down").unwrap();
+    app.type_text("id:talk", "yes").unwrap();
+    app.press("label:Send").unwrap();
+    app.wait_for_within("text:Answered", SLOW).unwrap();
+    app.wait_until("not asking", SLOW, |s| s.count("id:asked") == Ok(0)).unwrap();
+
+    // Working, it is stopped from here.
+    app.type_text("id:talk", "slow").unwrap();
+    app.press("label:Send").unwrap();
+    app.wait_for_within("id:stop", SLOW).unwrap();
+    app.press("id:stop").unwrap();
+    app.wait_for_within("text:Stopped", SLOW).unwrap();
+
+    // A picture goes beside it, its path in what is written.
+    app.on_pick(|_| vec![nsh_core::picker::PickedFile::new("shot.png", "image/png", nsh_core::ImageData::new(b"\x89PNG".to_vec()))]);
+    app.press("id:attach").unwrap();
+    app.wait_until("its path written", SLOW, |s| s.input_text("id:talk").ok().flatten().is_some_and(|t| t.ends_with("shot.png"))).unwrap();
+    let path = app.screen().input_text("id:talk").unwrap().unwrap().to_owned();
+    assert_eq!(std::fs::read(&path).unwrap(), b"\x89PNG");
+}

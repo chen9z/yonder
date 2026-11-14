@@ -107,13 +107,16 @@ pub fn choose(prefs: Prefs, live: Live) {
 }
 
 /// What it and the agents working for it ask of the person: how many
-/// need them.
+/// need them; else whether it said something not read yet (done).
 pub fn waiting(live: &Live) -> Memo<(usize, &'static str)> {
     let (found, world) = (found(live), live.view);
     computed(move || {
         let Some(lead) = found.get() else { return (0, "blocked") };
         let team = world.with(|v| agents::listed_subs(&v.terminals, &v.agents, &lead.address));
-        ((lead.status == "blocked") as usize + team.iter().filter(|s| s.status == Some("blocked")).count(), "blocked")
+        match (lead.status == "blocked") as usize + team.iter().filter(|s| s.status == Some("blocked")).count() {
+            0 => ((lead.status == "done") as usize, "done"),
+            blocked => (blocked, "blocked"),
+        }
     })
 }
 

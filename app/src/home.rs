@@ -57,8 +57,26 @@ pub fn home_page(live: Live) -> impl IntoElement {
     let lead_name = move || prefs.lead(&computer).map(|l| l.name()).filter(|n| !n.is_empty()).unwrap_or_else(|| t!("Main").into());
     let lead_waiting = lead::waiting(&live);
     let shown_live = live.clone();
-    // The keyboard up (writing to the main agent), the tabs make room.
+    // The keyboard up (writing to the main agent), the tabs make room;
+    // sideways, they are smaller (no words under them).
     let typing = computed(|| keyboard_height().0 > 0.0);
+    let wide = computed(|| {
+        let w = window();
+        w.width.0 > w.height.0
+    });
+    // On its tab, the main agent is what the person looks at (it is read
+    // then, as a pane shown is), nothing else; elsewhere, the shown tab's
+    // panes, as before.
+    {
+        let (engine, found, routes) = (live.engine.clone(), lead::found(&live), nav::routes());
+        let was = stored(None::<Vec<String>>);
+        effect(move || {
+            let looking = (tab.get() == Home::Lead && routes.with(|r| r.0.is_empty())).then(|| found.with(|f| f.iter().map(|a| a.address.clone()).collect()));
+            if was.replace(looking.clone()) != looking {
+                engine.set_looking(looking);
+            }
+        });
+    }
     view()
         .flex_1()
         .bg(theme::CHROME)
@@ -74,22 +92,22 @@ pub fn home_page(live: Live) -> impl IntoElement {
         }))
         .child(when(move || typing.get(), || view().h(ui::bottom_inset)).otherwise(move || {
             let lead_name = lead_name.clone();
-            view().items_center().pt(px(4.0)).pb(move || ui::bottom_inset() + px(6.0)).child(
+            view().items_center().pt(px(4.0)).pb(move || ui::bottom_inset() + px(if wide.get() { 2.0 } else { 6.0 })).child(
                 view().flex_row().p(px(4.0)).rounded(px(32.0)).bg(theme::RAISED)
                     .border_1().border_color(theme::BORDER)
-                    .child(home_tab(lead_name, "lead", tab, Home::Lead, Some(lead_waiting)))
-                    .child(home_tab(|| t!("Agents").into(), "inbox", tab, Home::Agents, Some(waiting)))
-                    .child(home_tab(|| t!("Spaces").into(), "spaces", tab, Home::Spaces, None)),
+                    .child(home_tab(lead_name, "lead", tab, Home::Lead, Some(lead_waiting), wide))
+                    .child(home_tab(|| t!("Agents").into(), "inbox", tab, Home::Agents, Some(waiting), wide))
+                    .child(home_tab(|| t!("Spaces").into(), "spaces", tab, Home::Spaces, None, wide)),
             )
         }))
 }
 
-fn home_tab(label: impl Fn() -> String + Clone + 'static, icon: &'static str, tab: Signal<Home>, mine: Home, badge: Option<Memo<(usize, &'static str)>>) -> impl IntoElement {
+fn home_tab(label: impl Fn() -> String + Clone + 'static, icon: &'static str, tab: Signal<Home>, mine: Home, badge: Option<Memo<(usize, &'static str)>>, wide: Memo<bool>) -> impl IntoElement {
     let active = move || tab.get() == mine;
     let ink = move || if active() { theme::ACCENT } else { theme::MUTED };
     let count = move || badge.map_or(0, |b| b.get().0);
     let color = move || badge.map_or(theme::BLOCKED, |b| theme::status(b.get().1));
-    view().w(px(88.0)).h(px(50.0)).rounded(px(25.0))
+    view().w(px(88.0)).h(move || px(if wide.get() { 38.0 } else { 50.0 })).rounded(px(25.0))
         .items_center().justify_center().gap(px(2.0))
         .role(AccessibilityRole::Tab)
         .label({
@@ -106,7 +124,7 @@ fn home_tab(label: impl Fn() -> String + Clone + 'static, icon: &'static str, ta
             tab.set(mine);
         })
         .child(dynamic(move || ui::glyph(icon, 22.0, ink()).into_element()))
-        .child(text(label).max_w(px(80.0)).text_size(theme::SMALL).font_weight(FontWeight::MEDIUM).text_color(move || theme::now(ink())).number_of_lines(1))
+        .child(when(move || !wide.get(), move || text(label.clone()).max_w(px(80.0)).text_size(theme::SMALL).font_weight(FontWeight::MEDIUM).text_color(move || theme::now(ink())).number_of_lines(1)))
         .child(when(move || count() > 0, move || {
             view().absolute().left(px(53.0)).top(px(1.0)).rounded(px(9.0)).min_w(px(16.0)).h(px(16.0))
                 .px(px(3.0)).items_center().justify_center().bg(move || theme::now(color())).pointer_events(PointerEvents::None)

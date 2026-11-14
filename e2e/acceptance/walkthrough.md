@@ -129,6 +129,12 @@ it with the screenshot's name and go on.
    ("N steps · bash, read"); press one: it opens on each step; press a
    step: a page with what it ran and gave back. Back. At the top right a
    terminal icon shows the terminal, and then a bubble icon the
-   conversation again.
+   conversation again. Left of the field an image icon; an ↑ on the
+   right (a ■ instead while it works and nothing is written: don't press
+   it). Scroll up a little: a ↓ shows at the bottom right; press it: back
+   at the end. If "Show earlier messages" is at the top, press it: older
+   lines show above and the screen stays where it was. Times show between
+   lines far apart. Turn the phone sideways: the tabs at the bottom are
+   lower, without words; turn it back.
 
 End with a table: step, as said (yes/no), what differed, screenshot.
