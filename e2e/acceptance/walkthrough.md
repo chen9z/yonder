@@ -39,6 +39,10 @@ it with the screenshot's name and go on.
    `./adbui.sh key KEYCODE_ENTER`. The listing shows the three files. The
    key bar has Enter (↵) at its left end and Hide keyboard (⌄) at its
    right end, which stay put when the keys between are swiped along.
+2a. With the keyboard up, press ✎ (Write a message) before ⌄ on the key
+   bar: a sheet with a field of several lines and "Paste". Type
+   `echo composed` and press Send: the sheet and the keyboard go, and the
+   terminal runs it (prints `composed`). Tap the terminal again.
 3. With the keyboard still up, hold the terminal: `./adbui.sh hold 720 1400`.
    The keyboard goes, so the sheet is all in sight.
    A sheet titled "Terminal" offers "Select text" and "Paste", each with
@@ -74,6 +78,10 @@ it with the screenshot's name and go on.
    (🔍) and Settings (a gear), and `+` on Spaces; no `⋯`. Press Settings,
    then "Add a machine…": "FROM YOUR SSH CONFIG" lists `vps` with `can@10.0.0.7` and
    "Add"; a field `user@host` below. Back, then tap the space to return.
+5a. Home's 🔍 (Jump to a terminal): a field over every terminal, each
+   row the space's name in bold, what it does after it, its tab under.
+   Type `zzz`: "No terminal is called that". Clear it, type the space's
+   name: its terminal stays; tap it: the workspace, on that terminal.
 6. Settings (in More): its rows sit on rounded cards under small headings
    (COMPUTER, TERMINAL, GENERAL, THIS PHONE'S KEY, ABOUT), each row with a
    line icon, and Leave this computer (red) alone on the last card.
@@ -97,7 +105,13 @@ it with the screenshot's name and go on.
    colored square, checked (a ✓ at the row's end), and "All spaces and
    agents"; press that. On the home page, "Agents" (at the
    bottom) lists the agents, or with none says "No agent status yet" and
-   why. Tap the space under "Spaces"
+   why. An agent on this computer is one line (no machine under it), an
+   idle one has no status mark, and no row has a pin icon. If one is
+   listed: drag its row right by half a row's width and back before
+   letting go (`input motionevent` DOWN, MOVEs, UP): a "Pin" in the
+   accent shows under it, and let go it slides back, nothing pinned. Hold
+   it: a sheet titled as its row reads (not a title with `| space`);
+   Back. Tap the space under "Spaces"
    to go back.
 
 End with a table: step, as said (yes/no), what differed, screenshot.

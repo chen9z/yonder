@@ -296,6 +296,7 @@ fn machine_heading(live: Live, g: ReadSignal<Group>, folded: Signal<Vec<String>>
 /// A space's row: a tap opens it, a long press its menu (where reordering
 /// starts: then each row has a handle to drag).
 fn space_row(live: Live, s: ReadSignal<SpaceView>, g: ReadSignal<Group>, drag: Signal<Option<(String, isize)>>, reorder: Signal<bool>, color: impl Fn() -> usize + 'static) -> impl IntoElement {
+    let world = live.view;
     let (press, hold, mover) = (live.clone(), live.clone(), live);
     // How far its handle is dragged, and a row's height to count rows by.
     let dragged = signal(0.0f32);
@@ -398,7 +399,8 @@ fn space_row(live: Live, s: ReadSignal<SpaceView>, g: ReadSignal<Group>, drag: S
         })
         .child(ui::space_mark(move || s.with(|s| s.name.clone()), color))
         .child(text(move || s.with(|s| s.name.clone())).flex_shrink(0.0).max_w(percentage(0.55)).text_size(theme::ROW).text_color(theme::FOREGROUND).number_of_lines(1))
-        .child(text(move || s.with(|s| branch(s).unwrap_or_default().to_owned())).flex_1().text_right().text_size(theme::CAPTION).text_color(theme::DIM).number_of_lines(1))
+        // The home folder by name: `~` alone reads as a stray mark.
+        .child(text(move || s.with(|s| g.with(|g| world.with(|v| Some(aside(s, &g.spaces, &v.home)).filter(|a| a != "~").unwrap_or_else(|| t!("Home folder").into()))))).flex_1().text_right().text_size(theme::CAPTION).text_color(theme::DIM).number_of_lines(1))
         .child(ui::tab_status(move || s.with(|s| s.status)))
         .child(when(move || reorder.get(), move || {
             let live = mover.clone();
@@ -439,10 +441,58 @@ fn space_row(live: Live, s: ReadSignal<SpaceView>, g: ReadSignal<Group>, drag: S
         }))
 }
 
+/// What tells a space apart, on its right: where it is, or else what runs
+/// in it, when another of its machine has its name; else its branch.
+fn aside(space: &SpaceView, siblings: &[SpaceView], home: &str) -> String {
+    let twins: Vec<&SpaceView> = siblings.iter().filter(|o| o.id != space.id && o.name.eq_ignore_ascii_case(&space.name)).collect();
+    if twins.is_empty() {
+        return branch(space).unwrap_or_default().to_owned();
+    }
+    if twins.iter().all(|o| o.folder != space.folder) {
+        return worktrees::tilde(&space.folder, home);
+    }
+    let mut runs: Vec<&str> = Vec::new();
+    for p in space.tabs.iter().flat_map(|t| &t.panes) {
+        let name = p.program["name"].as_str().filter(|n| !n.is_empty()).or(p.app.as_deref());
+        if let Some(name) = name.filter(|n| !runs.contains(n)) {
+            runs.push(name);
+        }
+    }
+    if runs.is_empty() { branch(space).unwrap_or_default().to_owned() } else { runs.join(" · ") }
+}
+
 /// Only a branch that adds something to the space's name.
 // Adapted from herdr-app defaults/mods/spaces/main.js, Apache-2.0.
 fn branch(space: &SpaceView) -> Option<&str> {
     let branch = space.branch.as_deref()?;
     let repo = space.folder.trim_end_matches('/').rsplit('/').next().unwrap_or_default();
     (!branch.is_empty() && !matches!(branch, "main" | "master") && !branch.eq_ignore_ascii_case(&space.name) && !branch.eq_ignore_ascii_case(repo)).then_some(branch)
+}
+
+#[cfg(test)]
+mod tests {
+    use herdc_engine::SpaceView;
+    use serde_json::json;
+
+    fn space(id: &str, name: &str, folder: &str, programs: &[&str]) -> SpaceView {
+        let panes: Vec<_> = programs.iter().enumerate().map(|(i, p)| json!({ "pane": format!("p{i}"), "terminal": format!("t{i}"), "mod": null, "props": null,
+            "title": "", "cwd": null, "branch": null, "status": null, "app": null, "program": { "name": p }, "focused": false, "zoomed": false, "shown": null, "live": true })).collect();
+        let root = herdc_model::model::Tab::new("tab", "1", "p0", "t0").root;
+        serde_json::from_value(json!({ "id": id, "index": 1, "name": name, "named": true, "folder": folder, "machine": null, "branch": "main",
+            "active": false, "status": null, "tabs": [{ "id": format!("{id}-tab"), "index": 1, "name": "1", "named": false, "active": true, "status": null,
+                "settled": false, "settled_at": null, "changed_at": null, "working_since": null, "focused": "p0", "zoomed": null, "root": root, "panes": panes }] })).unwrap()
+    }
+
+    #[test]
+    fn spaces_of_one_name_say_where_they_are_or_what_runs_there() {
+        let (a, b, c) = (space("s1", "nova", "/home/me/nova", &["Pi", "Codex", "Pi"]), space("s2", "nova", "/home/me/nova", &["Codex"]), space("s3", "notes", "/home/me/notes", &["Pi"]));
+        let all = [a.clone(), b.clone(), c.clone()];
+        assert_eq!(super::aside(&a, &all, "/home/me"), "Pi · Codex");
+        assert_eq!(super::aside(&b, &all, "/home/me"), "Codex");
+        // Alone with its name: nothing (main says nothing).
+        assert_eq!(super::aside(&c, &all, "/home/me"), "");
+        // In another folder: the folder.
+        let d = space("s4", "nova", "/srv/nova", &["Pi"]);
+        assert_eq!(super::aside(&d, &[a, d.clone()], "/home/me"), "/srv/nova");
+    }
 }

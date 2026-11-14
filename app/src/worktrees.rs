@@ -31,7 +31,7 @@ async fn read(there: There, folder: String) -> Result<Read, String> {
     Ok(Read { repo, all, home })
 }
 
-fn tilde(path: &str, home: &str) -> String {
+pub fn tilde(path: &str, home: &str) -> String {
     match path.strip_prefix(home) {
         Some(rest) if !home.is_empty() => format!("~{rest}"),
         _ => path.to_owned(),

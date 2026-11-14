@@ -379,6 +379,18 @@ fn on_card(edge: impl Fn() -> Edge + Copy + 'static, line: bool) -> View {
         .child(when(move || line && !edge().top, || view().h(px(1.0)).ml(px(46.0)).bg(theme::BORDER)))
 }
 
+/// What a screen reader says of a row: what it is, where, and its status
+/// when it has something to say.
+fn spoken(name: &str, more: Option<&str>, machine: Option<&str>, status: &str) -> String {
+    let status = match status {
+        "blocked" => Some(tr("Needs you")),
+        "done" => Some(tr("Done")),
+        "working" => Some(tr("Working")),
+        _ => None,
+    };
+    [Some(name), more, machine, status].into_iter().flatten().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(", ")
+}
+
 /// How far a row is pulled aside for what its swipe does.
 const SWIPE: f32 = 80.0;
 
@@ -402,12 +414,20 @@ fn agent_row(live: Live, l: ReadSignal<Line>, now: Signal<u64>, inline: bool, fo
     let edge = move || l.with(|l| match l { Line::Agent { edge, .. } => *edge, _ => Edge::default() });
     let prefs = use_context::<crate::prefs::Prefs>().unwrap();
     let computer = live.computer.id();
-    let here = live.computer.name.clone();
     let color = {
         let computer = computer.clone();
         move || l.with(|l| match l { Line::Agent { agent, .. } => prefs.colors.with(|c| c.get(&format!("{computer}\u{0}{}", agent.space)).copied()).unwrap_or(0), _ => 0 })
     };
-    let (press, hold, swiper) = (live.clone(), live.clone(), live);
+    // Its machine, when another: on this computer, it goes without saying.
+    let elsewhere = {
+        let computer = computer.clone();
+        move || row.with(|r| r.as_ref().and_then(|r| r.6.as_ref()).map(|m| prefs.machine_name(&computer, m)))
+    };
+    let said = {
+        let elsewhere = elsewhere.clone();
+        move || row.with(|r| r.as_ref().map(|r| spoken(&r.4, r.5.as_deref(), elsewhere().as_deref(), r.1)).unwrap_or_default())
+    };
+    let (press, hold, swiper, helped) = (live.clone(), live.clone(), live.clone(), live);
     // How far the row is pulled aside, and whether a finger has it.
     let pulled = signal(0.0f32);
     let pulling = signal(false);
@@ -469,10 +489,27 @@ fn agent_row(live: Live, l: ReadSignal<Line>, now: Signal<u64>, inline: bool, fo
                 .items_center()
                 .gap(px(12.0))
                 .px(px(12.0))
-                .min_h(px(58.0))
+                .min_h(px(52.0))
                 .py(px(8.0))
                 .bg(move || if row.with(|r| r.as_ref().is_some_and(|r| r.2)) { theme::now(theme::SELECTED) } else { Hsla::transparent_black() })
                 .active(|s| s.bg(theme::HOVER))
+                .role(AccessibilityRole::Button)
+                .label(said)
+                // What a swipe does, for those who can't swipe it.
+                .accessibility_actions(vec![
+                    nsh_core::AccessibilityActionDef { name: "pin".into(), label: Some(t!("Pin or unpin").into()) },
+                    nsh_core::AccessibilityActionDef { name: "stop".into(), label: Some(t!("Stop it").into()) },
+                ])
+                .on_accessibility_action(move |name: &str| {
+                    let Some(a) = agent() else { return };
+                    match name {
+                        "pin" => helped.run("terminal.pin", json!({ "terminal": a.address, "pinned": !a.pinned })),
+                        "stop" => {
+                            spawn(stop(helped.clone(), a.address));
+                        }
+                        _ => {}
+                    }
+                })
                 .claim_touches(TouchClaim::on_pan(PanActivation::horizontal(px(14.0), px(10.0))))
                 .on_responder_move(move |e: &ResponderEvent| {
                     pulling.set(true);
@@ -508,10 +545,12 @@ fn agent_row(live: Live, l: ReadSignal<Line>, now: Signal<u64>, inline: bool, fo
                     }
                     let Some(a) = agent() else { return };
                     let live = hold.clone();
+                    // Called as its row says it, not by its raw title.
+                    let called = row.with_untracked(|r| r.as_ref().map(|r| [Some(r.4.clone()), r.5.clone()].into_iter().flatten().collect::<Vec<_>>().join(" · ")).unwrap_or_default());
                     spawn(async move {
                         use crate::pick::{self, Item};
                         let pin = if a.pinned { Item::glyph("unpin", t!("Unpin"), "pin-off") } else { Item::glyph("pin", t!("Pin to the top"), "pin") };
-                        match pick::one(&ui::title(&a.title), vec![pin, Item::glyph("kill", t!("Stop it"), "square").danger()]).await.as_deref() {
+                        match pick::one(&called, vec![pin, Item::glyph("kill", t!("Stop it"), "square").danger()]).await.as_deref() {
                             Some("pin") => live.run("terminal.pin", json!({ "terminal": a.address, "pinned": true })),
                             Some("unpin") => live.run("terminal.pin", json!({ "terminal": a.address, "pinned": false })),
                             Some("kill") => stop(live, a.address).await,
@@ -548,13 +587,11 @@ fn agent_row(live: Live, l: ReadSignal<Line>, now: Signal<u64>, inline: bool, fo
                                         .number_of_lines(1),
                                 ),
                         )
-                        // Where: its machine, else the computer.
-                        .child(
-                            text(move || row.with(|r| r.as_ref().map(|r| r.6.as_ref().map_or_else(|| here.clone(), |m| prefs.machine_name(&computer, m))).unwrap_or_default()))
-                                .text_size(theme::CAPTION)
-                                .text_color(theme::DIM)
-                                .number_of_lines(1),
-                        ),
+                        // Where, when on another machine.
+                        .child(dynamic(move || match elsewhere() {
+                            Some(machine) => text(machine).text_size(theme::CAPTION).text_color(theme::DIM).number_of_lines(1).into_element(),
+                            None => view().into_element(),
+                        })),
                 )
                 .child(when(move || row.with(|r| r.as_ref().is_some_and(|r| r.7 > 0)), move || {
                     // The sub-agents' fold; folded, how many.
@@ -573,7 +610,6 @@ fn agent_row(live: Live, l: ReadSignal<Line>, now: Signal<u64>, inline: bool, fo
                         .child(text(move || row.with(|r| r.as_ref().filter(|r| !r.8).map(|r| r.7.to_string()).unwrap_or_default())).text_size(theme::SMALL).text_color(theme::DIM))
                 }))
                 .child(text(move || agent().map(|a| elapsed(a.since, now.get())).unwrap_or_default()).text_size(theme::CAPTION).text_color(theme::DIM))
-                .child(when(move || row.with(|r| r.as_ref().is_some_and(|r| r.3)), || ui::glyph("pin", 13.0, theme::DIM)))
                 .child(ui::status_mark(move || row.with(|r| r.as_ref().map(|r| r.1)), move || row.with(|r| r.as_ref().is_some_and(|r| r.9)))),
                 ),
         ),

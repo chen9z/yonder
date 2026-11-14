@@ -361,6 +361,8 @@ fn zh(en: &str) -> Option<&'static str> {
         "Show all {}" => "显示全部 {} 个",
         "Show less" => "收起",
         "Pin" => "置顶",
+        "Pin or unpin" => "置顶或取消置顶",
+        "Home folder" => "主目录",
         "COMPUTER" => "电脑",
         "Connecting…" => "正在连接…",
         "Leave this computer" => "断开这台电脑",
