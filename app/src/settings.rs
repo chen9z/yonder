@@ -1,5 +1,5 @@
 //! Settings: the computer the app is on (its connection, its machines,
-//! its commands, leaving it), the terminal's size, fit and keys, the
+//! leaving it), the terminal's size, fit and keys, the
 //! app's language and how agents are sorted, this phone's key.
 
 use crate::i18n::Language;
@@ -41,7 +41,6 @@ pub fn settings_page(live: Live) -> nsh_core::element::Screen {
                         .child(view().w(px(8.0)).h(px(8.0)).mr(px(4.0)).rounded(px(4.0)).bg(move || theme::now(state.get()))),
                     action("plug", t!("Edit connection"), Act::Go, || nav::push(Route::EditConnection)),
                     action("server", t!("Add a machine…"), Act::Go, || nav::push(Route::AddMachine)),
-                    action("command", t!("Commands"), Act::Go, || nav::push(Route::Commands)),
                 ]))
                 .child(ui::card_heading(t!("TERMINAL")))
                 .child(ui::card(vec![

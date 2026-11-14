@@ -86,7 +86,7 @@ it with the screenshot's name and go on.
    (COMPUTER, TERMINAL, GENERAL, THIS PHONE'S KEY, ABOUT), each row with a
    line icon, and Leave this computer (red) alone on the last card.
    COMPUTER has the computer (a green dot, "herdr-core" and its version),
-   Edit connection, Add a machine… and Commands; GENERAL has Language and
+   Edit connection and Add a machine… (no Commands); GENERAL has Language and
    Sort agents (Priority). "Fit terminals to the phone" shows a switch,
    on, and small words under the card say what it does. The font size −
    and + change the size shown; the terminal's text follows when back.

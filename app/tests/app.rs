@@ -758,7 +758,7 @@ fn home_makes_no_space_before_the_computer_has_said_its_layout() {
 }
 
 #[test]
-fn an_agent_s_row_pulled_left_asks_to_stop_it_and_a_short_pull_does_nothing() {
+fn an_agent_s_row_pulled_left_does_nothing_and_stopping_is_asked_from_its_menu() {
     // Drawn from what the computer showed last; nobody answers on its port.
     let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
     let computer = serde_json::json!({ "name": "desk", "host": "127.0.0.1", "port": port, "user": "me", "fingerprint": "SHA256:x" });
@@ -788,13 +788,16 @@ fn an_agent_s_row_pulled_left_asks_to_stop_it_and_a_short_pull_does_nothing() {
     app.press("label:Spaces and agents").unwrap();
     app.wait_for_within("text:Fix the build", SLOW).unwrap();
 
-    // Not far enough: back in place, nothing asked.
+    // Pulled left, however far: nothing (stopping is too easy to swipe).
     app.drag("text:Fix the build", point(px(-30.0), px(0.0))).unwrap();
-    app.wait_for("text:Fix the build").unwrap();
+    app.drag("text:Fix the build", point(px(-160.0), px(0.0))).unwrap();
+    app.wait(Duration::from_millis(500)).unwrap();
     assert!(app.screen().dialogs().is_empty());
-    // Far enough: asked first (and left as it was).
+    assert_eq!(app.screen().count("id:pick-kill"), Ok(0));
+    // From its menu: asked first (and left as it was).
     answer(&mut app, "Cancel", "Stop this agent?");
-    app.drag("text:Fix the build", point(px(-120.0), px(0.0))).unwrap();
+    app.long_press("text:Fix the build").unwrap();
+    pick(&mut app, "kill");
     app.wait_until("asked to stop it", SLOW, |s| s.dialogs().len() == 1).unwrap();
     app.wait_for("text:Fix the build").unwrap();
 }

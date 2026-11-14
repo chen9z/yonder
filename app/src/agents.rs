@@ -382,8 +382,8 @@ async fn stop(live: Live, address: String) {
 
 /// An agent's row: its space's mark (what runs on its corner), the space
 /// and what it does, where it is under them, how long since its status
-/// changed and that status. A tap shows it; a long press pins or stops it,
-/// and so does pulling it right (pins, or unpins) or left (stops).
+/// changed and that status. A tap shows it; a long press pins or stops it;
+/// pulled right, it pins (or unpins).
 fn agent_row(live: Live, l: ReadSignal<Line>, now: Signal<u64>, inline: bool, fold: impl Fn(String) + Copy + 'static) -> impl IntoElement {
     let agent = move || l.with(|l| match l { Line::Agent { agent, .. } => Some((**agent).clone()), _ => None });
     let row = computed(move || match l.get() {
@@ -411,8 +411,6 @@ fn agent_row(live: Live, l: ReadSignal<Line>, now: Signal<u64>, inline: bool, fo
     let pulled = signal(0.0f32);
     let pulling = signal(false);
     let pinned = move || row.with(|r| r.as_ref().is_some_and(|r| r.3));
-    // Which side shows under it: right while pulled right.
-    let side = computed(move || { let by = pulled.get(); (by != 0.0).then_some(by > 0.0) });
     // Let go, it goes back in a few frames, quickly then slowly.
     let back = move || {
         let from = pulled.get_untracked();
@@ -431,10 +429,9 @@ fn agent_row(live: Live, l: ReadSignal<Line>, now: Signal<u64>, inline: bool, fo
     };
     on_card(edge, true).child(
         view()
-        // Under it while pulled: what letting go does, on the side it shows.
-        .child(dynamic(move || {
-            let Some(right) = side.get() else { return view().into_element() };
-            let under = view()
+        // Under it while pulled: what letting go does.
+        .child(when(move || pulled.get() > 0.0, move || {
+            view()
                 .absolute()
                 .left(px(0.0))
                 .right(px(0.0))
@@ -444,16 +441,16 @@ fn agent_row(live: Live, l: ReadSignal<Line>, now: Signal<u64>, inline: bool, fo
                 .items_center()
                 .gap(px(8.0))
                 .px(px(22.0))
-                .bg(if right { theme::ACCENT } else { theme::BLOCKED })
-                .opacity(move || if pulled.get().abs() >= SWIPE { 1.0f32 } else { 0.6 })
-                .child(dynamic(move || ui::glyph(if !right { "square" } else if pinned() { "pin-off" } else { "pin" }, 18.0, theme::ACCENT_FOREGROUND).into_element()))
+                .justify_start()
+                .bg(theme::ACCENT)
+                .opacity(move || if pulled.get() >= SWIPE { 1.0f32 } else { 0.6 })
+                .child(dynamic(move || ui::glyph(if pinned() { "pin-off" } else { "pin" }, 18.0, theme::ACCENT_FOREGROUND).into_element()))
                 .child(
-                    text(move || if !right { t!("Stop") } else if pinned() { t!("Unpin") } else { t!("Pin") })
+                    text(move || if pinned() { t!("Unpin") } else { t!("Pin") })
                         .text_size(theme::CALLOUT)
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(theme::ACCENT_FOREGROUND),
-                );
-            if right { under.justify_start() } else { under.justify_end() }.into_element()
+                )
         }))
         // What moves: the row on a ground of its own, opaque while pulled
         // (pressed, the row itself is see-through).
@@ -492,7 +489,9 @@ fn agent_row(live: Live, l: ReadSignal<Line>, now: Signal<u64>, inline: bool, fo
                 .claim_touches(TouchClaim::on_pan(PanActivation::horizontal(px(14.0), px(10.0))))
                 .on_responder_move(move |e: &ResponderEvent| {
                     pulling.set(true);
-                    pulled.set(e.gesture.delta.x.0.clamp(-SWIPE - 40.0, SWIPE + 40.0));
+                    // Only to the right: stopping, which loses the agent's
+                    // work, is too easily swiped by mistake (its menu has it).
+                    pulled.set(e.gesture.delta.x.0.clamp(0.0, SWIPE + 40.0));
                 })
                 .on_responder_terminate(move |_: &ResponderEvent| {
                     pulling.set(false);
@@ -505,8 +504,6 @@ fn agent_row(live: Live, l: ReadSignal<Line>, now: Signal<u64>, inline: bool, fo
                     let Some(a) = agent() else { return };
                     if by >= SWIPE {
                         swiper.run("terminal.pin", json!({ "terminal": a.address, "pinned": !a.pinned }));
-                    } else if by <= -SWIPE {
-                        spawn(stop(swiper.clone(), a.address));
                     }
                 })
                 .on_press(move || {
