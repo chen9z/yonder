@@ -278,7 +278,7 @@ fn now_ms() -> u64 {
 
 /// The agents in a pane of their own, where showing one stays on the page.
 pub fn agent_list(live: Live) -> impl IntoElement {
-    scroll().flex_1().bg(theme::CANVAS).child(agents_section(live, true))
+    scroll().flex_1().bg(theme::CANVAS).on_scroll(on_scrolled()).child(agents_section(live, true))
 }
 
 /// The agents section: its heading, with the sort, and the list.
@@ -288,6 +288,8 @@ pub fn agents_section(live: Live, inline: bool) -> impl IntoElement {
     let grouped = use_context::<crate::prefs::Prefs>().unwrap().grouped;
     let folded = signal(Vec::<String>::new());
     let held = stored(None::<(String, u8)>);
+    // Rows drawn anew start closed.
+    close_swiped();
     let all = signal(false);
     let now = signal(now_ms());
     set_interval(std::time::Duration::from_secs(30), move || now.set(now_ms()));
@@ -370,8 +372,59 @@ fn spoken(name: &str, more: Option<&str>, machine: Option<&str>, status: &str) -
     [Some(name), more, machine, status].into_iter().flatten().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(", ")
 }
 
-/// How far a row is pulled aside for what its swipe does.
+/// How far a row is pulled right to pin it.
 const SWIPE: f32 = 80.0;
+/// How far a row is pulled left to show its buttons (past the distance
+/// that tells a pull from a scroll), and their width.
+const OPENS: f32 = 32.0;
+const BUTTON: f32 = 72.0;
+const BUTTONS: f32 = 2.0 * BUTTON;
+
+/// The row swiped open, showing its buttons: one at a time.
+#[derive(Clone, Default, PartialEq)]
+pub struct Swiped(pub Option<String>);
+
+fn swiped() -> Signal<Swiped> {
+    global::<Swiped>()
+}
+
+/// What the list's scroll view hears: moved, the row swiped open closes
+/// (a scroll event that doesn't move, as at a gesture's end, doesn't).
+pub fn on_scrolled() -> impl Fn(&ScrollEvent) + 'static {
+    let last = stored(None::<f32>);
+    move |e: &ScrollEvent| {
+        let y = e.offset.y.0;
+        if last.replace(Some(y)).is_some_and(|was| (y - was).abs() > 6.0) {
+            close_swiped();
+        }
+    }
+}
+
+/// The row swiped open closes (the list scrolled, another page shows).
+pub fn close_swiped() {
+    if swiped().with_untracked(|s| s.0.is_some()) {
+        swiped().set(Swiped(None));
+    }
+}
+
+/// One of the buttons a row swiped left shows: its glyph over its word,
+/// on its color.
+fn swipe_button(id: &'static str, icon: impl Fn() -> &'static str + 'static, said: impl Fn() -> String + Clone + 'static, ink: AdaptiveColor, press: impl Fn() + 'static) -> View {
+    view()
+        .w(px(BUTTON))
+        .h_full()
+        .items_center()
+        .justify_center()
+        .gap(px(3.0))
+        .bg(ink)
+        .active(|s| s.opacity(0.8))
+        .test_id(id)
+        .role(AccessibilityRole::Button)
+        .label(said.clone())
+        .on_press(press)
+        .child(dynamic(move || ui::glyph(icon(), 18.0, theme::ACCENT_FOREGROUND).into_element()))
+        .child(text(said).text_size(theme::SMALL).font_weight(FontWeight::SEMIBOLD).text_color(theme::ACCENT_FOREGROUND))
+}
 
 /// Stops an agent, once the person says so.
 async fn stop(live: Live, address: String) {
@@ -382,8 +435,9 @@ async fn stop(live: Live, address: String) {
 
 /// An agent's row: its space's mark (what runs on its corner), the space
 /// and what it does, where it is under them, how long since its status
-/// changed and that status. A tap shows it; a long press pins or stops it;
-/// pulled right, it pins (or unpins).
+/// changed and that status. A tap shows it; a long press pins or stops it.
+/// Pulled right, it pins (or unpins); pulled left, it opens on its buttons
+/// (pin, stop) and stays so: a swipe alone never stops an agent.
 fn agent_row(live: Live, l: ReadSignal<Line>, now: Signal<u64>, inline: bool, fold: impl Fn(String) + Copy + 'static) -> impl IntoElement {
     let agent = move || l.with(|l| match l { Line::Agent { agent, .. } => Some((**agent).clone()), _ => None });
     let row = computed(move || match l.get() {
@@ -406,30 +460,80 @@ fn agent_row(live: Live, l: ReadSignal<Line>, now: Signal<u64>, inline: bool, fo
         let elsewhere = elsewhere.clone();
         move || row.with(|r| r.as_ref().map(|r| spoken(&r.4, r.5.as_deref(), elsewhere().as_deref(), r.1)).unwrap_or_default())
     };
-    let (press, hold, swiper, helped) = (live.clone(), live.clone(), live.clone(), live);
-    // How far the row is pulled aside, and whether a finger has it.
+    let (press, hold, swiper, helped, acted) = (live.clone(), live.clone(), live.clone(), live.clone(), live);
+    // How far the row is pulled aside (left: open on its buttons), where it
+    // was when the finger took it, and whether a finger has it.
     let pulled = signal(0.0f32);
+    let start = stored(0.0f32);
     let pulling = signal(false);
     let pinned = move || row.with(|r| r.as_ref().is_some_and(|r| r.3));
-    // Let go, it goes back in a few frames, quickly then slowly.
-    let back = move || {
+    let address = move || row.with_untracked(|r| r.as_ref().map(|r| r.0.clone()));
+    // It slides to `to` in a few frames, quickly then slowly; a finger or
+    // a later slide stops it.
+    let turn = stored(0u32);
+    let slide = move |to: f32| {
         let from = pulled.get_untracked();
+        let mine = turn.get().wrapping_add(1);
+        turn.replace(mine);
+        if from == to {
+            return;
+        }
         spawn(async move {
             const FRAMES: i32 = 10;
             for i in 1..=FRAMES {
-                if pulling.get_untracked() {
+                if pulling.get_untracked() || turn.get() != mine {
                     return;
                 }
                 let t = i as f32 / FRAMES as f32;
-                pulled.set(from * (1.0 - t).powi(3));
+                pulled.set(to + (from - to) * (1.0 - t).powi(3));
                 timer(std::time::Duration::from_millis(16)).await;
             }
-            pulled.set(0.0);
+            pulled.set(to);
         });
     };
+    // Another opened, or the list scrolled: it closes.
+    effect(move || {
+        let open = swiped().with(|s| s.0.is_some() && s.0 == address());
+        if !open && !pulling.get_untracked() && pulled.get_untracked() < 0.0 {
+            slide(0.0);
+        }
+    });
+    let close = move || swiped().set(Swiped(None));
+    // A finger down here while another row is open: it only closes that
+    // one (this tap shows nothing), as a tap anywhere else would.
+    let ate = stored(false);
     on_card(edge, true).child(
         view()
-        // Under it while pulled: what letting go does.
+        // Pulled left: its buttons, under its right end.
+        .child(when(move || pulled.get() < 0.0, move || {
+            let (pin, stopper) = (acted.clone(), acted.clone());
+            view()
+                .absolute()
+                .right(px(0.0))
+                .top(px(0.0))
+                .bottom(px(0.0))
+                .w(px(BUTTONS))
+                .flex_row()
+                .child(swipe_button(
+                    "swipe-pin",
+                    move || if pinned() { "pin-off" } else { "pin" },
+                    move || if pinned() { t!("Unpin").to_owned() } else { t!("Pin").to_owned() },
+                    theme::ACCENT,
+                    move || {
+                        close();
+                        if let Some(a) = agent() {
+                            pin.run("terminal.pin", json!({ "terminal": a.address, "pinned": !a.pinned }));
+                        }
+                    },
+                ))
+                .child(swipe_button("swipe-stop", || "square", || t!("Stop").to_owned(), theme::BLOCKED, move || {
+                    close();
+                    if let Some(a) = agent() {
+                        spawn(stop(stopper.clone(), a.address));
+                    }
+                }))
+        }))
+        // Pulled right: what letting go does.
         .child(when(move || pulled.get() > 0.0, move || {
             view()
                 .absolute()
@@ -488,25 +592,59 @@ fn agent_row(live: Live, l: ReadSignal<Line>, now: Signal<u64>, inline: bool, fo
                 })
                 .claim_touches(TouchClaim::on_pan(PanActivation::horizontal(px(14.0), px(10.0))))
                 .on_responder_move(move |e: &ResponderEvent| {
-                    pulling.set(true);
-                    // Only to the right: stopping, which loses the agent's
-                    // work, is too easily swiped by mistake (its menu has it).
-                    pulled.set(e.gesture.delta.x.0.clamp(0.0, SWIPE + 40.0));
+                    if !pulling.get_untracked() {
+                        pulling.set(true);
+                        start.replace(pulled.get_untracked());
+                    }
+                    pulled.set((start.get() + e.gesture.delta.x.0).clamp(-BUTTONS - 24.0, SWIPE + 40.0));
                 })
                 .on_responder_terminate(move |_: &ResponderEvent| {
+                    // Taken away after it was let go: what letting go did stands.
+                    if !pulling.get_untracked() {
+                        return;
+                    }
                     pulling.set(false);
-                    back();
+                    slide(if start.get() < 0.0 { -BUTTONS } else { 0.0 });
                 })
                 .on_responder_release(move |_: &ResponderEvent| {
-                    let by = pulled.get_untracked();
+                    let (by, from) = (pulled.get_untracked(), start.get());
                     pulling.set(false);
-                    back();
-                    let Some(a) = agent() else { return };
-                    if by >= SWIPE {
-                        swiper.run("terminal.pin", json!({ "terminal": a.address, "pinned": !a.pinned }));
+                    if from < 0.0 {
+                        // Open: pushed back right closes it, else it stays.
+                        if by > from + 30.0 {
+                            slide(0.0);
+                            close();
+                        } else {
+                            slide(-BUTTONS);
+                        }
+                    } else if by <= -OPENS {
+                        // Opened: only its buttons do something.
+                        swiped().set(Swiped(address()));
+                        slide(-BUTTONS);
+                    } else {
+                        slide(0.0);
+                        if by >= SWIPE && let Some(a) = agent() {
+                            swiper.run("terminal.pin", json!({ "terminal": a.address, "pinned": !a.pinned }));
+                        }
+                    }
+                })
+                .on_press_down(move || {
+                    let other = swiped().with_untracked(|s| s.0.is_some() && s.0 != address());
+                    ate.replace(other);
+                    if other {
+                        close_swiped();
                     }
                 })
                 .on_press(move || {
+                    if ate.replace(false) {
+                        return;
+                    }
+                    // Open on its buttons, a tap closes it.
+                    if pulled.get_untracked() < 0.0 {
+                        slide(0.0);
+                        close();
+                        return;
+                    }
                     if let Some(a) = agent() {
                         press.run("agent.focus", json!({ "terminal": a.address }));
                         if !inline {
@@ -515,8 +653,8 @@ fn agent_row(live: Live, l: ReadSignal<Line>, now: Signal<u64>, inline: bool, fo
                     }
                 })
                 .on_long_press(move || {
-                    // Held still while pulled aside: the swipe's, not the menu's.
-                    if pulling.get_untracked() {
+                    // Held still while pulled aside, or open: the swipe's, not the menu's.
+                    if pulling.get_untracked() || pulled.get_untracked() != 0.0 {
                         return;
                     }
                     let Some(a) = agent() else { return };

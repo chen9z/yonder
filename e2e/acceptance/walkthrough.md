@@ -109,7 +109,10 @@ it with the screenshot's name and go on.
    idle one has no status mark, and no row has a pin icon. If one is
    listed: drag its row right by half a row's width and back before
    letting go (`input motionevent` DOWN, MOVEs, UP): a "Pin" in the
-   accent shows under it, and let go it slides back, nothing pinned. Hold
+   accent shows under it, and let go it slides back, nothing pinned. Drag
+   it left by half a row's width and let go: it stays open on two
+   buttons, Pin (accent) and Stop (red), nothing asked; scroll the list a
+   little: it closes. Don't press Stop. Hold
    it: a sheet titled as its row reads (not a title with `| space`);
    Back. Tap the space under "Spaces"
    to go back.

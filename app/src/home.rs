@@ -46,7 +46,8 @@ pub fn home_page(live: Live) -> impl IntoElement {
         .child(when(move || show_spaces.get(), move || {
             scroll().flex_1().child(view().pb(px(8.0)).child(spaces(spaces_live.clone(), reorder)))
         }).otherwise(move || {
-            scroll().flex_1().child(view().pb(px(8.0)).child(agents::agents_section(live.clone(), false)))
+            // Scrolled, a row swiped open closes.
+            scroll().flex_1().on_scroll(agents::on_scrolled()).child(view().pb(px(8.0)).child(agents::agents_section(live.clone(), false)))
         }))
         .child(
             view().items_center().pt(px(4.0)).pb(move || ui::bottom_inset() + px(6.0)).child(

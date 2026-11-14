@@ -758,7 +758,7 @@ fn home_makes_no_space_before_the_computer_has_said_its_layout() {
 }
 
 #[test]
-fn an_agent_s_row_pulled_left_does_nothing_and_stopping_is_asked_from_its_menu() {
+fn an_agent_s_row_pulled_left_shows_its_buttons_and_stopping_is_asked() {
     // Drawn from what the computer showed last; nobody answers on its port.
     let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
     let computer = serde_json::json!({ "name": "desk", "host": "127.0.0.1", "port": port, "user": "me", "fingerprint": "SHA256:x" });
@@ -788,16 +788,26 @@ fn an_agent_s_row_pulled_left_does_nothing_and_stopping_is_asked_from_its_menu()
     app.press("label:Spaces and agents").unwrap();
     app.wait_for_within("text:Fix the build", SLOW).unwrap();
 
-    // Pulled left, however far: nothing (stopping is too easy to swipe).
+    // A little to the left: back, closed.
     app.drag("text:Fix the build", point(px(-30.0), px(0.0))).unwrap();
+    app.wait(Duration::from_millis(500)).unwrap();
+    assert_eq!(app.screen().count("id:swipe-stop"), Ok(0));
+    // Far enough: open on its buttons, and it stays so; nothing asked yet.
     app.drag("text:Fix the build", point(px(-160.0), px(0.0))).unwrap();
     app.wait(Duration::from_millis(500)).unwrap();
+    app.wait_for("id:swipe-stop").unwrap();
+    app.wait_for("id:swipe-pin").unwrap();
     assert!(app.screen().dialogs().is_empty());
-    assert_eq!(app.screen().count("id:pick-kill"), Ok(0));
-    // From its menu: asked first (and left as it was).
+    // Its Stop asks first (and the row is left as it was, closed).
     answer(&mut app, "Cancel", "Stop this agent?");
-    app.long_press("text:Fix the build").unwrap();
-    pick(&mut app, "kill");
+    app.press("id:swipe-stop").unwrap();
     app.wait_until("asked to stop it", SLOW, |s| s.dialogs().len() == 1).unwrap();
+    app.wait_until("closed again", SLOW, |s| s.count("id:swipe-stop") == Ok(0)).unwrap();
+    app.wait_for("text:Fix the build").unwrap();
+    // Opened again, a tap on the row closes it (and shows nothing).
+    app.drag("text:Fix the build", point(px(-160.0), px(0.0))).unwrap();
+    app.wait_for("id:swipe-stop").unwrap();
+    app.press("text:Fix the build").unwrap();
+    app.wait_until("closed by a tap", SLOW, |s| s.count("id:swipe-stop") == Ok(0)).unwrap();
     app.wait_for("text:Fix the build").unwrap();
 }
