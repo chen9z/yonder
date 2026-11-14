@@ -8,6 +8,7 @@ mod i18n;
 mod keybar;
 mod agents;
 mod changes;
+mod chat;
 mod connect;
 mod files;
 mod home;

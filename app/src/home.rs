@@ -118,6 +118,11 @@ fn top_bar(live: Live, tab: Signal<Home>, reorder: Signal<bool>) -> impl IntoEle
     let name = live.computer.name.clone();
     let new_space = live.clone();
     let titled = live.clone();
+    let talking = computed(|| crate::chat::talking().get().0);
+    let readable = {
+        let found = lead::found(&live);
+        computed(move || found.with(|f| f.as_ref().is_some_and(crate::chat::readable)))
+    };
     ui::top_bar()
         .border_b(px(0.0))
         // The computer's name; on the main agent's tab, the agent.
@@ -125,6 +130,14 @@ fn top_bar(live: Live, tab: Signal<Home>, reorder: Signal<bool>) -> impl IntoEle
             lead::title(titled.clone()).into_element()
         } else {
             text(name.clone()).flex_1().pl(px(12.0)).text_size(theme::TITLE).font_weight(FontWeight::BOLD).text_color(theme::FOREGROUND).number_of_lines(1).into_element()
+        }))
+        // On the main agent's tab: its conversation or its terminal.
+        .child(when(move || tab.get() == Home::Lead && readable.get(), move || {
+            dynamic(move || if talking.get() {
+                ui::icon_button("terminal", t!("Show the terminal"), || { ui::smoothly(); crate::chat::talking().set(crate::chat::Talking(false)) }).into_element()
+            } else {
+                ui::icon_button("lead", t!("Show the conversation"), || { ui::smoothly(); crate::chat::talking().set(crate::chat::Talking(true)) }).into_element()
+            })
         }))
         .child(when(move || !reorder.get(), || ui::icon_button("search", t!("Jump to a terminal"), || nav::push(Route::Search))))
         // New space where the spaces are; the rest (the agents' sort, the

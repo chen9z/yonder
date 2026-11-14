@@ -512,9 +512,13 @@ fn edits_a_saved_connection_only_after_it_works() {
     app.clear("id:display name").unwrap();
     app.type_text("id:display name", "Mini").unwrap();
     app.press("text:Test and save").unwrap();
+    // Saved once it works, and back (its own field says Mini before that).
+    app.wait_until("saved and back", SLOW, |s| s.count("id:display name") == Ok(0)).unwrap();
     app.wait_for_within("text:Mini", SLOW).unwrap();
     assert_eq!(saved()[0]["name"], "Mini");
     app.press("label:Spaces").unwrap();
+    // Connected again under its new name, spaces can be made.
+    app.wait_until("connected again", SLOW, |s| s.enabled("label:New space") == Ok(true)).unwrap();
     app.press("label:New space").unwrap();
     app.wait_for_within("label:More", SLOW).unwrap();
     app.press("label:More").unwrap();
@@ -858,8 +862,15 @@ fn an_agent_made_the_main_one_has_a_tab_of_its_own_and_the_app_opens_on_it() {
     app.wait_for_within("label:Main agent: proj", SLOW).unwrap();
     app.wait_for("id:talk").unwrap();
     app.wait_for("label:helper, sub-agent").unwrap();
+    // Pi's, it shows as a conversation; its terminal is a press away.
+    app.press("label:Show the terminal").unwrap();
+    app.wait_for_within("id:terminal", SLOW).unwrap();
+    app.press("label:Show the conversation").unwrap();
+    app.wait_until("the conversation again", SLOW, |s| s.count("id:terminal") == Ok(0)).unwrap();
+    // Not sent (nobody answers here): said so, and the words kept.
     app.type_text("id:talk", "hello").unwrap();
     app.press("label:Send").unwrap();
+    app.wait_for_within("text:Not sent", SLOW).unwrap();
     drop(app);
 
     // Opened again, the app shows it, not the space it was on.

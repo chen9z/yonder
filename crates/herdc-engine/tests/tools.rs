@@ -107,3 +107,43 @@ async fn ssh_config_hosts_to_pick_from_includes_too() {
     assert!(matches!(machines::add(&there, "nobody@127.0.0.1:1").await, machines::Added::No(_) | machines::Added::NeedsYou(_)));
     assert!(machines::added(&there).await.is_empty());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pi_session_is_found_by_its_label_or_folder_and_read_as_it_grows() {
+    use herdc_engine::tools::transcript::{self, Said, Transcript};
+    let session = Session::new();
+    let there = There::new(session.connect().await, None);
+    let folder = session.home().join(".pi/agent/sessions/--work-nova--");
+    std::fs::create_dir_all(&folder).unwrap();
+    let file = folder.join("2026-11-05T17-59-33-091Z_01a1-b3.jsonl");
+    let user = |id: &str, parent: &str, text: &str| format!(r#"{{"type":"message","id":"{id}","parentId":"{parent}","message":{{"role":"user","content":[{{"type":"text","text":"{text}"}}]}}}}"#);
+    let mut lines: Vec<String> = vec![r#"{"type":"session","id":"s"}"#.into()];
+    for i in 1..=transcript::TAIL + 5 {
+        lines.push(user(&format!("m{i}"), &format!("m{}", i - 1), &format!("n{i}")));
+    }
+    // An older session there, then this one.
+    std::fs::write(folder.join("2026-01-01T00-00-00-000Z_old.jsonl"), "").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    std::fs::write(&file, lines.join("\n") + "\n").unwrap();
+    let path = file.to_string_lossy().into_owned();
+
+    // By the label, else the newest in its folder; none elsewhere.
+    assert_eq!(transcript::find(&there, Some("pi:id:01a1-b3"), "/nowhere").await.unwrap().as_deref(), Some(path.as_str()));
+    assert_eq!(transcript::find(&there, None, "/work/nova").await.unwrap().as_deref(), Some(path.as_str()));
+    assert_eq!(transcript::find(&there, Some("pi:id:gone"), "/work/elsewhere").await.unwrap(), None);
+
+    // The end of it first; then what was added, a line half written held back.
+    let mut t = Transcript::default();
+    t.take(&transcript::read(&there, &path, 0).await.unwrap());
+    assert!(t.cut);
+    assert_eq!(t.read, transcript::TAIL + 6);
+    assert_eq!(t.lines().len(), transcript::TAIL);
+    let mut more = std::fs::OpenOptions::new().append(true).open(&file).unwrap();
+    use std::io::Write;
+    write!(more, "{}\n{{\"type\":\"mess", user("x", &format!("m{}", transcript::TAIL + 5), "later")).unwrap();
+    drop(more);
+    let got = transcript::read(&there, &path, t.read).await.unwrap();
+    t.take(&got);
+    assert_eq!(t.read, transcript::TAIL + 7);
+    assert_eq!(t.lines().last().map(|l| &l.said), Some(&Said::You { text: "later".into(), images: 0 }));
+}

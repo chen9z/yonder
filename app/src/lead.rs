@@ -1,7 +1,8 @@
 //! The main agent: the one the person talks to, which hands the work to
 //! others (the agents it starts, its sub-agents). One per computer, on a
-//! tab of its own: its terminal, a field under it to write to it, and
-//! the agents working for it over it.
+//! tab of its own: the conversation with it ([`crate::chat`], Pi's), else
+//! its terminal; a field under it to write to it, and the agents working
+//! for it over it.
 
 use crate::agents;
 use crate::home::{self, Home};
@@ -164,18 +165,35 @@ pub fn title(live: Live) -> impl IntoElement {
     })
 }
 
-/// The main agent's tab: the agents working for it, its terminal, and
-/// what the person says to it. Chosen and gone, it says so.
+/// Whether the main agent shows as a conversation now: read so, and
+/// not turned to its terminal.
+pub fn talking(live: &Live) -> Memo<bool> {
+    let found = found(live);
+    let readable = computed(move || found.with(|f| f.as_ref().is_some_and(crate::chat::readable)));
+    computed(move || readable.get() && crate::chat::talking().get().0)
+}
+
+/// The main agent's tab: the agents working for it, the conversation (or
+/// its terminal), and what the person says to it. Chosen and gone, it
+/// says so.
 pub fn lead_page(live: Live) -> impl IntoElement {
     let (kept, found) = (kept(&live), found(&live));
     let address = computed(move || found.with(|f| f.as_ref().map(|a| a.address.clone())));
+    let talking = talking(&live);
     dynamic(move || match (address.get(), kept.get()) {
         (Some(address), _) => {
             let name = kept.with_untracked(|k| k.as_ref().map(Lead::name).unwrap_or_default());
+            let shown = live.clone();
             view()
                 .flex_1()
                 .child(team(live.clone(), address.clone()))
-                .child(crate::terminal::talk(live.engine.clone(), address, name))
+                .child(dynamic(move || {
+                    if talking.get() {
+                        crate::chat::chat(shown.clone(), address.clone(), name.clone()).into_element()
+                    } else {
+                        crate::terminal::talk(shown.engine.clone(), address.clone(), name.clone()).into_element()
+                    }
+                }))
                 .into_element()
         }
         (None, Some(lead)) => empty(live.clone(), t!("{} isn't running", lead.name()), t!("Its space is kept. Start it there again, or choose another.")).into_element(),

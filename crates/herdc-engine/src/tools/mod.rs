@@ -9,6 +9,7 @@ pub mod agents;
 pub mod machines;
 pub mod changes;
 pub mod files;
+pub mod transcript;
 pub mod worktree;
 
 use crate::exec::{exec, Ran};

@@ -408,7 +408,16 @@ fn shown(engine: Engine, address: String, swipes: Swipes, talk: Option<String>) 
             // Typed into key by key, the key bar is under it instead.
             Some(name) => {
                 let viewer = viewer.clone();
-                when(move || !focused.get(), move || talk_bar(viewer.clone(), name.clone())).into_element()
+                let owner = Owner::current();
+                when(move || !focused.get(), move || {
+                    let viewer = viewer.clone();
+                    talk_bar(t!("Message {}", name.clone()), move |words: String| {
+                        viewer.paste(&words);
+                        let viewer = viewer.clone();
+                        owner.run(|| set_timeout(ENTER_AFTER, move || viewer.key(Key::Enter, Mods::NONE)));
+                    })
+                })
+                .into_element()
             }
         })
 }
@@ -418,21 +427,24 @@ fn shown(engine: Engine, address: String, swipes: Swipes, talk: Option<String>) 
 #[derive(Clone, Default, PartialEq)]
 struct Unsent(String);
 
-/// The field under a terminal talked to: what is written goes as a
-/// message does (one paste, then Enter), and the keyboard stays for the
-/// next.
-fn talk_bar(viewer: Rc<Viewer>, name: String) -> impl IntoElement {
+/// What could not be sent, back in the field (before what was written
+/// since).
+pub fn unsent(words: &str) {
+    global::<Unsent>().update(|d| d.0 = if d.0.trim().is_empty() { words.to_owned() } else { format!("{words}\n{}", d.0) });
+}
+
+/// The field under the main agent (its terminal or its conversation):
+/// what is written goes to `send` as a message does, and the keyboard
+/// stays for the next.
+pub fn talk_bar(placeholder: String, send: impl Fn(String) + 'static) -> impl IntoElement {
     let draft = global::<Unsent>();
-    let owner = Owner::current();
     let send = move || {
         let words = draft.with_untracked(|d| d.0.trim_end().to_owned());
         if words.trim().is_empty() {
             return;
         }
-        viewer.paste(&words);
-        let viewer = viewer.clone();
-        owner.run(|| set_timeout(ENTER_AFTER, move || viewer.key(Key::Enter, Mods::NONE)));
         draft.set(Unsent(String::new()));
+        send(words);
     };
     let none = move || draft.with(|d| d.0.trim().is_empty());
     view()
@@ -451,7 +463,7 @@ fn talk_bar(viewer: Rc<Viewer>, name: String) -> impl IntoElement {
                 .multiline(true)
                 .value(move || draft.with(|d| d.0.clone()))
                 .on_change(move |t: &str| draft.set(Unsent(t.to_owned())))
-                .placeholder(t!("Message {}", name))
+                .placeholder(placeholder)
                 .placeholder_color(move || theme::now(theme::DIM))
                 .flex_1()
                 .min_h(px(40.0))

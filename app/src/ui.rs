@@ -190,7 +190,7 @@ pub fn program_icon(program: impl Fn() -> serde_json::Value + 'static, size: f32
 }
 
 /// A status's color, faint: what a badge sits on.
-fn faint(color: AdaptiveColor) -> impl Fn() -> Hsla {
+pub fn faint(color: AdaptiveColor) -> impl Fn() -> Hsla {
     move || Hsla { a: 0.15, ..theme::now(color) }
 }
 

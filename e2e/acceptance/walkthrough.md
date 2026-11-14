@@ -123,5 +123,12 @@ it with the screenshot's name and go on.
    square, its name and program at the top, the agent's terminal, and
    under it a field "Message <name>" with an ↑. Settings → GENERAL → Main
    agent → "No main agent": the first tab says "Your main agent" again.
+7b. If a Pi agent is the main one (don't send it anything): its tab shows
+   a conversation, not a terminal: the person's words in grey bubbles on
+   the right, its replies set as Markdown, tools between them as one line
+   ("N steps · bash, read"); press one: it opens on each step; press a
+   step: a page with what it ran and gave back. Back. At the top right a
+   terminal icon shows the terminal, and then a bubble icon the
+   conversation again.
 
 End with a table: step, as said (yes/no), what differed, screenshot.
