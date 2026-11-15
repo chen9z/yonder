@@ -428,6 +428,19 @@ pub fn title(raw: &str) -> String {
     }
 }
 
+/// Before panes close (one, or a tab's): an agent among them working or
+/// waiting is asked about first, a phone being easy to mistap. Whether
+/// to go on.
+pub async fn close_ok(panes: &[herdc_engine::PaneView], tab: bool) -> bool {
+    let Some(p) = panes.iter().find(|p| matches!(p.status, Some("working" | "blocked"))) else { return true };
+    let (who, how) = (title(&p.title), crate::i18n::tr(p.status.unwrap_or_default()));
+    if tab {
+        confirm(t!("Close tab?"), &t!("{} is {}. Closing the tab ends it.", who, how), t!("Close")).await
+    } else {
+        confirm(t!("Close pane?"), &t!("{} is {}. Closing the pane ends it.", who, how), t!("Close")).await
+    }
+}
+
 /// Asks yes or no; true for yes.
 pub async fn confirm(title: &str, message: &str, yes: &str) -> bool {
     let answer = alert_dialog()

@@ -185,7 +185,13 @@ fn tab_menu(live: Live, id: String) {
         let command = match picked.as_deref() {
             Some("rename") => "tab.rename",
             Some("settle") => "tab.settle",
-            Some("close") => "tab.close",
+            Some("close") => {
+                let panes = live.view.with_untracked(|v| v.tab(&id).map(|t| t.panes.clone()).unwrap_or_default());
+                if !ui::close_ok(&panes, true).await {
+                    return;
+                }
+                "tab.close"
+            }
             _ => return,
         };
         live.run(command, serde_json::json!({ "id": id }));

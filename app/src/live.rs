@@ -35,6 +35,9 @@ pub struct Live {
     password: link::Password,
     /// What lives as long as the connection: its tasks and signals.
     owner: Owner,
+    /// The last note's number: never given twice (a note gone, its
+    /// timer still runs).
+    noted: Stored<u64>,
 }
 
 /// The app's one connection, if any.
@@ -147,6 +150,7 @@ pub fn switch_connection(computer: Computer, first: Option<Session>, replacing: 
             answering: stored(None),
             password,
             owner: Owner::current(),
+            noted: stored(0),
         };
         let published = live.view;
         let mut world = engine.watch();
@@ -347,7 +351,8 @@ impl Live {
         note.title = tr_string(&note.title);
         note.body = note.body.as_deref().map(tr_string);
         let notes = self.notes;
-        let id = notes.with(|all| all.last().map_or(1, |(i, _)| i + 1));
+        let id = self.noted.get() + 1;
+        self.noted.replace(id);
         // An agent that needs you has one note, there while it waits (the
         // workspace shows it then), not a few seconds.
         let waits = waits_on(&note);

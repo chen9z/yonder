@@ -131,6 +131,8 @@ async fn a_pi_session_is_found_by_its_label_or_folder_and_read_as_it_grows() {
     assert_eq!(transcript::find(&there, Some("pi:id:01a1-b3"), "/nowhere").await.unwrap().as_deref(), Some(path.as_str()));
     assert_eq!(transcript::find(&there, None, "/work/nova").await.unwrap().as_deref(), Some(path.as_str()));
     assert_eq!(transcript::find(&there, Some("pi:id:gone"), "/work/elsewhere").await.unwrap(), None);
+    // Named, and not there yet (a Pi just started): not the newest instead.
+    assert_eq!(transcript::find(&there, Some("pi:id:new"), "/work/nova").await.unwrap(), None);
 
     // The end of it first; then what was added, a line half written held back.
     let mut t = Transcript::default();
@@ -202,7 +204,7 @@ async fn a_real_pi_goes_back_to_before_one_of_your_messages() {
         }
     }).await.unwrap();
     // Not one of its messages: nothing chosen, its tree closed again.
-    assert!(transcript::rewind(&there, &t, "delta four", 0).await.is_err());
+    assert!(matches!(transcript::rewind(&there, &t, "delta four", 0).await, Err(transcript::Rewound::Unchanged(_))));
     assert!(!screen().await.contains("[user]"), "{shown}");
     // "beta two", one of yours after it: the one on the branch shown.
     transcript::rewind(&there, &t, "beta two", 1).await.unwrap();

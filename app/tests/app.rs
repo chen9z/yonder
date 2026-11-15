@@ -916,8 +916,9 @@ say() { printf '\033]7501;state=%s:app=pi\033\\' "$1"; }
 add() { n=$((n+1)); printf '{"type":"message","id":"e%s","parentId":"%s","timestamp":"2026-11-05T17:59:34.063Z","message":%s}\n' "$n" "$p" "$1" >> "$f"; p="e$n"; }
 you() { printf 'e%s|%s|%s\n' "$((n+1))" "$p" "$1" >> "$u"; add "{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"$1\"}]}"; }
 key() { dd bs=1 count=1 2>/dev/null; }
+field() { printf '%s\n\n%s\n' "$rule" "$rule"; }
 show() {
-  printf '\033[2J\033[H'; i=0
+  printf '\033[2J\033[H  Type to search:\n%s\n' "$rule"; i=0
   while IFS='|' read -r id par text; do i=$((i+1)); if [ "$i" = "$sel" ]; then m='›'; else m=' '; fi; printf '%s • user: %s\n' "$m" "$text"; done < "$u"
   printf '  (%s/%s)%s\n%s\n~\n' "$sel" "$all" "$only" "$rule"
 }
@@ -944,10 +945,11 @@ tree() {
 }
 reply() { add "{\"role\":\"assistant\",\"stopReason\":\"${2:-stop}\",\"content\":[{\"type\":\"text\",\"text\":\"$1\"}]}"; }
 say idle
+field
 while IFS= read -r m; do
   case "$m" in
     ask) you ask; reply "Which one?"; say blocked; printf 'Pick one:\n> yes\n  no\n'; IFS= read -r a; reply Answered; say idle;;
-    slow) you slow; say working; stty -icanon min 1 time 0; dd bs=1 count=1 >/dev/null 2>&1; stty icanon; reply "" aborted; say idle;;
+    slow) stty -icanon -echo min 1 time 0; you slow; say working; dd bs=1 count=1 >/dev/null 2>&1; stty icanon echo; reply "" aborted; say idle;;
     /tree) tree;;
     /name\ *) printf '{"type":"session_info","id":"i%s","parentId":"%s","name":"%s"}\n' "$n" "$p" "${m#/name }" >> "$f";;
     *) you "$m"; say working
@@ -955,6 +957,7 @@ while IFS= read -r m; do
        add '{"role":"toolResult","toolCallId":"c1","content":[{"type":"text","text":"hi"}]}'
        reply "Done with $m"; say idle;;
   esac
+  field
 done"#;
 
 #[test]

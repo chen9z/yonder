@@ -144,6 +144,7 @@ pub fn terminal(engine: Engine, address: String, swipes: Swipes) -> impl IntoEle
 /// to it always under it, saying to whom (`name`); a tap on the terminal
 /// still types into it, key by key.
 pub fn talk(engine: Engine, address: String, name: String) -> impl IntoElement {
+    draft_for(&address);
     shown(engine, address, Swipes::Nothing, Some(name))
 }
 
@@ -429,6 +430,23 @@ fn shown(engine: Engine, address: String, swipes: Swipes, talk: Option<String>) 
 /// tab is left.
 #[derive(Clone, Default, PartialEq)]
 struct Unsent(String);
+
+/// Whose the field is: a computer's agent.
+#[derive(Clone, Default, PartialEq)]
+struct DraftOf(String);
+
+/// The field is for the agent at `address` on the computer open: what
+/// was written for another is let go. Whether it was.
+pub fn draft_for(address: &str) -> bool {
+    let who = format!("{}\0{address}", crate::live::live().map(|l| l.computer.id()).unwrap_or_default());
+    let of = global::<DraftOf>();
+    if of.with_untracked(|o| o.0 == who) {
+        return false;
+    }
+    of.set(DraftOf(who));
+    global::<Unsent>().set(Unsent::default());
+    true
+}
 
 /// What could not be sent, back in the field (before what was written
 /// since).

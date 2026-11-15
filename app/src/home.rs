@@ -258,7 +258,7 @@ fn spaces(live: Live, reorder: Signal<bool>) -> impl IntoElement {
     view()
         .child(each(
             move || groups.get(),
-            |g| g.name.clone(),
+            |g| g.key.clone(),
             move |g, _| {
                 let live = live.clone();
                 let open = computed(move || !(several.get() && folded.with(|set| g.with(|g| set.contains(&g.key)))));

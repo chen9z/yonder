@@ -329,11 +329,12 @@ pub struct Read {
 }
 
 /// The session file of a Pi running in `cwd`: the one its terminal's
-/// label names (`alma.session`: `pi:id:<id>`), else the newest there.
+/// label names (`alma.session`: `pi:id:<id>`; none yet, none: not
+/// another), else the newest there.
 pub async fn find(there: &There, label: Option<&str>, cwd: &str) -> Result<Option<String>, String> {
     let id = label.and_then(|l| l.strip_prefix("pi:id:")).filter(|id| id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')).unwrap_or_default();
     let script = r#"d="$HOME/.pi/agent/sessions"
-if [ -n "$1" ]; then for f in "$d"/*/*_"$1".jsonl; do [ -f "$f" ] && { printf %s "$f"; exit 0; }; done; fi
+if [ -n "$1" ]; then for f in "$d"/*/*_"$1".jsonl; do [ -f "$f" ] && printf %s "$f"; done; exit 0; fi
 ls -t "$d/$2"/*.jsonl 2>/dev/null | head -n 1 | tr -d '\n'"#;
     let ran = there.run(&["sh", "-c", script, "sh", id, &folder(cwd)], None, Duration::from_secs(15)).await?;
     Ok(Some(ran.out()).filter(|p| ran.ok() && p.ends_with(".jsonl")))
@@ -406,64 +407,93 @@ const SHOWN: Duration = Duration::from_secs(4);
 /// Pi takes a second Ctrl+C within this as "quit".
 const TWICE: Duration = Duration::from_millis(500);
 
+/// Why going back didn't happen: nothing changed in Pi, or it went back
+/// and the words weren't sent after (its field emptied again).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Rewound {
+    Unchanged(String),
+    Moved(String),
+}
+
 /// Goes back in the session of the Pi at `terminal` to just before one
 /// of the person's messages, `said`, with `later` of theirs after it on
 /// the branch shown. Done by its keys as a person would: its field
-/// emptied, `/tree`, its own messages only, up to that one, no summary;
-/// the screen read at each step, and nothing chosen unless it shows the
-/// message. Its field is left empty for the words written instead.
-pub async fn rewind(there: &There, terminal: &str, said: &str, later: usize) -> Result<(), String> {
+/// emptied (and seen empty: nothing else open), `/tree`, its own messages
+/// only, up to that one, no summary; the screen read at each step, and
+/// nothing chosen unless it shows the message. Its field is left empty
+/// for the words written instead, whatever came of it.
+pub async fn rewind(there: &There, terminal: &str, said: &str, later: usize) -> Result<(), Rewound> {
+    let unchanged = |why: String| Rewound::Unchanged(why);
     let emptied = Instant::now();
-    keys(there, terminal, &["ctrl+c"]).await?;
-    keys(there, terminal, &["/", "t", "r", "e", "e", "enter"]).await?;
+    keys(there, terminal, &["ctrl+c"]).await.map_err(unchanged)?;
+    let free = |s: &str| tree(s).is_none() && !s.contains("Summarize branch?") && editor(s).is_some_and(|e| e.is_empty());
+    until(there, terminal, free).await.map_err(unchanged)?.ok_or_else(|| unchanged("Something is open in its terminal; nothing changed.".into()))?;
+    keys(there, terminal, &["/", "t", "r", "e", "e", "enter"]).await.map_err(unchanged)?;
     let went = choose(there, terminal, said, later).await;
-    if went.is_err() {
-        // Out of the tree (and its question), as it was.
-        for _ in 0..3 {
-            match screen(there, terminal).await {
-                Ok(s) if counted(&s).is_some() || s.contains("Summarize branch?") => keys(there, terminal, &["esc"]).await?,
-                _ => break,
+    let moved = match went {
+        Ok(()) => None,
+        Err((entered, why)) => {
+            // Out of the tree (and its question): nothing chosen, then.
+            let mut out = false;
+            for _ in 0..3 {
+                match screen(there, terminal).await {
+                    Ok(s) if tree(&s).is_some() || s.contains("Summarize branch?") => {
+                        keys(there, terminal, &["esc"]).await.map_err(unchanged)?;
+                        out = true;
+                    }
+                    _ => break,
+                }
+                tokio::time::sleep(Duration::from_millis(250)).await;
             }
-            tokio::time::sleep(Duration::from_millis(200)).await;
+            if !entered || out {
+                return Err(Rewound::Unchanged(why));
+            }
+            Some(why)
         }
-        return went;
-    }
+    };
     // The message, put back in its field: out again, for the new words.
     tokio::time::sleep((TWICE + Duration::from_millis(200)).saturating_sub(emptied.elapsed())).await;
-    keys(there, terminal, &["ctrl+c"]).await?;
-    until(there, terminal, |s| editor(s).is_some_and(|e| e.is_empty())).await?.ok_or_else(|| "Its field didn't empty.".to_owned())?;
-    Ok(())
+    let cleared = async {
+        keys(there, terminal, &["ctrl+c"]).await?;
+        until(there, terminal, |s| editor(s).is_some_and(|e| e.is_empty())).await?.ok_or_else(|| "Its field didn't empty.".to_owned())
+    };
+    match (moved, cleared.await) {
+        (None, Ok(_)) => Ok(()),
+        (Some(why), _) | (None, Err(why)) => Err(Rewound::Moved(why)),
+    }
 }
 
 /// In the tree: the person's messages only, up to `said`, chosen,
-/// without a summary of what is left.
-async fn choose(there: &There, terminal: &str, said: &str, later: usize) -> Result<(), String> {
-    until(there, terminal, |s| counted(s).is_some()).await?.ok_or_else(|| "Its session tree didn't open.".to_owned())?;
-    let only = |s: &str| counted(s).is_some_and(|c| c.contains("[user]"));
+/// without a summary of what is left. Failing, whether its Enter went.
+async fn choose(there: &There, terminal: &str, said: &str, later: usize) -> Result<(), (bool, String)> {
+    let before = |why: String| (false, why);
+    let after = |why: String| (true, why);
+    until(there, terminal, |s| tree(s).is_some()).await.map_err(before)?.ok_or_else(|| before("Its session tree didn't open.".into()))?;
+    let only = |s: &str| tree(s).is_some_and(|c| c.contains("[user]"));
     // Ctrl+U turns "theirs only" on and off: on, once.
     if !screen(there, terminal).await.is_ok_and(|s| only(&s)) {
-        keys(there, terminal, &["ctrl+u"]).await?;
-        if until(there, terminal, only).await?.is_none() {
-            keys(there, terminal, &["ctrl+u"]).await?;
-            until(there, terminal, only).await?.ok_or_else(|| "Its tree didn't show only your messages.".to_owned())?;
+        keys(there, terminal, &["ctrl+u"]).await.map_err(before)?;
+        if until(there, terminal, only).await.map_err(before)?.is_none() {
+            keys(there, terminal, &["ctrl+u"]).await.map_err(before)?;
+            until(there, terminal, only).await.map_err(before)?.ok_or_else(|| before("Its tree didn't show only your messages.".into()))?;
         }
     }
     if later > 0 {
-        keys(there, terminal, &vec!["up"; later]).await?;
+        keys(there, terminal, &vec!["up"; later]).await.map_err(before)?;
     }
-    until(there, terminal, |s| chosen(s).is_some_and(|r| is(r, said))).await?.ok_or_else(|| "That message isn't where it was in its tree; nothing changed.".to_owned())?;
-    keys(there, terminal, &["enter"]).await?;
-    // Back there, the message in its field (which was emptied for it).
-    let back = |s: &str| counted(s).is_none() && !s.contains("Summarize branch?") && editor(s).is_some_and(|e| starts(&e, said));
-    let asked = until(there, terminal, |s| s.contains("Summarize branch?") || back(s)).await?.ok_or_else(|| "It didn't go back.".to_owned())?;
+    until(there, terminal, |s| chosen(s).is_some_and(|r| is(r, said))).await.map_err(before)?.ok_or_else(|| before("That message isn't where it was in its tree; nothing changed.".into()))?;
+    keys(there, terminal, &["enter"]).await.map_err(after)?;
+    // Back there, the message in its field (which was emptied for it); a
+    // long one shows its end there: Pi's word for it, then.
+    let back = |s: &str| tree(s).is_none() && !s.contains("Summarize branch?") && editor(s).is_some_and(|e| starts(&e, said));
+    let asked = until(there, terminal, |s| s.contains("Summarize branch?") || back(s)).await.map_err(after)?.ok_or_else(|| after("It didn't go back.".into()))?;
     if asked.contains("Summarize branch?") {
         if !asked.lines().any(|l| l.contains("→ No summary")) {
-            return Err("It asked about a summary in a way not known.".into());
+            return Err(after("It asked about a summary in a way not known.".into()));
         }
-        keys(there, terminal, &["enter"]).await?;
-        // A long message shows its end in the field: Pi's word for it, then.
-        let done = |s: &str| back(s) || (counted(s).is_none() && !s.contains("Summarize branch?") && s.contains("Navigated to selected point"));
-        until(there, terminal, done).await?.ok_or_else(|| "It didn't go back.".to_owned())?;
+        keys(there, terminal, &["enter"]).await.map_err(after)?;
+        let done = |s: &str| back(s) || (tree(s).is_none() && !s.contains("Summarize branch?") && s.contains("Navigated to selected point"));
+        until(there, terminal, done).await.map_err(after)?.ok_or_else(|| after("It didn't go back.".into()))?;
     }
     Ok(())
 }
@@ -493,18 +523,35 @@ async fn until(there: &There, terminal: &str, what: impl Fn(&str) -> bool) -> Re
 }
 
 /// Pi's tree, open: what its count (`(3/4) [user]`) says after itself.
-fn counted(screen: &str) -> Option<&str> {
-    screen.lines().rev().find_map(|l| {
-        let (count, rest) = l.trim_start().strip_prefix('(')?.split_once(')')?;
-        let (at, of) = count.split_once('/')?;
-        (!at.is_empty() && !of.is_empty() && count.chars().all(|c| c.is_ascii_digit() || c == '/')).then(|| rest.trim())
-    })
+fn tree(screen: &str) -> Option<&str> {
+    let lines: Vec<&str> = screen.lines().collect();
+    count_at(&lines).and_then(|i| counted(lines[i]))
+}
+
+/// Where the tree's count is: a `(i/n)` line with a rule next under it,
+/// its search above (not words of the conversation that look so).
+fn count_at(lines: &[&str]) -> Option<usize> {
+    let ruled = |i: usize| lines[i + 1..].iter().find(|l| !l.trim().is_empty()).is_some_and(|l| rule(l));
+    let at = (0..lines.len()).rev().find(|&i| counted(lines[i]).is_some() && ruled(i))?;
+    lines[..at].iter().any(|l| l.contains("Type to search")).then_some(at)
+}
+
+/// A line's count (`(3/4) [user]`): what it says after itself.
+fn counted(line: &str) -> Option<&str> {
+    let (count, rest) = line.trim_start().strip_prefix('(')?.split_once(')')?;
+    let (at, of) = count.split_once('/')?;
+    (!at.is_empty() && !of.is_empty() && count.chars().all(|c| c.is_ascii_digit() || c == '/')).then(|| rest.trim())
+}
+
+/// A rule across the screen.
+fn rule(line: &str) -> bool {
+    line.chars().count() > 3 && line.chars().all(|c| c == '─')
 }
 
 /// The row of the tree chosen (`› `), above its count.
 fn chosen(screen: &str) -> Option<&str> {
     let lines: Vec<&str> = screen.lines().collect();
-    let count = lines.iter().rposition(|l| counted(l).is_some())?;
+    let count = count_at(&lines)?;
     lines[..count].iter().rev().find(|l| l.starts_with('›')).copied()
 }
 
@@ -514,10 +561,11 @@ fn is(row: &str, said: &str) -> bool {
     row.split_once("user: ").is_some_and(|(before, shown)| before.contains('•') && starts(shown.trim_end_matches('…'), said))
 }
 
-/// Whether `shown` is `said`, spaces aside, or how it starts (cut where
-/// the screen ends): at least its first few letters, and not longer.
+/// Whether `shown` is `said`, spaces and lines aside (a field wraps
+/// words, Chinese anywhere), or how it starts (cut where the screen
+/// ends): at least its first few letters, and not longer.
 fn starts(shown: &str, said: &str) -> bool {
-    let flat = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let flat = |s: &str| s.split_whitespace().collect::<String>();
     let (shown, said) = (flat(shown), flat(said));
     let (n, of) = (shown.chars().count(), said.chars().count());
     n > 0 && n <= of && n >= of.min(6) && said.starts_with(&shown)
@@ -527,7 +575,6 @@ fn starts(shown: &str, said: &str) -> bool {
 /// the screen.
 fn editor(screen: &str) -> Option<String> {
     let lines: Vec<&str> = screen.lines().collect();
-    let rule = |l: &str| l.chars().count() > 3 && l.chars().all(|c| c == '─');
     let last = lines.iter().rposition(|l| rule(l))?;
     let first = lines[..last].iter().rposition(|l| rule(l))?;
     Some(lines[first + 1..last].iter().map(|l| l.trim()).collect::<Vec<_>>().join("\n").trim().to_owned())
@@ -647,11 +694,17 @@ mod tests {
     fn pi_s_tree_and_field_are_read_off_its_screen() {
         // As Pi 1.5 drew them: its tree, only the person's messages.
         let rule = "─".repeat(40);
-        let tree = format!("  Type to search:\n{rule}\n  • user: alpha one\n  ├⊟ • user: beta two\n› │     • user: gamma three\n  └─ user: beta two\n  (3/4) [user]\n{rule}\n/tmp/p\n0.0%/400k (auto)      (magpie) claude-opus-5-5 • high\n");
-        assert_eq!(counted(&tree), Some("[user]"));
-        assert_eq!(counted("  (6/8)\n"), Some(""));
-        assert_eq!(counted("(magpie) x\n 0.0%/400k (auto)\n"), None);
-        let row = chosen(&tree).unwrap();
+        let open = format!("  Type to search:\n{rule}\n  • user: alpha one\n  ├⊟ • user: beta two\n› │     • user: gamma three\n  └─ user: beta two\n  (3/4) [user]\n{rule}\n/tmp/p\n0.0%/400k (auto)      (magpie) claude-opus-5-5 • high\n");
+        assert_eq!(tree(&open), Some("[user]"));
+        assert_eq!(counted("  (6/8)"), Some(""));
+        assert_eq!(counted("(magpie) x"), None);
+        assert_eq!(tree("(magpie) x\n 0.0%/400k (auto)\n"), None);
+        // Words of the conversation shaped like its count, over the field:
+        // not the tree (no search above, or no rule under).
+        assert_eq!(tree(&format!(" done (1/2)\n (1/2)\n{rule}\n\n{rule}\n")), None);
+        assert_eq!(tree(&format!("  Type to search:\n{rule}\n› • user: a\n  (1/1)\n\n{rule}\n")), Some(""));
+        assert_eq!(tree(&format!(" Type to search the docs\n (1/2)\n reply\n{rule}\n\n{rule}\n")), None);
+        let row = chosen(&open).unwrap();
         assert_eq!(row, "› │     • user: gamma three");
         assert!(is(row, "gamma\nthree"));
         assert!(!is(row, "gamma"));
@@ -661,6 +714,9 @@ mod tests {
         let back = format!(" alpha one\n reply one\n Navigated to selected point\n{rule}\nbeta two\n{rule}\n/tmp/p\n");
         assert_eq!(editor(&back).as_deref(), Some("beta two"));
         assert!(starts(&editor(&back).unwrap(), "beta two"));
+        // A field wraps where it must: Chinese anywhere.
+        assert!(starts("把这个改成\n中文的", "把这个改成中文的说明"));
+        assert!(!starts("把这个改成中文的说明吧", "把这个改成中文的说明"));
         assert_eq!(editor(&format!("{rule}\n\n{rule}\n")).as_deref(), Some(""));
     }
 

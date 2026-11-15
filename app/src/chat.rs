@@ -17,6 +17,7 @@ use herdc_term::{Key, Mods};
 use nsh_base::{text_view, TextViewLinks};
 use nsh_core::element::Screen;
 use nsh_core::prelude::*;
+use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -76,6 +77,18 @@ struct Sent {
     at: Instant,
     back: bool,
     command: bool,
+    /// Your messages shown when it went: the same words among them are
+    /// older ones ("go on"), not this.
+    known: Rc<HashSet<String>>,
+}
+
+/// Why it wasn't sent.
+enum Failed {
+    /// It didn't go back; nothing changed.
+    Unchanged(String),
+    /// It went back, then the words didn't go.
+    Moved,
+    Refused(String),
 }
 
 /// A command sent shows this long after it went.
@@ -216,6 +229,9 @@ pub fn chat(live: Live, address: String, name: String) -> impl IntoElement {
                         .unwrap_or_default()
                 });
                 let on = machine_of(&live, &address);
+                // Named by its label; without one, looked for again each
+                // turn (a `/new` shows only as a newer file).
+                let key = if label.is_empty() { format!("turn {turn}") } else { label.clone() };
                 let now = (turn, word.clone(), again.get_untracked());
                 let every = if word == "working" { WORKING } else { RESTING };
                 let due = now != seen || last.elapsed() >= every;
@@ -224,16 +240,20 @@ pub fn chat(live: Live, address: String, name: String) -> impl IntoElement {
                     seen = now;
                     last = Instant::now();
                     // Another session (`/new`, a restart): read afresh.
-                    if path.as_ref().is_none_or(|(l, _)| *l != label) {
+                    if path.as_ref().is_none_or(|(k, _)| *k != key) {
                         let (t, l, c) = (there.clone(), label.clone(), cwd.clone());
                         match off(async move { transcript::find(&t, Some(&l), &c).await }).await {
                             Some(Ok(Some(file))) => {
-                                path = Some((label.clone(), file));
-                                read = Transcript::default();
+                                if path.as_ref().is_none_or(|(_, f)| *f != file) {
+                                    read = Transcript::default();
+                                }
+                                path = Some((key.clone(), file));
                             }
-                            Some(Ok(None)) => found.set(Found::Not(t!("No Pi session found for it.").into())),
-                            Some(Err(e)) => found.set(Found::Not(e)),
-                            None => {}
+                            // Named and not written yet (a Pi just started): nothing said yet.
+                            Some(Ok(None)) if !label.is_empty() => found.set(Found::Read),
+                            Some(Ok(None)) if path.is_none() => found.set(Found::Not(t!("No Pi session found for it.").into())),
+                            Some(Err(e)) if path.is_none() => found.set(Found::Not(e)),
+                            _ => {}
                         }
                     }
                     if let Some((_, file)) = path.clone() {
@@ -250,8 +270,6 @@ pub fn chat(live: Live, address: String, name: String) -> impl IntoElement {
                                 if first || !got.text.is_empty() {
                                     read.take(&got);
                                     let now = read.lines();
-                                    // What was sent and shows now is no longer waiting.
-                                    sent.update(|s| s.retain(|m| !now.iter().rev().take(12).any(|l| matches!(&l.said, Said::You { text, .. } if text == m.text.trim()))));
                                     if !first {
                                         ui::smoothly();
                                     }
@@ -285,6 +303,12 @@ pub fn chat(live: Live, address: String, name: String) -> impl IntoElement {
                     }
                     loading.set(false);
                 }
+                // What was sent and shows now is no longer waiting: once the
+                // core took it, a message of yours not there when it went.
+                let shows = |m: &Sent| m.went && lines.with_untracked(|l| l.iter().any(|l| matches!(&l.said, Said::You { text, .. } if text == m.text.trim()) && !m.known.contains(&l.id)));
+                if sent.with_untracked(|s| s.iter().any(|m| !m.command && shows(m))) {
+                    sent.update(|s| s.retain(|m| m.command || !shows(m)));
+                }
                 // Taken by the core long ago and never shown: let go.
                 if sent.with_untracked(|s| s.iter().any(|m| m.went && m.at.elapsed() > SENT_KEPT)) {
                     sent.update(|s| s.retain(|m| !(m.went && m.at.elapsed() > SENT_KEPT)));
@@ -296,14 +320,40 @@ pub fn chat(live: Live, address: String, name: String) -> impl IntoElement {
 
     // Asked something in its terminal: the question's viewer, while shown.
     let answering = stored(None::<Rc<Viewer>>);
-    let editing = signal(None::<Editing>);
+    // Kept with what is written (the page is made again as tabs change),
+    // and let go with it, for another agent.
+    let editing = global::<Option<Editing>>();
+    if crate::terminal::draft_for(&address) {
+        editing.set(None);
+    }
+    // Going back to before a message: nothing else goes to it meanwhile
+    // (Pi's keys are pressed for it, its screen read).
+    let going_back = move || sent.with_untracked(|s| s.iter().any(|m| m.back && !m.went));
+    let wait = {
+        let live = live.clone();
+        move |text: &str| {
+            crate::terminal::unsent(text);
+            live.say(Note::info(t!("A moment"), t!("It is still going back to before your message.")));
+        }
+    };
     // The conversation's: what a button starts outlives the button (Send
     // becomes Stop as the field empties while it works).
     let owner = Owner::current();
     let send = {
         let (live, address) = (live.clone(), address.clone());
+        let wait = wait.clone();
         move |text: String| {
             stuck.replace(true);
+            if going_back() {
+                wait(&text);
+                return;
+            }
+            // Edited while it asks something: an answer first, not this.
+            if status.get_untracked() == "blocked" && editing.with_untracked(Option::is_some) {
+                crate::terminal::unsent(&text);
+                live.say(Note::info(t!("It is asking something"), t!("Answer it first, then edit.")));
+                return;
+            }
             // Waiting for an answer: what is written answers it there.
             if status.get_untracked() == "blocked" && let Some(viewer) = answering.get() {
                 viewer.paste(&text);
@@ -343,21 +393,24 @@ pub fn chat(live: Live, address: String, name: String) -> impl IntoElement {
             }
             let n = sent.with_untracked(|s| s.last().map_or(0, |m| m.n + 1));
             ui::smoothly();
-            sent.update(|s| s.push(Sent { n, text: text.clone(), went: false, at: Instant::now(), back: back.is_some(), command: command.is_some() }));
+            let known = Rc::new(lines.with_untracked(|l| l.iter().filter(|l| matches!(l.said, Said::You { .. })).map(|l| l.id.clone()).collect()));
+            sent.update(|s| s.push(Sent { n, text: text.clone(), went: false, at: Instant::now(), back: back.is_some(), command: command.is_some(), known }));
             let (live, address) = (live.clone(), address.clone());
             owner.run(|| spawn(async move {
                 let (words, going) = (text.clone(), back.clone());
-                // Err(true): it didn't go back, nothing sent.
                 let went = match live.there(machine_of(&live, &address)) {
                     Ok(there) => off(async move {
                         if let Some((e, later)) = going {
-                            transcript::rewind(&there, &address, &e.text, later).await.map_err(|why| (true, why))?;
+                            transcript::rewind(&there, &address, &e.text, later).await.map_err(|why| match why {
+                                transcript::Rewound::Unchanged(why) => Failed::Unchanged(why),
+                                transcript::Rewound::Moved(_) => Failed::Moved,
+                            })?;
                         }
-                        transcript::send(&there, &address, &words).await.map_err(|why| (false, why))
+                        transcript::send(&there, &address, &words).await.map_err(Failed::Refused)
                     })
                     .await
-                    .unwrap_or_else(|| Err((false, "Not connected".into()))),
-                    Err(e) => Err((false, e)),
+                    .unwrap_or_else(|| Err(Failed::Refused("Not connected".into()))),
+                    Err(e) => Err(Failed::Refused(e)),
                 };
                 match went {
                     Ok(()) => {
@@ -378,16 +431,23 @@ pub fn chat(live: Live, address: String, name: String) -> impl IntoElement {
                         }
                     }
                     // Not sent: back in the field, and why.
-                    Err((undone, why)) => {
+                    Err(not) => {
                         sent.update(|s| s.retain(|m| m.n != n));
                         crate::terminal::unsent(&text);
-                        if undone {
-                            editing.set(back.map(|(e, _)| e));
-                            live.say(Note::error(t!("Couldn't edit it"), why));
-                            return;
+                        again.update(|a| *a += 1);
+                        match not {
+                            // Still being edited, as it was.
+                            Failed::Unchanged(why) => {
+                                editing.set(back.map(|(e, _)| e));
+                                live.say(Note::error(t!("Couldn't edit it"), why));
+                            }
+                            // Gone back: the words, sent now, go on from there.
+                            Failed::Moved => live.say(Note::error(t!("Not sent"), t!("It went back to before that message, but your words didn't go: send them again."))),
+                            Failed::Refused(why) => {
+                                let why = if why == "blocked" { t!("It is waiting for an answer in its terminal.").to_owned() } else { why };
+                                live.say(Note::error(t!("Not sent"), why));
+                            }
                         }
-                        let why = if why == "blocked" { t!("It is waiting for an answer in its terminal.").to_owned() } else { why };
-                        live.say(Note::error(t!("Not sent"), why));
                     }
                 }
             }));
@@ -425,6 +485,10 @@ pub fn chat(live: Live, address: String, name: String) -> impl IntoElement {
     let edit: Edit = {
         let live = live.clone();
         Rc::new(move |id: String, text: String| {
+            if going_back() {
+                live.say(Note::info(t!("A moment"), t!("It is still going back to before your message.")));
+                return;
+            }
             if status.get_untracked() != "idle" && status.get_untracked() != "done" {
                 live.say(Note::info(t!("Still working"), t!("Edit it once it's done, or stop it first.")));
                 return;

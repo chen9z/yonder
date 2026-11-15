@@ -101,11 +101,8 @@ async fn act(live: Live, picked: &str) {
         "right" | "down" => live.run("pane.split", json!({ "direction": picked })),
         "zoom" => live.run("pane.zoom", json!({})),
         "close" => {
-            // A phone is easy to mistap: an agent mid-work or waiting is asked about first.
             let pane = live.view.with_untracked(|v| v.active_tab().and_then(|t| t.panes.iter().find(|p| p.focused).cloned()));
-            if let Some(p) = pane.filter(|p| matches!(p.status, Some("working" | "blocked")))
-                && !ui::confirm(t!("Close pane?"), &t!("{} is {}. Closing the pane ends it.", ui::title(&p.title), tr(p.status.unwrap_or_default())), t!("Close")).await
-            {
+            if !ui::close_ok(pane.as_slice(), false).await {
                 return;
             }
             live.run("pane.close", json!({}))
