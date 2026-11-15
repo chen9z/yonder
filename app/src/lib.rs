@@ -100,7 +100,8 @@ pub fn App() -> impl IntoElement {
             let _ = i18n::chinese();
             match current.get().0 {
                 Some(live) => connected(live).into_element(),
-                None => connect::computers_page().into_element(),
+                // A page of its own, for the status bar it asks for.
+                None => nav_stack().flex_1().child(nav_page().header_visible(false).status_bar(theme::status_bar).child(connect::computers_page())).into_element(),
             }
         }))
         // The sheet of choices, over every page (the computers' too).
@@ -115,7 +116,7 @@ fn connected(live: Live) -> impl IntoElement {
         .child(
             nav_stack()
                 .flex_1()
-                .child(nav_page().title(live.computer.name.clone()).header_visible(false).child(home::home_page(live.clone())))
+                .child(nav_page().title(live.computer.name.clone()).header_visible(false).status_bar(theme::status_bar).child(home::home_page(live.clone())))
                 .child(each(
                     move || routes.with(|r| r.0.clone()),
                     Route::key,
@@ -132,7 +133,7 @@ fn connected(live: Live) -> impl IntoElement {
 
 fn page(live: Live, route: Route) -> Screen {
     match route {
-        Route::Workspace => nav_page().title(live.computer.name.clone()).header_visible(false).child(workspace::workspace_page(live)),
+        Route::Workspace => nav_page().title(live.computer.name.clone()).header_visible(false).status_bar(theme::status_bar).child(workspace::workspace_page(live)),
         Route::EditConnection => connect::edit_current_page(live),
         Route::Settings => settings::settings_page(live),
         Route::KeyBar => keybar::keybar_page(),

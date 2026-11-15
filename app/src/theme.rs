@@ -8,6 +8,7 @@
 //! `resolve`), Apache-2.0.
 
 use herdc_term::{Palette, Rgb};
+use serde::{Deserialize, Serialize};
 use nsh_core::color::{rgb, rgba};
 use nsh_core::prelude::*;
 
@@ -46,6 +47,32 @@ const LIGHT_FG: u32 = 0x1b1b1e;
 const WARM: u32 = 0xe8e8e2;
 
 /// Behind terminals.
+/// Light or dark as chosen in Settings: the phone's, unless one is.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Look {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl Look {
+    /// Asked of the platform: the colors here and its own controls follow.
+    pub fn apply(self) {
+        set_color_scheme(match self {
+            Look::System => Appearance::System,
+            Look::Light => Appearance::Light,
+            Look::Dark => Appearance::Dark,
+        });
+    }
+}
+
+/// The status bar's icons, dark on light and light on dark: the
+/// platform's own follow the phone, not the app.
+pub fn status_bar() -> nsh_core::StatusBarSetting {
+    nsh_core::StatusBarSetting::default().foreground(if dark() { nsh_core::StatusBarStyle::Light } else { nsh_core::StatusBarStyle::Dark })
+}
+
 pub const BACKGROUND: AdaptiveColor = tone(PAPER_BG, GRAPHITE_BG);
 /// Bars and sidebars.
 pub const CHROME: AdaptiveColor = tone(mix(PAPER_BG, WARM, 0.6), mix(GRAPHITE_BG, 0, 0.32));

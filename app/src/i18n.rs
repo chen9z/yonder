@@ -453,6 +453,9 @@ fn zh(en: &str) -> Option<&'static str> {
         "LANGUAGE" => "语言",
         "Language" => "语言",
         "System" => "跟随系统",
+        "Appearance" => "外观",
+        "Light" => "浅色",
+        "Dark" => "深色",
 
         // Files and changes.
         "Loading files…" => "正在加载文件…",

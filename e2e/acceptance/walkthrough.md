@@ -87,7 +87,9 @@ it with the screenshot's name and go on.
    line icon, and Leave this computer (red) alone on the last card.
    COMPUTER has the computer (a green dot, "herdr-core" and its version),
    Edit connection and Add a machine… (no Commands); GENERAL has Main agent
-   (None), Language and Sort agents (Priority). "Fit terminals to the phone" shows a switch,
+   (None), Language, Appearance (System) and Sort agents (Priority).
+   Press Appearance: System, Light, Dark; press Light: the whole app,
+   terminals too, turns light at once; back to System. "Fit terminals to the phone" shows a switch,
    on, and small words under the card say what it does. The font size −
    and + change the size shown; the terminal's text follows when back.
    Put it back as it was. The key is one row, "Copy the public key" over

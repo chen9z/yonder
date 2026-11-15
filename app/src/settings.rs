@@ -1,8 +1,10 @@
 //! Settings: the computer the app is on (its connection, its machines,
 //! leaving it), the terminal's size, fit and keys, the
-//! app's language and how agents are sorted, this phone's key.
+//! app's language, light or dark, how agents are sorted, this phone's
+//! key.
 
 use crate::i18n::Language;
+use crate::theme::Look;
 use crate::live::{self, Live};
 use crate::prefs::Prefs;
 use crate::nav::{self, Route};
@@ -89,6 +91,31 @@ pub fn settings_page(live: Live) -> nsh_core::element::Screen {
                                     Some("system") => prefs.language.set(Language::System),
                                     Some("en") => prefs.language.set(Language::English),
                                     Some("zh") => prefs.language.set(Language::Chinese),
+                                    _ => {}
+                                }
+                            });
+                        },
+                    ),
+                    // Light or dark, whatever the phone's is.
+                    leads(
+                        setting("contrast", || t!("Appearance").into(), move || match prefs.look.get() {
+                            Look::System => t!("System").into(),
+                            Look::Light => t!("Light").into(),
+                            Look::Dark => t!("Dark").into(),
+                        }),
+                        move || {
+                            spawn(async move {
+                                use crate::pick::{self, Icon, Item};
+                                let now = prefs.look.get_untracked();
+                                let items = vec![
+                                    Item::new("system", t!("System"), Icon::None).checked(now == Look::System),
+                                    Item::new("light", t!("Light"), Icon::None).checked(now == Look::Light),
+                                    Item::new("dark", t!("Dark"), Icon::None).checked(now == Look::Dark),
+                                ];
+                                match pick::one(t!("Appearance"), items).await.as_deref() {
+                                    Some("system") => prefs.look.set(Look::System),
+                                    Some("light") => prefs.look.set(Look::Light),
+                                    Some("dark") => prefs.look.set(Look::Dark),
                                     _ => {}
                                 }
                             });

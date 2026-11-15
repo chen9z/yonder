@@ -16,6 +16,8 @@ pub struct Prefs {
     pub fit: Signal<bool>,
     /// The app's language (the phone's, unless chosen).
     pub language: Signal<Language>,
+    /// Light or dark (the phone's, unless chosen).
+    pub look: Signal<crate::theme::Look>,
     /// The key bar's keys, in order ([`crate::keybar::KEYS`] ids).
     pub keys: Signal<Vec<String>>,
     /// Machines folded on the home page, by computer and machine.
@@ -35,6 +37,7 @@ struct Kept {
     font: f32,
     fit: bool,
     language: Language,
+    look: crate::theme::Look,
     keys: Vec<String>,
     folded: Vec<String>,
     colors: std::collections::BTreeMap<String, usize>,
@@ -45,7 +48,7 @@ struct Kept {
 
 impl Default for Kept {
     fn default() -> Self {
-        Kept { font: 12.0, fit: true, language: Language::System, keys: crate::keybar::at_first(), folded: Vec::new(), colors: Default::default(), grouped: false, leads: Default::default(), aliases: Default::default() }
+        Kept { font: 12.0, fit: true, language: Language::System, look: Default::default(), keys: crate::keybar::at_first(), folded: Vec::new(), colors: Default::default(), grouped: false, leads: Default::default(), aliases: Default::default() }
     }
 }
 
@@ -79,11 +82,12 @@ impl Prefs {
         let kept: Kept = Storage::get_item(PREFS).and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
         let language = i18n::chosen();
         language.set(kept.language);
-        let prefs = Prefs { font: signal(kept.font), fit: signal(kept.fit), language, keys: signal(kept.keys), folded: signal(kept.folded), colors: signal(kept.colors), grouped: signal(kept.grouped), leads: signal(kept.leads), aliases: signal(kept.aliases) };
+        let prefs = Prefs { font: signal(kept.font), fit: signal(kept.fit), language, look: signal(kept.look), keys: signal(kept.keys), folded: signal(kept.folded), colors: signal(kept.colors), grouped: signal(kept.grouped), leads: signal(kept.leads), aliases: signal(kept.aliases) };
         effect(move || {
-            let kept = Kept { font: prefs.font.get(), fit: prefs.fit.get(), language: prefs.language.get(), keys: prefs.keys.get(), folded: prefs.folded.get(), colors: prefs.colors.get(), grouped: prefs.grouped.get(), leads: prefs.leads.get(), aliases: prefs.aliases.get() };
+            let kept = Kept { font: prefs.font.get(), fit: prefs.fit.get(), language: prefs.language.get(), look: prefs.look.get(), keys: prefs.keys.get(), folded: prefs.folded.get(), colors: prefs.colors.get(), grouped: prefs.grouped.get(), leads: prefs.leads.get(), aliases: prefs.aliases.get() };
             let _ = Storage::set_item(PREFS, serde_json::to_string(&kept).unwrap_or_default());
         });
+        effect(move || prefs.look.get().apply());
         provide_context(prefs);
         prefs
     }

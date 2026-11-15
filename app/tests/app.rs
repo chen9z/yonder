@@ -338,6 +338,14 @@ fn adds_a_computer_then_works_there() {
     app.wait_for_within("text:Grouped by space", SLOW).unwrap();
     app.press("text:Sort agents").unwrap();
     pick(&mut app, "priority");
+    // Light or dark, chosen over the phone's, and kept.
+    app.press("text:Appearance").unwrap();
+    pick(&mut app, "dark");
+    app.wait_for_within("text:Dark", SLOW).unwrap();
+    app.wait_until("kept", SLOW, |_| storage.entries().iter().any(|(k, v)| k == "prefs" && v.contains(r#""look":"Dark""#))).unwrap();
+    app.press("text:Appearance").unwrap();
+    pick(&mut app, "system");
+    app.wait_until("the phone's again", SLOW, |s| s.count("text:Dark") == Ok(0)).unwrap();
     app.press("label:Add a machine…").unwrap();
     app.wait_for_within("text:can@10.0.0.7", SLOW).unwrap();
     app.type_text("id:machine-target", "nobody@127.0.0.1:1").unwrap();

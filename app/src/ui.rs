@@ -400,6 +400,7 @@ pub fn heading(title: impl Fn() -> String + 'static) -> View {
 pub fn page(title: impl IntoReactive<SharedString>) -> nsh_core::element::Screen {
     nsh_base::nav_page()
         .title(title)
+        .status_bar(theme::status_bar)
         .header_style_with(|s| s.bg(theme::CHROME).text_color(theme::FOREGROUND).tint_color(theme::FOREGROUND))
         .bg(theme::CANVAS)
         .pl(move || safe_area().left)
