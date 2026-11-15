@@ -5,11 +5,13 @@
 //! written goes in as `hc send` puts it (no terminal held for it), with
 //! pictures put beside the agent; working, it can be stopped; what it
 //! asks in its terminal shows in the conversation, answered from there.
+//! Pi's own commands are offered as `/` is written; a message of yours
+//! is edited by going back to before it ([`transcript::rewind`]).
 
 use crate::live::{off, Live};
 use crate::nav::{self, Route};
 use crate::{theme, ui};
-use herdc_engine::tools::transcript::{self, Call, Line, Said, Transcript};
+use herdc_engine::tools::transcript::{self, Call, Change, Line, Said, Transcript};
 use herdc_engine::{Note, Viewer};
 use herdc_term::{Key, Mods};
 use nsh_base::{text_view, TextViewLinks};
@@ -64,13 +66,75 @@ enum Found {
 }
 
 /// A message sent and not yet in the session: going, until the core
-/// took it (`went`).
+/// took it (`went`); first going `back` to before the one it replaces.
+/// A `command` of Pi's shows apart, and not for long.
 #[derive(Clone, Debug, PartialEq)]
 struct Sent {
     n: u64,
     text: String,
     went: bool,
     at: Instant,
+    back: bool,
+    command: bool,
+}
+
+/// A command sent shows this long after it went.
+const COMMAND_SHOWN: Duration = Duration::from_secs(3);
+
+/// A message of yours being edited: its line, its words, and what was
+/// written before (back in the field if let go).
+#[derive(Clone, Debug, PartialEq)]
+struct Editing {
+    id: String,
+    text: String,
+    before: String,
+}
+
+/// Pi's own commands (1.5), as written after `/`.
+const PI: &[&str] = &[
+    "settings", "model", "tree", "thinking", "scoped-models", "export", "import", "share", "bug", "copy", "name", "session", "changelog", "hotkeys", "fork", "clone", "trust", "login", "logout", "new", "compact", "resume", "reload", "quit",
+];
+
+/// Those offered as `/` is written: what is of use from a phone.
+const OFFERED: &[&str] = &["compact", "new", "name", "model", "thinking", "tree", "fork", "clone", "resume", "session", "export", "settings", "reload"];
+
+/// What a command offered does, in a few words.
+fn about(name: &str) -> &'static str {
+    match name {
+        "compact" => t!("Sum up the context so far"),
+        "new" => t!("Start a new session"),
+        "name" => t!("Name this session"),
+        "model" => t!("Change the model"),
+        "thinking" => t!("How hard it thinks"),
+        "tree" => t!("Go back to an earlier point"),
+        "fork" => t!("A new session from an earlier message"),
+        "clone" => t!("Copy this session"),
+        "resume" => t!("Open another session"),
+        "session" => t!("This session's details"),
+        "export" => t!("Save the session as a file"),
+        "settings" => t!("Pi's settings"),
+        _ => t!("Load extensions and skills again"),
+    }
+}
+
+/// A command of Pi's, written: its name and what follows it.
+fn command(text: &str) -> Option<(&str, &str)> {
+    let said = text.trim().strip_prefix('/')?;
+    if said.contains('\n') {
+        return None;
+    }
+    let (name, rest) = said.split_once(' ').unwrap_or((said, ""));
+    PI.contains(&name).then_some((name, rest.trim()))
+}
+
+/// Whether what a command does shows only in its terminal: a list to
+/// choose from, what it says back.
+fn shown_there(name: &str, rest: &str) -> bool {
+    match name {
+        "compact" | "new" | "name" | "clone" | "reload" => false,
+        "model" | "thinking" => rest.is_empty(),
+        _ => true,
+    }
 }
 
 /// A row of the conversation: the time, or a thing said.
@@ -232,6 +296,7 @@ pub fn chat(live: Live, address: String, name: String) -> impl IntoElement {
 
     // Asked something in its terminal: the question's viewer, while shown.
     let answering = stored(None::<Rc<Viewer>>);
+    let editing = signal(None::<Editing>);
     // The conversation's: what a button starts outlives the button (Send
     // becomes Stop as the field empties while it works).
     let owner = Owner::current();
@@ -245,15 +310,54 @@ pub fn chat(live: Live, address: String, name: String) -> impl IntoElement {
                 owner.run(|| set_timeout(crate::terminal::ENTER_AFTER, move || viewer.key(Key::Enter, Mods::NONE)));
                 return;
             }
+            let busy = status.get_untracked() == "working";
+            // Edited: Pi goes back to before the message, with how many
+            // of yours came after it, then takes the words instead.
+            let back = match editing.get_untracked() {
+                None => None,
+                Some(e) => {
+                    let later = lines.with_untracked(|l| {
+                        let at = l.iter().position(|l| l.id == e.id)?;
+                        Some(l[at + 1..].iter().filter(|l| matches!(l.said, Said::You { .. })).count())
+                    });
+                    let Some(later) = later else {
+                        editing.set(None);
+                        crate::terminal::unsent(&text);
+                        live.say(Note::error(t!("Not changed"), t!("That message isn't in the conversation any more.")));
+                        return;
+                    };
+                    if busy {
+                        crate::terminal::unsent(&text);
+                        live.say(Note::info(t!("Still working"), t!("Edit it once it's done, or stop it first.")));
+                        return;
+                    }
+                    editing.set(None);
+                    Some((e, later))
+                }
+            };
+            let command = back.is_none().then(|| command(&text).map(|(name, rest)| shown_there(name, rest))).flatten();
+            if command.is_some() && busy {
+                crate::terminal::unsent(&text);
+                live.say(Note::info(t!("Still working"), t!("Commands go in once it's done.")));
+                return;
+            }
             let n = sent.with_untracked(|s| s.last().map_or(0, |m| m.n + 1));
             ui::smoothly();
-            sent.update(|s| s.push(Sent { n, text: text.clone(), went: false, at: Instant::now() }));
+            sent.update(|s| s.push(Sent { n, text: text.clone(), went: false, at: Instant::now(), back: back.is_some(), command: command.is_some() }));
             let (live, address) = (live.clone(), address.clone());
             owner.run(|| spawn(async move {
-                let words = text.clone();
+                let (words, going) = (text.clone(), back.clone());
+                // Err(true): it didn't go back, nothing sent.
                 let went = match live.there(machine_of(&live, &address)) {
-                    Ok(there) => off(async move { transcript::send(&there, &address, &words).await }).await.unwrap_or_else(|| Err("Not connected".into())),
-                    Err(e) => Err(e),
+                    Ok(there) => off(async move {
+                        if let Some((e, later)) = going {
+                            transcript::rewind(&there, &address, &e.text, later).await.map_err(|why| (true, why))?;
+                        }
+                        transcript::send(&there, &address, &words).await.map_err(|why| (false, why))
+                    })
+                    .await
+                    .unwrap_or_else(|| Err((false, "Not connected".into()))),
+                    Err(e) => Err((false, e)),
                 };
                 match went {
                     Ok(()) => {
@@ -262,11 +366,26 @@ pub fn chat(live: Live, address: String, name: String) -> impl IntoElement {
                             m.at = Instant::now();
                         }));
                         again.update(|a| *a += 1);
+                        // A command: what it shows is in its terminal, or
+                        // in the conversation as it changes; the line goes.
+                        if let Some(there) = command {
+                            if there {
+                                ui::smoothly();
+                                talking().set(Talking(false));
+                            }
+                            off(tokio::time::sleep(COMMAND_SHOWN)).await;
+                            sent.update(|s| s.retain(|m| m.n != n));
+                        }
                     }
                     // Not sent: back in the field, and why.
-                    Err(why) => {
+                    Err((undone, why)) => {
                         sent.update(|s| s.retain(|m| m.n != n));
                         crate::terminal::unsent(&text);
+                        if undone {
+                            editing.set(back.map(|(e, _)| e));
+                            live.say(Note::error(t!("Couldn't edit it"), why));
+                            return;
+                        }
                         let why = if why == "blocked" { t!("It is waiting for an answer in its terminal.").to_owned() } else { why };
                         live.say(Note::error(t!("Not sent"), why));
                     }
@@ -300,8 +419,31 @@ pub fn chat(live: Live, address: String, name: String) -> impl IntoElement {
 
     let placeholder = {
         let name = name.clone();
-        move || if status.get() == "blocked" { t!("Type an answer").to_owned() } else { t!("Message {}", name.clone()) }
+        move || if status.get() == "blocked" { t!("Type an answer").to_owned() } else { t!("Message {} · / for commands", name.clone()) }
     };
+    // Held, a message of yours offers to be edited: back in the field.
+    let edit: Edit = {
+        let live = live.clone();
+        Rc::new(move |id: String, text: String| {
+            if status.get_untracked() != "idle" && status.get_untracked() != "done" {
+                live.say(Note::info(t!("Still working"), t!("Edit it once it's done, or stop it first.")));
+                return;
+            }
+            let before = editing.get_untracked().map_or_else(crate::terminal::written, |e| e.before);
+            ui::smoothly();
+            editing.set(Some(Editing { id, text: text.clone(), before }));
+            crate::terminal::rewrite(&text);
+        })
+    };
+    // Written `/` and some of a name: Pi's commands it may be.
+    let offered = computed(move || {
+        let written = crate::terminal::draft();
+        let typed = written.strip_prefix('/').filter(|t| !t.contains(char::is_whitespace));
+        match typed {
+            Some(typed) if editing.with(Option::is_none) && status.get() != "blocked" => OFFERED.iter().copied().filter(|c| c.starts_with(typed)).collect(),
+            _ => Vec::new(),
+        }
+    });
     let offers = crate::terminal::Offers { stop: Some((working, stop)), attach: Some(attach(address.clone())) };
     let asked = (live.clone(), address.clone(), name.clone());
     view()
@@ -351,7 +493,10 @@ pub fn chat(live: Live, address: String, name: String) -> impl IntoElement {
                                     .pb(px(16.0))
                                     .gap(px(14.0))
                                     .child(when(move || cut.get(), move || before(loading, earlier)))
-                                    .child(each(move || lines.with(|l| items(l)), Item::key, |i, _| item(i)))
+                                    .child({
+                                        let edit = edit.clone();
+                                        each(move || lines.with(|l| items(l)), Item::key, move |i, _| item(i, edit.clone()))
+                                    })
                                     .child(each(move || sent.get(), |m| m.n, move |m, _| waiting(m, working)))
                                     .child(state(asked.0.clone(), asked.1.clone(), status, doing, asked.2.clone(), answering)),
                             ),
@@ -367,7 +512,92 @@ pub fn chat(live: Live, address: String, name: String) -> impl IntoElement {
                     .into_element()
             }
         }))
+        .child(when(move || !offered.with(Vec::is_empty), move || commands(offered)))
+        .child(when(move || editing.with(Option::is_some), move || edited(editing)))
         .child(crate::terminal::talk_bar(placeholder, send, offers))
+}
+
+/// Edits a message of yours: its line, its words.
+type Edit = Rc<dyn Fn(String, String)>;
+
+/// Commands shown at most, the keyboard up or not: more letters find
+/// the others.
+const COMMANDS_SHOWN: (usize, usize) = (5, 8);
+
+/// Above the field, as `/` and a name are written: the commands of Pi's
+/// it may be, chosen into the field (those wanting words, with a space
+/// for them); a glyph says it shows in its terminal. Not a scroll: one
+/// takes the touch from the keyboard, which then closes, the press lost.
+fn commands(offered: Memo<Vec<&'static str>>) -> impl IntoElement {
+    let shown = move || {
+        let most = if keyboard_height().0 > 0.0 { COMMANDS_SHOWN.0 } else { COMMANDS_SHOWN.1 };
+        offered.with(|o| o.iter().copied().take(most).collect::<Vec<_>>())
+    };
+    view()
+        .border_t(px(1.0))
+        .border_color(theme::BORDER)
+        .bg(theme::CHROME)
+        .test_id("commands")
+        .child(each(shown, |c| *c, |c, _| {
+            let name = c.get_untracked();
+            view()
+                .flex_row()
+                .items_center()
+                .gap(px(10.0))
+                .h(px(48.0))
+                .px(px(16.0))
+                .active(|s| s.bg(theme::HOVER))
+                .role(AccessibilityRole::Button)
+                .label(format!("/{name}"))
+                .test_id(&format!("cmd:{name}"))
+                .on_press(move || crate::terminal::rewrite(&if name == "name" { format!("/{name} ") } else { format!("/{name}") }))
+                .child(text(format!("/{name}")).text_size(theme::ROW).font_family(theme::MONO).text_color(theme::FOREGROUND))
+                .child(text(about(name)).flex_1().text_size(theme::FOOTNOTE).text_color(theme::MUTED).number_of_lines(1))
+                .child(if shown_there(name, "") { ui::glyph("terminal", 14.0, theme::DIM).into_element() } else { view().into_element() })
+        }))
+}
+
+/// Above the field while a message of yours is edited: which, and the
+/// way out of it (what was written before, back).
+fn edited(editing: Signal<Option<Editing>>) -> impl IntoElement {
+    view()
+        .flex_row()
+        .items_center()
+        .gap(px(10.0))
+        .pl(px(16.0))
+        .pr(px(6.0))
+        .py(px(6.0))
+        .border_t(px(1.0))
+        .border_color(theme::BORDER)
+        .bg(theme::CHROME)
+        .test_id("editing")
+        .child(ui::glyph("pencil", 15.0, theme::ACCENT))
+        .child(
+            view()
+                .flex_1()
+                .child(text(t!("Editing your message")).text_size(theme::FOOTNOTE).font_weight(FontWeight::SEMIBOLD).text_color(theme::ACCENT))
+                .child(text(move || editing.with(|e| e.as_ref().map(|e| e.text.split_whitespace().collect::<Vec<_>>().join(" ")).unwrap_or_default())).text_size(theme::CAPTION).text_color(theme::DIM).number_of_lines(1)),
+        )
+        .child(
+            view()
+                .w(px(36.0))
+                .h(px(36.0))
+                .rounded(px(18.0))
+                .items_center()
+                .justify_center()
+                .active(|s| s.bg(theme::HOVER))
+                .role(AccessibilityRole::Button)
+                .label(t!("Cancel editing"))
+                .test_id("unedit")
+                .on_press(move || {
+                    if let Some(e) = editing.get_untracked() {
+                        ui::smoothly();
+                        editing.set(None);
+                        crate::terminal::rewrite(&e.before);
+                    }
+                })
+                .child(ui::glyph("x", 16.0, theme::MUTED)),
+        )
 }
 
 /// Pictures from the phone, put beside the agent at `address` on its
@@ -477,7 +707,7 @@ fn missing(why: String) -> impl IntoElement {
 }
 
 /// A row: the time, or what was said.
-fn item(i: ReadSignal<Item>) -> impl IntoElement {
+fn item(i: ReadSignal<Item>, edit: Edit) -> impl IntoElement {
     match i.get_untracked() {
         Item::Time(_, at) => text(time_of(at)).self_center().pt(px(4.0)).text_size(theme::CAPTION).font_weight(FontWeight::MEDIUM).text_color(theme::DIM).into_element(),
         Item::Said(_) => {
@@ -485,18 +715,22 @@ fn item(i: ReadSignal<Item>) -> impl IntoElement {
                 Item::Said(l) => l,
                 Item::Time(id, at) => Line { id, said: Said::Stopped, at },
             });
-            said(line).into_element()
+            said(line, edit).into_element()
         }
     }
 }
 
 /// One thing said.
-fn said(l: Memo<Line>) -> impl IntoElement {
+fn said(l: Memo<Line>, edit: Edit) -> impl IntoElement {
     let kind = computed(move || l.with(|l| std::mem::discriminant(&l.said)));
     dynamic(move || {
         let _ = kind.get();
         match l.with_untracked(|l| l.said.clone()) {
-            Said::You { .. } => you(move || l.with(|l| match &l.said { Said::You { text, .. } => text.clone(), _ => String::new() }), move || l.with(|l| match &l.said { Said::You { images, .. } => *images, _ => 0 })).into_element(),
+            Said::You { .. } => {
+                let edit = edit.clone();
+                let edit = move |text| edit(l.with_untracked(|l| l.id.clone()), text);
+                you(move || l.with(|l| match &l.said { Said::You { text, .. } => text.clone(), _ => String::new() }), move || l.with(|l| match &l.said { Said::You { images, .. } => *images, _ => 0 }), edit).into_element()
+            }
             Said::Reply(_) => text_view()
                 .markdown(move || l.with(|l| match &l.said { Said::Reply(words) => Some(SharedString::from(words.clone())), _ => None }))
                 .selectable(true)
@@ -521,24 +755,37 @@ fn said(l: Memo<Line>) -> impl IntoElement {
                 .child(text(t!("Failed: {}", why)).flex_1().text_size(theme::FOOTNOTE).text_color(theme::BLOCKED).number_of_lines(3))
                 .into_element(),
             Said::Stopped => text(t!("Stopped")).text_size(theme::FOOTNOTE).text_color(theme::DIM).into_element(),
+            Said::Changed(change) => text(match change {
+                Change::Name(name) => t!("Named “{}”", name),
+                Change::Model(model) => t!("Model: {}", model),
+                Change::Thinking(level) => t!("Thinking: {}", level),
+            })
+            .self_center()
+            .text_size(theme::CAPTION)
+            .text_color(theme::DIM)
+            .into_element(),
         }
     })
 }
 
-/// The person's words, on the right in a bubble; held, copied or written
-/// again.
-fn you(words: impl Fn() -> String + Clone + 'static, images: impl Fn() -> usize + 'static) -> View {
+/// The person's words, on the right in a bubble; held, edited (Pi goes
+/// back to before them), copied, or put in the field again.
+fn you(words: impl Fn() -> String + Clone + 'static, images: impl Fn() -> usize + 'static, edit: impl Fn(String) + Clone + 'static) -> View {
     let held = words.clone();
     view().flex_row().justify_end().pl(px(48.0)).child(
         bubble(words, images)
             .active(|s| s.opacity(0.8))
             .role(AccessibilityRole::Button)
             .on_long_press(move || {
-                let words = held();
+                let (words, edit) = (held(), edit.clone());
                 spawn(async move {
                     use crate::pick::{self, Item};
-                    let items = vec![Item::glyph("copy", t!("Copy"), "copy"), Item::glyph("again", t!("Write it again"), "pencil")];
+                    let mut items = vec![Item::glyph("copy", t!("Copy"), "copy"), Item::glyph("again", t!("Write it again"), "corner-down-left")];
+                    if !words.trim().is_empty() {
+                        items.insert(0, Item::glyph("edit", t!("Edit"), "pencil"));
+                    }
                     match pick::one(t!("Your message"), items).await.as_deref() {
+                        Some("edit") => edit(words),
                         Some("copy") => {
                             set_clipboard(words);
                             if let Some(live) = crate::live::live() {
@@ -576,6 +823,15 @@ fn bubble(words: impl Fn() -> String + 'static, images: impl Fn() -> usize + 'st
 
 /// A message sent, not in the session yet: quieter, saying how it goes.
 fn waiting(m: ReadSignal<Sent>, working: Memo<bool>) -> impl IntoElement {
+    // A command: a line of its own, quiet.
+    if m.with_untracked(|m| m.command) {
+        return text(move || m.with(|m| format!("{} · {}", m.text.trim(), if m.went { t!("Sent") } else { t!("Sending…") })))
+            .self_center()
+            .text_size(theme::CAPTION)
+            .font_family(theme::MONO)
+            .text_color(theme::DIM)
+            .into_element();
+    }
     view()
         .items_end()
         .pl(px(48.0))
@@ -583,6 +839,7 @@ fn waiting(m: ReadSignal<Sent>, working: Memo<bool>) -> impl IntoElement {
         .child(bubble(move || m.with(|m| m.text.clone()), || 0).opacity(0.6))
         .child(
             text(move || match (m.with(|m| m.went), working.get()) {
+                (false, _) if m.with(|m| m.back) => t!("Going back to before it…").to_owned(),
                 (false, _) => t!("Sending…").to_owned(),
                 (true, true) => t!("Queued: it reads it once this step is done").to_owned(),
                 (true, false) => t!("Sent").to_owned(),
@@ -591,6 +848,7 @@ fn waiting(m: ReadSignal<Sent>, working: Memo<bool>) -> impl IntoElement {
             .text_size(theme::CAPTION)
             .text_color(theme::DIM),
         )
+        .into_element()
 }
 
 /// The glyph for a tool.

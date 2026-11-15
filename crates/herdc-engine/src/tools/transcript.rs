@@ -4,12 +4,14 @@
 //! branch it, so what is said now is the line from the last entry back.
 //! The file is read as it grows (`file.read` gives lines from where it
 //! left off), and told as what was said: the person's words, the
-//! replies, the tools used between them.
+//! replies, the tools used between them. Going back to before one of
+//! the person's messages is done as a person does it, by Pi's keys
+//! ([`rewind`]).
 
 use super::There;
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Lines read first: the end of a long session, not all of it.
 pub const TAIL: usize = 800;
@@ -35,6 +37,17 @@ pub enum Said {
     Failed(String),
     /// Stopped before it was done (Esc).
     Stopped,
+    /// The session itself changed, by a command (`/name`, `/model`).
+    Changed(Change),
+}
+
+/// What a command changed: the session's name, the model, how hard it
+/// thinks.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Change {
+    Name(String),
+    Model(String),
+    Thinking(String),
 }
 
 /// A tool used: its name, what it was given (`said` in a line, `input`
@@ -68,6 +81,7 @@ enum Kind {
     Result { call: String, text: String, error: bool },
     Shell { command: String, output: String, failed: bool },
     Compacted,
+    Change(Change),
     Other,
 }
 
@@ -123,6 +137,10 @@ impl Transcript {
         let kind = match v["type"].as_str() {
             Some("message") => message(&v["message"]),
             Some("compaction") => Kind::Compacted,
+            Some("session_info") => v["name"].as_str().map_or(Kind::Other, |n| Kind::Change(Change::Name(n.to_owned()))),
+            // The model without its provider's path.
+            Some("model_change") => v["modelId"].as_str().map_or(Kind::Other, |m| Kind::Change(Change::Model(m.rsplit('/').next().unwrap_or(m).to_owned()))),
+            Some("thinking_level_change") => v["thinkingLevel"].as_str().map_or(Kind::Other, |l| Kind::Change(Change::Thinking(l.to_owned()))),
             _ => Kind::Other,
         };
         let at = v["timestamp"].as_str().and_then(epoch_ms).unwrap_or(0);
@@ -183,7 +201,9 @@ impl Transcript {
                     tool(&mut out, call, at);
                 }
                 Kind::Compacted => out.push(Line { id, said: Said::Compacted, at }),
-                Kind::Result { .. } | Kind::Other => {}
+                // Once something was said: before, it is how it began.
+                Kind::Change(change) if out.iter().any(|l| matches!(l.said, Said::You { .. })) => out.push(Line { id, said: Said::Changed(change.clone()), at }),
+                Kind::Change(_) | Kind::Result { .. } | Kind::Other => {}
             }
         }
         out
@@ -380,6 +400,139 @@ pub async fn send(there: &There, terminal: &str, text: &str) -> Result<(), Strin
     })
 }
 
+/// How long Pi is given to show what a key did.
+const SHOWN: Duration = Duration::from_secs(4);
+
+/// Pi takes a second Ctrl+C within this as "quit".
+const TWICE: Duration = Duration::from_millis(500);
+
+/// Goes back in the session of the Pi at `terminal` to just before one
+/// of the person's messages, `said`, with `later` of theirs after it on
+/// the branch shown. Done by its keys as a person would: its field
+/// emptied, `/tree`, its own messages only, up to that one, no summary;
+/// the screen read at each step, and nothing chosen unless it shows the
+/// message. Its field is left empty for the words written instead.
+pub async fn rewind(there: &There, terminal: &str, said: &str, later: usize) -> Result<(), String> {
+    let emptied = Instant::now();
+    keys(there, terminal, &["ctrl+c"]).await?;
+    keys(there, terminal, &["/", "t", "r", "e", "e", "enter"]).await?;
+    let went = choose(there, terminal, said, later).await;
+    if went.is_err() {
+        // Out of the tree (and its question), as it was.
+        for _ in 0..3 {
+            match screen(there, terminal).await {
+                Ok(s) if counted(&s).is_some() || s.contains("Summarize branch?") => keys(there, terminal, &["esc"]).await?,
+                _ => break,
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        return went;
+    }
+    // The message, put back in its field: out again, for the new words.
+    tokio::time::sleep((TWICE + Duration::from_millis(200)).saturating_sub(emptied.elapsed())).await;
+    keys(there, terminal, &["ctrl+c"]).await?;
+    until(there, terminal, |s| editor(s).is_some_and(|e| e.is_empty())).await?.ok_or_else(|| "Its field didn't empty.".to_owned())?;
+    Ok(())
+}
+
+/// In the tree: the person's messages only, up to `said`, chosen,
+/// without a summary of what is left.
+async fn choose(there: &There, terminal: &str, said: &str, later: usize) -> Result<(), String> {
+    until(there, terminal, |s| counted(s).is_some()).await?.ok_or_else(|| "Its session tree didn't open.".to_owned())?;
+    let only = |s: &str| counted(s).is_some_and(|c| c.contains("[user]"));
+    // Ctrl+U turns "theirs only" on and off: on, once.
+    if !screen(there, terminal).await.is_ok_and(|s| only(&s)) {
+        keys(there, terminal, &["ctrl+u"]).await?;
+        if until(there, terminal, only).await?.is_none() {
+            keys(there, terminal, &["ctrl+u"]).await?;
+            until(there, terminal, only).await?.ok_or_else(|| "Its tree didn't show only your messages.".to_owned())?;
+        }
+    }
+    if later > 0 {
+        keys(there, terminal, &vec!["up"; later]).await?;
+    }
+    until(there, terminal, |s| chosen(s).is_some_and(|r| is(r, said))).await?.ok_or_else(|| "That message isn't where it was in its tree; nothing changed.".to_owned())?;
+    keys(there, terminal, &["enter"]).await?;
+    // Back there, the message in its field (which was emptied for it).
+    let back = |s: &str| counted(s).is_none() && !s.contains("Summarize branch?") && editor(s).is_some_and(|e| starts(&e, said));
+    let asked = until(there, terminal, |s| s.contains("Summarize branch?") || back(s)).await?.ok_or_else(|| "It didn't go back.".to_owned())?;
+    if asked.contains("Summarize branch?") {
+        if !asked.lines().any(|l| l.contains("→ No summary")) {
+            return Err("It asked about a summary in a way not known.".into());
+        }
+        keys(there, terminal, &["enter"]).await?;
+        // A long message shows its end in the field: Pi's word for it, then.
+        let done = |s: &str| back(s) || (counted(s).is_none() && !s.contains("Summarize branch?") && s.contains("Navigated to selected point"));
+        until(there, terminal, done).await?.ok_or_else(|| "It didn't go back.".to_owned())?;
+    }
+    Ok(())
+}
+
+async fn keys(there: &There, terminal: &str, keys: &[&str]) -> Result<(), String> {
+    there.core.call_timeout("terminal.keys", json!({ "terminal": terminal, "keys": keys }), Duration::from_secs(30)).await.map(|_| ()).map_err(|e| e.to_string())
+}
+
+async fn screen(there: &There, terminal: &str) -> Result<String, String> {
+    let got = there.core.call_timeout("terminal.read", json!({ "terminal": terminal }), Duration::from_secs(15)).await.map_err(|e| e.to_string())?;
+    Ok(got["text"].as_str().unwrap_or_default().to_owned())
+}
+
+/// The screen once it shows `what`, read again until [`SHOWN`] passed.
+async fn until(there: &There, terminal: &str, what: impl Fn(&str) -> bool) -> Result<Option<String>, String> {
+    let end = Instant::now() + SHOWN;
+    loop {
+        let s = screen(there, terminal).await?;
+        if what(&s) {
+            return Ok(Some(s));
+        }
+        if Instant::now() > end {
+            return Ok(None);
+        }
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+}
+
+/// Pi's tree, open: what its count (`(3/4) [user]`) says after itself.
+fn counted(screen: &str) -> Option<&str> {
+    screen.lines().rev().find_map(|l| {
+        let (count, rest) = l.trim_start().strip_prefix('(')?.split_once(')')?;
+        let (at, of) = count.split_once('/')?;
+        (!at.is_empty() && !of.is_empty() && count.chars().all(|c| c.is_ascii_digit() || c == '/')).then(|| rest.trim())
+    })
+}
+
+/// The row of the tree chosen (`› `), above its count.
+fn chosen(screen: &str) -> Option<&str> {
+    let lines: Vec<&str> = screen.lines().collect();
+    let count = lines.iter().rposition(|l| counted(l).is_some())?;
+    lines[..count].iter().rev().find(|l| l.starts_with('›')).copied()
+}
+
+/// Whether a row of the tree is the person's message `said`, on the
+/// branch shown (`•`): as much of it as the row shows.
+fn is(row: &str, said: &str) -> bool {
+    row.split_once("user: ").is_some_and(|(before, shown)| before.contains('•') && starts(shown.trim_end_matches('…'), said))
+}
+
+/// Whether `shown` is `said`, spaces aside, or how it starts (cut where
+/// the screen ends): at least its first few letters, and not longer.
+fn starts(shown: &str, said: &str) -> bool {
+    let flat = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let (shown, said) = (flat(shown), flat(said));
+    let (n, of) = (shown.chars().count(), said.chars().count());
+    n > 0 && n <= of && n >= of.min(6) && said.starts_with(&shown)
+}
+
+/// What Pi's field holds: the lines between the last two rules across
+/// the screen.
+fn editor(screen: &str) -> Option<String> {
+    let lines: Vec<&str> = screen.lines().collect();
+    let rule = |l: &str| l.chars().count() > 3 && l.chars().all(|c| c == '─');
+    let last = lines.iter().rposition(|l| rule(l))?;
+    let first = lines[..last].iter().rposition(|l| rule(l))?;
+    Some(lines[first + 1..last].iter().map(|l| l.trim()).collect::<Vec<_>>().join("\n").trim().to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -468,6 +621,47 @@ mod tests {
 
     fn input_of(name: &str, args: Value) -> String {
         input(name, &args).0
+    }
+
+    #[test]
+    fn what_a_command_changed_shows_once_something_was_said() {
+        let lines = [
+            json!({"type": "model_change", "id": "m", "parentId": null, "modelId": "remote/claude/claude-opus-5-5"}),
+            json!({"type": "message", "id": "1", "parentId": "m", "message": {"role": "user", "content": "hi"}}),
+            json!({"type": "session_info", "id": "2", "parentId": "1", "name": "探针"}),
+            json!({"type": "thinking_level_change", "id": "3", "parentId": "2", "thinkingLevel": "low"}),
+            json!({"type": "model_change", "id": "4", "parentId": "3", "modelId": "gpt-6"}),
+        ];
+        let mut t = Transcript::default();
+        t.take(&read(&lines, 1));
+        let said: Vec<Said> = t.lines().into_iter().map(|l| l.said).collect();
+        assert_eq!(said, vec![
+            Said::You { text: "hi".into(), images: 0 },
+            Said::Changed(Change::Name("探针".into())),
+            Said::Changed(Change::Thinking("low".into())),
+            Said::Changed(Change::Model("gpt-6".into())),
+        ]);
+    }
+
+    #[test]
+    fn pi_s_tree_and_field_are_read_off_its_screen() {
+        // As Pi 1.5 drew them: its tree, only the person's messages.
+        let rule = "─".repeat(40);
+        let tree = format!("  Type to search:\n{rule}\n  • user: alpha one\n  ├⊟ • user: beta two\n› │     • user: gamma three\n  └─ user: beta two\n  (3/4) [user]\n{rule}\n/tmp/p\n0.0%/400k (auto)      (magpie) claude-opus-5-5 • high\n");
+        assert_eq!(counted(&tree), Some("[user]"));
+        assert_eq!(counted("  (6/8)\n"), Some(""));
+        assert_eq!(counted("(magpie) x\n 0.0%/400k (auto)\n"), None);
+        let row = chosen(&tree).unwrap();
+        assert_eq!(row, "› │     • user: gamma three");
+        assert!(is(row, "gamma\nthree"));
+        assert!(!is(row, "gamma"));
+        assert!(is("› ├⊟ • user: a long message cut wh…", "a long message cut where the screen ends"));
+        assert!(!is("› └─ user: beta two", "beta two"), "not on the branch shown");
+        // Gone back: the message in its field, between the last two rules.
+        let back = format!(" alpha one\n reply one\n Navigated to selected point\n{rule}\nbeta two\n{rule}\n/tmp/p\n");
+        assert_eq!(editor(&back).as_deref(), Some("beta two"));
+        assert!(starts(&editor(&back).unwrap(), "beta two"));
+        assert_eq!(editor(&format!("{rule}\n\n{rule}\n")).as_deref(), Some(""));
     }
 
     #[test]

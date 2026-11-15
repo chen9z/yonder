@@ -136,5 +136,15 @@ it with the screenshot's name and go on.
    lines show above and the screen stays where it was. Times show between
    lines far apart. Turn the phone sideways: the tabs at the bottom are
    lower, without words; turn it back.
+7c. Still in that conversation (send nothing): the field says "Message
+   <name> · / for commands". Type `/`: a list shows above the field,
+   /compact first, each with a few words; some with a terminal glyph.
+   Type `na`: only /name. Press it: the field says "/name " and the list
+   is gone. Clear the field. Hold one of your messages: "Edit", "Copy",
+   "Write it again". Press "Edit": its words in the field, above it
+   "Editing your message" and an ✕; press the ✕: what was written before
+   is back. Only on a throwaway Pi: edit a message and send it; under it
+   "Going back to before it…", then the conversation goes on from that
+   message, the later ones gone; `/name x` sent says "Named “x”".
 
 End with a table: step, as said (yes/no), what differed, screenshot.

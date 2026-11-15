@@ -436,10 +436,34 @@ pub fn unsent(words: &str) {
     global::<Unsent>().update(|d| d.0 = if d.0.trim().is_empty() { words.to_owned() } else { format!("{words}\n{}", d.0) });
 }
 
-/// Words added at the end of what is written (a picture's path).
+/// What is written in the field (read as it changes).
+pub fn draft() -> String {
+    global::<Unsent>().with(|d| d.0.clone())
+}
+
+/// What is written in the field now.
+pub fn written() -> String {
+    global::<Unsent>().with_untracked(|d| d.0.clone())
+}
+
+/// What is written, replaced (a message to edit, a command chosen): the
+/// caret after it.
+pub fn rewrite(words: &str) {
+    global::<Unsent>().set(Unsent(words.to_owned()));
+    global::<ToEnd>().update(|n| n.0 += 1);
+}
+
+/// Words added at the end of what is written (a picture's path), the
+/// caret after them.
 pub fn add_to_draft(words: &str) {
     global::<Unsent>().update(|d| d.0 = if d.0.trim().is_empty() { words.to_owned() } else { format!("{}\n{words}", d.0.trim_end()) });
+    global::<ToEnd>().update(|n| n.0 += 1);
 }
+
+/// Asked, the caret goes to the end of what is written (put there, not
+/// typed: the field keeps it where it was).
+#[derive(Clone, Copy, Default, PartialEq)]
+struct ToEnd(u64);
 
 /// Something a button does.
 pub type Act = Rc<dyn Fn()>;
@@ -468,6 +492,19 @@ pub fn talk_bar(placeholder: impl Fn() -> String + 'static, send: impl Fn(String
         send(words);
     });
     let none = move || draft.with(|d| d.0.trim().is_empty());
+    let field = element_ref();
+    let to_end = global::<ToEnd>();
+    let moved = stored(to_end.get_untracked().0);
+    effect(move || {
+        let asked = to_end.get().0;
+        if moved.replace(asked) != asked {
+            // Once the field has the words.
+            set_timeout(std::time::Duration::from_millis(30), move || {
+                let end = draft.with_untracked(|d| d.0.encode_utf16().count()) as u32;
+                field.set_selection(end, end);
+            });
+        }
+    });
     let stop = offers.stop.clone();
     let stopping = computed(move || stop.as_ref().is_some_and(|(working, _)| working.get()) && none());
     view()
@@ -505,6 +542,7 @@ pub fn talk_bar(placeholder: impl Fn() -> String + 'static, send: impl Fn(String
         })
         .child(
             input()
+                .element_ref(&field)
                 .test_id("talk")
                 .multiline(true)
                 .value(move || draft.with(|d| d.0.clone()))

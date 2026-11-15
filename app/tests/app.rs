@@ -891,19 +891,57 @@ fn an_agent_made_the_main_one_has_a_tab_of_its_own_and_the_app_opens_on_it() {
 /// keeps its session in a file as Pi does. A line said to it is a turn
 /// (a step, then words); `ask` asks in its terminal until answered; `slow`
 /// works until a key comes (Esc, stopping it).
+/// Pi as far as the conversation sees it: its session written as it is
+/// told things, its status said; `/tree` drawn as Pi draws it (its
+/// count, `[user]` on Ctrl+U, `› ` the one chosen, "Summarize branch?",
+/// the message back in its field between rules, out on Ctrl+C), going
+/// back to before the one chosen; `/name` names the session.
 const FAKE_PI: &str = r#"f="$HOME/.pi/agent/sessions/--fake--/2026-11-05T17-59-33-091Z_fake.jsonl"
+u="$f.yours"
 mkdir -p "${f%/*}"
 printf '{"type":"session","id":"s"}\n' > "$f"
+: > "$u"
+trap '' INT
 n=0; p=""
+rule=────────────────
 say() { printf '\033]7501;state=%s:app=pi\033\\' "$1"; }
 add() { n=$((n+1)); printf '{"type":"message","id":"e%s","parentId":"%s","timestamp":"2026-11-05T17:59:34.063Z","message":%s}\n' "$n" "$p" "$1" >> "$f"; p="e$n"; }
-you() { add "{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"$1\"}]}"; }
+you() { printf 'e%s|%s|%s\n' "$((n+1))" "$p" "$1" >> "$u"; add "{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"$1\"}]}"; }
+key() { dd bs=1 count=1 2>/dev/null; }
+show() {
+  printf '\033[2J\033[H'; i=0
+  while IFS='|' read -r id par text; do i=$((i+1)); if [ "$i" = "$sel" ]; then m='›'; else m=' '; fi; printf '%s • user: %s\n' "$m" "$text"; done < "$u"
+  printf '  (%s/%s)%s\n%s\n~\n' "$sel" "$all" "$only" "$rule"
+}
+tree() {
+  stty -icanon -isig -echo -icrnl min 1 time 0
+  all=$(wc -l < "$u" | tr -d ' '); sel=$all; only=""; asked=""
+  show
+  while :; do
+    k=$(key)
+    if [ "$k" = "$(printf '\025')" ]; then if [ -z "$only" ]; then only=" [user]"; else only=""; fi
+    elif [ "$k" = "$(printf '\033')" ]; then k=$(key)$(key); [ "$k" = "[A" ] || [ "$k" = "OA" ] && sel=$((sel-1))
+    elif [ "$k" = "$(printf '\r')" ]; then
+      if [ -z "$asked" ]; then asked=1; printf '\033[2J\033[H Summarize branch?\n → No summary\n   Summarize\n'; continue; fi
+      line=$(sed -n "${sel}p" "$u"); p=$(printf '%s' "$line" | cut -d'|' -f2); text=$(printf '%s' "$line" | cut -d'|' -f3)
+      head -n $((sel-1)) "$u" > "$u.t"; mv "$u.t" "$u"
+      printf '\033[2J\033[H Navigated to selected point\n%s\n%s\n%s\n~\n' "$rule" "$text" "$rule"
+      while [ "$(key)" != "$(printf '\003')" ]; do :; done
+      printf '\033[2J\033[H%s\n\n%s\n~\n' "$rule" "$rule"
+      break
+    fi
+    show
+  done
+  stty icanon isig echo icrnl
+}
 reply() { add "{\"role\":\"assistant\",\"stopReason\":\"${2:-stop}\",\"content\":[{\"type\":\"text\",\"text\":\"$1\"}]}"; }
 say idle
 while IFS= read -r m; do
   case "$m" in
     ask) you ask; reply "Which one?"; say blocked; printf 'Pick one:\n> yes\n  no\n'; IFS= read -r a; reply Answered; say idle;;
     slow) you slow; say working; stty -icanon min 1 time 0; dd bs=1 count=1 >/dev/null 2>&1; stty icanon; reply "" aborted; say idle;;
+    /tree) tree;;
+    /name\ *) printf '{"type":"session_info","id":"i%s","parentId":"%s","name":"%s"}\n' "$n" "$p" "${m#/name }" >> "$f";;
     *) you "$m"; say working
        add '{"role":"assistant","stopReason":"toolUse","content":[{"type":"toolCall","id":"c1","name":"bash","arguments":{"command":"echo hi"}}]}'
        add '{"role":"toolResult","toolCallId":"c1","content":[{"type":"text","text":"hi"}]}'
@@ -999,4 +1037,38 @@ fn a_pi_main_agent_is_talked_to_as_a_conversation() {
     app.wait_until("its path written", SLOW, |s| s.input_text("id:talk").ok().flatten().is_some_and(|t| t.ends_with("shot.png"))).unwrap();
     let path = app.screen().input_text("id:talk").unwrap().unwrap().to_owned();
     assert_eq!(std::fs::read(&path).unwrap(), b"\x89PNG");
+
+    // A message of yours, edited: its words in the field, and let go,
+    // what was written before back.
+    app.long_press("text:hello").unwrap();
+    pick(&mut app, "edit");
+    app.wait_for_within("id:editing", SLOW).unwrap();
+    assert_eq!(app.screen().input_text("id:talk").unwrap(), Some("hello"));
+    app.press("id:unedit").unwrap();
+    app.wait_until("what was written, back", SLOW, |s| s.input_text("id:talk").ok().flatten() == Some(path.as_str()) && s.count("id:editing") == Ok(0)).unwrap();
+    // Sent edited: Pi back to before it, by its keys, then the words, and
+    // the conversation goes on from there (what came after it, left).
+    app.long_press("text:hello").unwrap();
+    pick(&mut app, "edit");
+    app.wait_for_within("id:editing", SLOW).unwrap();
+    app.clear("id:talk").unwrap();
+    app.type_text("id:talk", "hello again").unwrap();
+    app.press("label:Send").unwrap();
+    app.wait_for_within("text:Done with hello again", SLOW).unwrap();
+    app.wait_until("the branch left", SLOW, |s| s.count("text:Answered") == Ok(0) && s.count("text:Done with hello") == Ok(0) && s.count("id:editing") == Ok(0)).unwrap();
+
+    // Pi's commands, offered as `/` is written; one chosen into the
+    // field, given its words, and what it changed said.
+    app.type_text("id:talk", "/").unwrap();
+    app.wait_for_within("id:cmd:compact", SLOW).unwrap();
+    app.clear("id:talk").unwrap();
+    app.type_text("id:talk", "/na").unwrap();
+    app.wait_until("only /name", SLOW, |s| s.count("id:cmd:compact") == Ok(0) && s.count("id:cmd:name") == Ok(1)).unwrap();
+    app.press("id:cmd:name").unwrap();
+    app.wait_until("chosen into the field", SLOW, |s| s.input_text("id:talk").ok().flatten() == Some("/name ") && s.count("id:commands") == Ok(0)).unwrap();
+    app.type_text("id:talk", "trip").unwrap();
+    app.wait_until("its words after it", SLOW, |s| s.input_text("id:talk").ok().flatten() == Some("/name trip")).unwrap();
+    app.press("label:Send").unwrap();
+    app.wait_for_within("text:Named “trip”", SLOW).unwrap();
+    assert_eq!(app.screen().count("text:/name trip"), Ok(0), "not a message of yours");
 }

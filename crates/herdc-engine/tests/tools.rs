@@ -160,3 +160,64 @@ async fn a_pi_session_is_found_by_its_label_or_folder_and_read_as_it_grows() {
     assert_eq!(std::fs::read(&landed).unwrap(), b"\x89PNG");
     there.core.call("terminal.kill", serde_json::json!({"terminal": address})).await.unwrap();
 }
+
+/// Going back in a real Pi's session by its keys, against the Pi it was
+/// written for (`pi` on the PATH; `--ignored`): no model asked, the
+/// session made up. The branch it leaves is where the next entry goes.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn a_real_pi_goes_back_to_before_one_of_your_messages() {
+    use herdc_engine::tools::transcript;
+    use serde_json::json;
+    let session = Session::new();
+    let there = There::new(session.connect().await, None);
+    let dir = session.path("sessions");
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("probe.jsonl");
+    let at = |n: usize| format!("2026-11-15T01:00:{n:02}.000Z");
+    let user = |n, id: &str, parent: Option<&str>, text: &str| json!({"type": "message", "id": id, "parentId": parent, "timestamp": at(n), "message": {"role": "user", "content": [{"type": "text", "text": text}], "timestamp": 1}});
+    let reply = |n, id: &str, parent: &str, text: &str| json!({"type": "message", "id": id, "parentId": parent, "timestamp": at(n), "message": {"role": "assistant", "content": [{"type": "text", "text": text}], "api": "x", "provider": "x", "model": "x", "stopReason": "stop", "timestamp": 1,
+        "usage": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 0, "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0}}}});
+    // A branch left (the same words as one on the branch shown), then
+    // the branch shown: alpha, beta, gamma.
+    let lines = [
+        json!({"type": "session", "version": 3, "id": "0aaa0000-0000-7000-8000-000000000001", "timestamp": at(0), "cwd": dir}),
+        user(1, "u1", None, "alpha one"), reply(2, "a1", "u1", "reply one"),
+        user(3, "u2b", Some("a1"), "beta two"), reply(4, "a2b", "u2b", "reply old"),
+        user(5, "u2", Some("a1"), "beta two"), reply(6, "a2", "u2", "reply two"),
+        user(7, "u3", Some("a2"), "gamma three"), reply(8, "a3", "u3", "reply three"),
+    ];
+    std::fs::write(&file, lines.iter().map(|l| format!("{l}\n")).collect::<String>()).unwrap();
+    let f = file.to_str().unwrap();
+    let ran = there.core.call("terminal.run", json!({"argv": ["pi", "--session", f, "--session-dir", dir], "cwd": dir})).await.unwrap();
+    let t = ran["address"].as_str().unwrap().to_owned();
+    let screen = || async { there.core.call("terminal.read", json!({"terminal": t})).await.unwrap()["text"].as_str().unwrap_or_default().to_owned() };
+    let shown = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        loop {
+            let s = screen().await;
+            if s.contains("gamma three") && s.contains("reply three") {
+                break s;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        }
+    }).await.unwrap();
+    // Not one of its messages: nothing chosen, its tree closed again.
+    assert!(transcript::rewind(&there, &t, "delta four", 0).await.is_err());
+    assert!(!screen().await.contains("[user]"), "{shown}");
+    // "beta two", one of yours after it: the one on the branch shown.
+    transcript::rewind(&there, &t, "beta two", 1).await.unwrap();
+    // The next entry (a command, asking no model) goes on from its parent.
+    transcript::send(&there, &t, "/name went back").await.unwrap();
+    let last = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            let text = std::fs::read_to_string(&file).unwrap();
+            let last: serde_json::Value = serde_json::from_str(text.lines().last().unwrap()).unwrap();
+            if last["type"] == "session_info" {
+                break last;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+    }).await.unwrap();
+    assert_eq!(last["parentId"], "a1", "{}", screen().await);
+    there.core.call("terminal.kill", json!({"terminal": t})).await.unwrap();
+}
