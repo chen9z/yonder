@@ -1082,4 +1082,17 @@ fn a_pi_main_agent_is_talked_to_as_a_conversation() {
     app.press("label:Send").unwrap();
     app.wait_for_within("text:Named “trip”", SLOW).unwrap();
     assert_eq!(app.screen().count("text:/name trip"), Ok(0), "not a message of yours");
+
+    // Asking while the person is elsewhere: a note at the top says so,
+    // and a tap on it is its conversation again.
+    app.press("label:Agents").unwrap();
+    app.wait(Duration::from_millis(800)).unwrap();
+    runtime.block_on(async {
+        let core = session.connect().await;
+        core.call("terminal.send", serde_json::json!({ "terminal": address, "text": "ask" })).await.unwrap();
+    });
+    app.wait_for_within("label:Pi needs you, home / 1", SLOW).unwrap();
+    app.press("label:Pi needs you, home / 1").unwrap();
+    app.wait_for_within("id:asked", SLOW).unwrap();
+    app.wait_until("the note gone", SLOW, |s| s.count("label:Pi needs you, home / 1") == Ok(0)).unwrap();
 }

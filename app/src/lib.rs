@@ -19,6 +19,7 @@ mod machines;
 mod menu;
 mod nav;
 mod new_menu;
+mod notes;
 mod pick;
 mod prefs;
 mod search;
@@ -124,7 +125,7 @@ fn connected(live: Live) -> impl IntoElement {
                 )),
         )
         // Over every page: toasts, and the words a command asks for.
-        .child(workspace::notes(live.clone()))
+        .child(notes::notes(live.clone()))
         .child(ui::prompt_dialog(live.asking, {
             let live = live.clone();
             move |words| live.answered(words)

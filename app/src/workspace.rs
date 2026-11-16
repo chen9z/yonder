@@ -3,7 +3,7 @@
 //! away; on a tablet (or a phone turned sideways) the split as the desktop
 //! lays it out. Spaces and agents are on the home page, back from here.
 
-use crate::live::{waits_on, Live};
+use crate::live::Live;
 use crate::nav::{self, Route};
 use crate::terminal::{terminal, Swipes};
 use crate::{agents, menu, theme, ui};
@@ -740,97 +740,6 @@ fn empty(live: Live) -> impl IntoElement {
             let live = live.clone();
             ui::button(t!("New space"), move || live.run("space.new", serde_json::json!({})))
         }))
-}
-
-/// Toasts over the page: newest at the bottom, the last two of them (the
-/// rest a tap away); a tap runs what they offer. While typing they are
-/// at the top, clear of the line typed in. A waiting agent has a reminder
-/// until it is shown or no longer blocked.
-pub fn notes(live: Live) -> impl IntoElement {
-    let (all, world) = (live.notes, live.view);
-    let notes = computed(move || {
-        world.with(|v| {
-            let shown = v.focused.as_ref().and_then(|f| f.terminal.clone());
-            let waiting = |a: &String| v.terminals.iter().any(|t| t["address"] == a.as_str() && matches!(t["status"].as_str(), Some("blocked" | "error")));
-            all.with(|all| all.iter().filter(|(_, n)| waits_on(n).is_none_or(|a| waiting(&a) && shown.as_ref() != Some(&a))).cloned().collect::<Vec<_>>())
-        })
-    });
-    let all_shown = signal(false);
-    let typing = computed(|| keyboard_height().0 > 0.0);
-    // While typing, the newest only: the room above the keyboard is small.
-    let most = move || if typing.get() { 1 } else { SHOWN_NOTES };
-    let shown = computed(move || notes.with(|n| if all_shown.get() || n.len() <= most() { n.clone() } else { n[n.len() - most()..].to_vec() }));
-    let hidden = computed(move || notes.with(Vec::len) - shown.with(Vec::len));
-    dynamic(move || {
-        let stack = view().absolute().left(px(12.0)).right(px(12.0)).gap(px(8.0)).pointer_events(PointerEvents::BoxNone);
-        let stack = if typing.get() { stack.top(move || px(safe_area().top.0 + 56.0)) } else { stack.bottom(move || ui::bottom_inset() + px(56.0)) };
-        let live = live.clone();
-        stack
-            .child(when(move || hidden.get() > 0 || (all_shown.get() && notes.with(Vec::len) > most()), move || {
-                view()
-                    .self_end()
-                    .px(px(12.0))
-                    .h(px(32.0))
-                    .justify_center()
-                    .rounded(px(16.0))
-                    .bg(theme::POPOVER)
-                    .border_1()
-                    .border_color(theme::BORDER)
-                    .active(|s| s.bg(theme::HOVER))
-                    .role(AccessibilityRole::Button)
-                    .on_press(move || all_shown.update(|a| *a = !*a))
-                    .child(text(move || if hidden.get() > 0 { t!("{} more", hidden.get()) } else { t!("Fewer").to_owned() }).text_size(theme::FOOTNOTE).text_color(theme::MUTED))
-            }))
-            .child(each(move || shown.get(), |(id, _)| *id, move |n, _| note(live.clone(), n)))
-            .into_element()
-    })
-}
-
-/// How many notes show at once.
-const SHOWN_NOTES: usize = 2;
-
-fn note(live: Live, n: ReadSignal<(u64, herdc_engine::Note)>) -> impl IntoElement {
-    view()
-        .px(px(14.0))
-        .py(px(10.0))
-        .rounded(px(12.0))
-        .bg(theme::POPOVER)
-        .border_1()
-        .border_color(move || if n.with(|n| n.1.level == "error") { theme::now(theme::BLOCKED) } else { theme::now(theme::BORDER) })
-        .shadow_lg()
-        .gap(px(8.0))
-        .child(
-            view()
-                .flex_row()
-                .items_start()
-                .child(
-                    view()
-                        .flex_1()
-                        .on_press({
-                            let live = live.clone();
-                            move || {
-                                let (id, note) = n.get_untracked();
-                                if let Some(action) = note.action {
-                                    live.run(&action.name, action.args);
-                                }
-                                live.notes.update(|all| all.retain(|(i, _)| *i != id));
-                            }
-                        })
-                        .child(text(move || n.with(|n| n.1.title.clone())).text_size(theme::CALLOUT).font_weight(FontWeight::SEMIBOLD).text_color(theme::FOREGROUND))
-                        .child(text(move || n.with(|n| n.1.body.clone().unwrap_or_default())).text_size(theme::FOOTNOTE).text_color(theme::MUTED).number_of_lines(3)),
-                )
-                .child({
-                    let notes = live.notes;
-                    ui::icon_button("x", t!("Not now"), move || {
-                        let id = n.with_untracked(|n| n.0);
-                        notes.update(|all| all.retain(|(i, _)| *i != id));
-                    })
-                    .w(px(36.0))
-                    .h(px(36.0))
-                    .mt(px(-6.0))
-                    .mr(px(-8.0))
-                }),
-        )
 }
 
 #[cfg(test)]

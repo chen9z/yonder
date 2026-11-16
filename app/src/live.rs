@@ -357,11 +357,20 @@ impl Live {
         // workspace shows it then), not a few seconds.
         let waits = waits_on(&note);
         let lasts = if waits.is_some() { 30 * 60 } else { 5 };
+        // It slides in, and fades away.
+        crate::ui::smoothly();
         notes.update(|all| {
             all.retain(|(_, n)| waits.is_none() || waits_on(n) != waits);
             all.push((id, note));
         });
         // The connection's: the page that said it may close first.
-        self.owner.run(|| set_timeout(std::time::Duration::from_secs(lasts), move || notes.update(|all| all.retain(|(i, _)| *i != id))));
+        self.owner.run(|| {
+            set_timeout(std::time::Duration::from_secs(lasts), move || {
+                if notes.with_untracked(|all| all.iter().any(|(i, _)| *i == id)) {
+                    crate::ui::smoothly();
+                    notes.update(|all| all.retain(|(i, _)| *i != id));
+                }
+            })
+        });
     }
 }

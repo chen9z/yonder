@@ -64,14 +64,18 @@ pub fn home_page(live: Live) -> impl IntoElement {
         let w = window();
         w.width.0 > w.height.0
     });
-    // On its tab, the main agent is what the person looks at (it is read
-    // then, as a pane shown is), nothing else; elsewhere, the shown tab's
-    // panes, as before.
+    // What the person looks at (read, and not told about): on the main
+    // agent's tab, it; on the workspace, the shown tab's panes; on the
+    // lists and the pages over the workspace, no terminal.
     {
         let (engine, found, routes) = (live.engine.clone(), lead::found(&live), nav::routes());
         let was = stored(None::<Vec<String>>);
         effect(move || {
-            let looking = (tab.get() == Home::Lead && routes.with(|r| r.0.is_empty())).then(|| found.with(|f| f.iter().map(|a| a.address.clone()).collect()));
+            let looking = match routes.with(|r| r.0.last().cloned()) {
+                None if tab.get() == Home::Lead => Some(found.with(|f| f.iter().map(|a| a.address.clone()).collect())),
+                Some(Route::Workspace) => None,
+                _ => Some(Vec::new()),
+            };
             if was.replace(looking.clone()) != looking {
                 engine.set_looking(looking);
             }
