@@ -98,6 +98,8 @@ impl Engine {
                 }
                 state.settle();
             }
+            // Stopping: the view as it is now, kept.
+            state.save_view(true);
         });
         tasks.spawn(line(weak, connect, redial.clone()));
         Engine { session, jobs, view, notes, clients, redial, here, shown: Arc::new(watch::Sender::new(true)) }
@@ -163,6 +165,10 @@ impl Engine {
     /// The person has the app in front (what's shown counts as seen) or not.
     pub fn set_active(&self, active: bool) {
         self.job(move |s| {
+            // Back in front: the machines, as they are now.
+            if active && !s.active && s.core.is_some() {
+                s.ask_machines();
+            }
             s.active = active;
         });
     }
@@ -242,7 +248,9 @@ impl Engine {
 }
 
 /// Keeps a line to the core: dials, subscribes, forwards events, and after
-/// a loss dials again (0.5 s, doubling to 10 s).
+/// a loss dials again (0.5 s, doubling to 10 s, till a subscription takes).
+/// A redial asked for while it dials or looks around dials again then: no
+/// permit is left to end the next line that works.
 async fn line(jobs: mpsc::WeakUnboundedSender<Job>, connect: Connector, redial: Arc<Notify>) {
     let send = |job: Job| jobs.upgrade().is_some_and(|j| j.send(job).is_ok());
     let mut backoff = Duration::from_millis(500);
@@ -266,9 +274,11 @@ async fn line(jobs: mpsc::WeakUnboundedSender<Job>, connect: Connector, redial: 
                 continue;
             }
         };
-        backoff = Duration::from_millis(500);
-        let home = exec::home(&client).await;
-        let headless = exec::headless(&client).await;
+        let probed = tokio::select! {
+            probed = async { tokio::join!(exec::home(&client), exec::headless(&client)) } => Some(probed),
+            _ = redial.notified() => None,
+        };
+        let Some((home, headless)) = probed else { continue };
         let c = client.clone();
         if !send(Box::new(move |s| {
             s.here.lock().unwrap().headless = Some(headless);
@@ -276,12 +286,22 @@ async fn line(jobs: mpsc::WeakUnboundedSender<Job>, connect: Connector, redial: 
         })) {
             return;
         }
-        // Events until the line goes; a stream that ends alone is asked again.
+        // Events until the line goes; a stream that ends alone is asked
+        // again, after a moment.
+        let mut first = true;
         let error = loop {
+            if !first {
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_millis(500)) => {}
+                    _ = redial.notified() => break "lost the connection to the core".to_owned(),
+                }
+            }
+            first = false;
             let (stream, snapshot) = match client.subscribe(json!({})).await {
                 Ok(s) => s,
                 Err(e) => break e.to_string(),
             };
+            backoff = Duration::from_millis(500);
             if !send(Box::new(move |s| s.subscribed(snapshot))) {
                 return;
             }
@@ -318,7 +338,11 @@ async fn line(jobs: mpsc::WeakUnboundedSender<Job>, connect: Connector, redial: 
         if !send(Box::new(move |s| s.lost(error))) {
             return;
         }
-        tokio::time::sleep(backoff).await;
+        tokio::select! {
+            _ = tokio::time::sleep(backoff) => {}
+            _ = redial.notified() => {}
+        }
+        backoff = (backoff * 2).min(Duration::from_secs(10));
     }
 }
 

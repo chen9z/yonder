@@ -77,6 +77,9 @@ pub(crate) struct Here {
     pub headless: Option<(u16, u16)>,
 }
 
+/// The view kept is looked at this often at most.
+const VIEW_EVERY: Duration = Duration::from_secs(1);
+
 pub(crate) struct State {
     jobs: mpsc::UnboundedSender<Job>,
     pub(crate) tasks: crate::tasks::Tasks,
@@ -125,6 +128,8 @@ pub(crate) struct State {
     ticks: u64,
     store: Option<PathBuf>,
     written_view: String,
+    /// When the view was last looked at to be kept.
+    view_looked: Option<Instant>,
     /// Told once the next settle has published.
     pub(crate) settled: Vec<oneshot::Sender<()>>,
 }
@@ -178,6 +183,7 @@ impl State {
             ticks: 0,
             store,
             written_view: String::new(),
+            view_looked: None,
             settled: Vec::new(),
         }
     }
@@ -308,14 +314,14 @@ impl State {
             return;
         }
         self.ticks += 1;
-        // Machines send no events: asked now and then.
-        if self.ticks.is_multiple_of(5) {
+        // Machines send no events: asked now and then, while someone looks.
+        if self.active && self.ticks.is_multiple_of(5) {
             self.ask_machines();
         }
         self.tend_terminals(false);
     }
 
-    fn ask_machines(&mut self) {
+    pub(crate) fn ask_machines(&mut self) {
         let Ok(core) = self.client() else { return };
         self.later(async move { core.call("machine.list", json!({})).await }, |s, r| match r {
             Ok(machines) => {
@@ -346,7 +352,7 @@ impl State {
         self.write_where();
         self.flush_documents(false);
         self.publish();
-        self.save_view();
+        self.save_view(false);
         for tx in self.settled.drain(..) {
             let _ = tx.send(());
         }

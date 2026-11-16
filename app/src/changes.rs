@@ -46,15 +46,15 @@ pub fn changes_page(live: Live, place: Place) -> Screen {
         }
     };
     {
-        let rescan = rescan.clone();
-        spawn(async move {
-            loop {
+        let (rescan, route) = (rescan.clone(), Route::Changes(place.clone()));
+        spawn(nav::while_looked_at(route, EVERY, move || {
+            let rescan = rescan.clone();
+            async move {
                 if !busy.get_untracked() {
                     rescan().await;
                 }
-                off(tokio::time::sleep(EVERY)).await;
             }
-        });
+        }));
     }
     let pulled_scan = rescan.clone();
     let commit = {

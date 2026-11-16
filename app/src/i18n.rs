@@ -164,6 +164,7 @@ fn zh(en: &str) -> Option<&'static str> {
         "Password for {}" => "{} 的密码",
         "Wrong user name or password." => "用户名或密码不对。",
         "The computer didn't answer the login." => "电脑没有回应登录。",
+        "The computer didn't answer in time" => "电脑太久没有回应",
         "Leave this phone's key on the computer" => "在电脑上留下手机的钥匙",
         "Then the password isn't kept" => "这样就不保存密码",
         "The password is kept on this phone, sealed" => "密码加密保存在手机上",

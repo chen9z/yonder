@@ -3,12 +3,18 @@ use super::*;
 
 impl State {
     /// This screen's own choices (focus, zoom, settled tabs, what was seen),
-    /// kept across restarts like herdr-app's `view.json`.
-    pub(super) fn save_view(&mut self) {
+    /// kept across restarts like herdr-app's `view.json`: looked at once a
+    /// second at most (settles come every half second, and in floods), or
+    /// `now` (the engine stopping).
+    pub(crate) fn save_view(&mut self, now: bool) {
         let Some(path) = self.store.clone() else { return };
         if !self.documents.values().any(|s| s.loaded()) {
             return;
         }
+        if !now && self.view_looked.is_some_and(|at| at.elapsed() < VIEW_EVERY) {
+            return;
+        }
+        self.view_looked = Some(Instant::now());
         let mut view = mirror::View::capture(&self.model);
         if let Some(saved) = &self.initial_view {
             let documents = &self.documents;

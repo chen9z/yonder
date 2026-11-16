@@ -263,6 +263,9 @@ async fn login(computer: &Computer, key: &str) -> Result<Session, String> {
 /// The password a line logs in with: typed again once it was refused.
 pub type Password = Arc<std::sync::Mutex<Option<String>>>;
 
+/// How long the core is given to answer on an SSH session.
+const CORE_WITHIN: std::time::Duration = std::time::Duration::from_secs(15);
+
 /// Dials `computer`'s core, logging in again only once the SSH session is
 /// gone. `first`: a session the person just logged in with. A password
 /// refused is not tried again (the computer would count each try against
@@ -287,11 +290,19 @@ pub fn connector(computer: Computer, key: String, first: Option<Session>, passwo
                 *held = Some(session?);
             }
             let session = held.as_ref().expect("a session");
-            let core = session.connect_core(&computer.pipe()).await;
-            if core.is_err() && session.is_closed() {
+            // A session the network dropped without a word looks open:
+            // given up on after a while, and logged in afresh next time.
+            let core = match tokio::time::timeout(CORE_WITHIN, session.connect_core(&computer.pipe())).await {
+                Ok(core) => core.map_err(|e| e.to_string()),
+                Err(_) => {
+                    *held = None;
+                    return Err("The computer didn't answer in time".to_owned());
+                }
+            };
+            if core.is_err() && held.as_ref().is_some_and(Session::is_closed) {
                 *held = None;
             }
-            core.map_err(|e| e.to_string())
+            core
         })
     })
 }

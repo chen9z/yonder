@@ -82,12 +82,10 @@ pub fn files_page(live: Live, place: Place) -> Screen {
     };
     {
         let (live, place) = (live.clone(), place.clone());
-        spawn(async move {
-            loop {
-                refresh(&live, &place, tree).await;
-                off(tokio::time::sleep(EVERY)).await;
-            }
-        });
+        spawn(nav::while_looked_at(Route::Files(place.clone()), EVERY, move || {
+            let (live, place) = (live.clone(), place.clone());
+            async move { refresh(&live, &place, tree).await }
+        }));
     }
     let title = root.rsplit('/').find(|p| !p.is_empty()).unwrap_or("/").to_owned();
     // Pulled down, read again now rather than in up to 10 s.

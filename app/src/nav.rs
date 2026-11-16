@@ -5,6 +5,7 @@ use herdc_engine::tools::changes::Changes;
 use herdc_engine::tools::Place;
 use nsh_core::prelude::*;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Route {
@@ -78,6 +79,26 @@ pub fn replace(route: Route) {
 /// Back one page.
 pub fn back() {
     routes().update(|r| { r.0.pop(); });
+}
+
+/// Whether `route`'s page is the one on top, with the app in front.
+pub fn looked_at(route: &Route) -> bool {
+    lifecycle() == nsh_core::platform::Lifecycle::Active && routes().with_untracked(|r| r.0.last() == Some(route))
+}
+
+/// Runs `look` every `every` while `route`'s page is looked at, and at
+/// once when it is again: covered, or the app away, it asks nothing.
+pub async fn while_looked_at<F: std::future::Future<Output = ()>>(route: Route, every: Duration, look: impl Fn() -> F) {
+    let mut last: Option<Instant> = None;
+    loop {
+        if !looked_at(&route) {
+            last = None;
+        } else if last.is_none_or(|at| at.elapsed() >= every) {
+            look().await;
+            last = Some(Instant::now());
+        }
+        crate::live::off(tokio::time::sleep(Duration::from_secs(1))).await;
+    }
 }
 
 /// Back to the home page.

@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot, watch};
 
 /// How long a call waits for its reply unless it says otherwise.
@@ -42,6 +42,9 @@ struct Routes {
     streams: HashMap<u32, async_channel::Sender<Item>>,
     /// Frames for a channel whose reply hasn't been handled yet.
     early: HashMap<u32, Vec<Item>>,
+    /// Channels let go of, not closed by the core yet: what still comes
+    /// on them goes nowhere (not into `early`, for ever).
+    gone: HashSet<u32>,
     automatic_input: HashSet<u32>,
 }
 
@@ -52,6 +55,9 @@ struct Shared {
     next_id: AtomicU64,
     lost: watch::Receiver<bool>,
 }
+
+/// The hello's reply is at most this long.
+const HELLO: u64 = 64 * 1024;
 
 /// A connection to one core. Cheap to clone; the connection ends when the
 /// pipe does (or every clone and stream is dropped).
@@ -71,10 +77,14 @@ impl Client {
         let mut reader = BufReader::new(reader);
         writer.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"hello\",\"params\":{\"framed\":true}}\n").await?;
         writer.flush().await?;
+        // One line, not whatever a login shell prints instead (endless).
         let mut line = Vec::new();
-        reader.read_until(b'\n', &mut line).await?;
+        (&mut reader).take(HELLO).read_until(b'\n', &mut line).await?;
         if line.is_empty() {
             return Err(Error::Lost);
+        }
+        if !line.ends_with(b"\n") && line.len() as u64 >= HELLO {
+            return Err(Error::Protocol("not a core: its first line never ends".into()));
         }
         let reply: Value = serde_json::from_slice(&line)
             .map_err(|_| Error::Protocol(format!("not a core: {}", String::from_utf8_lossy(&line).trim())))?;
@@ -254,11 +264,13 @@ impl Shared {
             Some(tx) => {
                 let _ = tx.try_send(item);
             }
+            None if routes.gone.contains(&frame.channel) => {}
             None => routes.early.entry(frame.channel).or_default().push(item),
         }
         if closing {
             routes.streams.remove(&frame.channel);
             routes.automatic_input.remove(&frame.channel);
+            routes.gone.remove(&frame.channel);
         }
     }
 
@@ -476,9 +488,24 @@ impl Drop for Stream {
         routes.streams.remove(&self.channel);
         routes.automatic_input.remove(&self.channel);
         let open = !routes.closed && !self.ended.load(Ordering::Relaxed);
+        if open {
+            routes.gone.insert(self.channel);
+        }
         drop(routes);
         if open {
             self.client.send(self.channel, CLOSE, &[]);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_pipe_that_never_ends_its_first_line_is_not_a_core() {
+        let endless = tokio::io::repeat(b'x');
+        let got = Client::handshake(endless, tokio::io::sink()).await;
+        assert!(matches!(got, Err(Error::Protocol(_))), "{:?}", got.err());
     }
 }

@@ -140,10 +140,15 @@ pub struct Screen {
     cell: (u16, u16),
 }
 
+/// Lines a screen keeps above itself, as many as its first paint brings.
+/// More is memory a phone pays for each screen (some 5 MB a thousand
+/// lines at 200 columns).
+pub const SCROLLBACK: usize = 2000;
+
 impl Screen {
     pub fn new(cols: u16, rows: u16, palette: Palette) -> Screen {
         let events = Listener::default();
-        let config = Config { scrolling_history: 10_000, kitty_keyboard: true, osc52: Osc52::OnlyCopy, ..Default::default() };
+        let config = Config { scrolling_history: SCROLLBACK, kitty_keyboard: true, osc52: Osc52::OnlyCopy, ..Default::default() };
         let size = Size { cols: cols.max(1) as usize, rows: rows.max(1) as usize };
         Screen { term: Term::new(config, &size, events.clone()), parser: Processor::new(), events, palette, cell: (9, 18) }
     }

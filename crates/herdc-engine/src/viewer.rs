@@ -15,8 +15,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{oneshot, watch};
 
-/// Scrollback lines the first paint brings.
-pub const HISTORY: u32 = 2000;
+/// Scrollback lines the first paint brings: as many as a screen keeps.
+pub const HISTORY: u32 = herdc_term::SCROLLBACK as u32;
 /// Output a viewer takes, in bytes a second: a flood past it is shown as
 /// its screen, attached again once behind, not byte by byte (a phone's
 /// data and battery; nobody reads that fast).
