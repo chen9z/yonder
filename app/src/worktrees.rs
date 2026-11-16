@@ -137,6 +137,7 @@ pub fn worktrees_page(live: Live, place: Place) -> Screen {
                                     .child(text(move || checkout().map(|c| tilde(&c.path, &home())).unwrap_or_default()).text_size(theme::CAPTION).text_color(theme::MUTED).number_of_lines(1)),
                             )
                             .child(text(move || state().unwrap_or_default()).text_size(theme::CAPTION).text_color(move || if open_now() { theme::now(theme::ACCENT) } else { theme::now(theme::DIM) }))
+                        .role(AccessibilityRole::Button)
                         .on_press(move || {
                             let Some(c) = checkout() else { return };
                             let all = found.with_untracked(|r| r.as_ref().and_then(|r| r.as_ref().ok()).map(|r| r.all.clone()).unwrap_or_default());

@@ -115,7 +115,6 @@ fn zh(en: &str) -> Option<&'static str> {
         "{}h" => "{}小时",
         "{}d" => "{}天",
         // The computers, and adding one.
-        "Herdr" => "Herdr",
         "COMPUTERS" => "电脑",
         "Add a computer" => "添加电脑",
         "Machine" => "机器",
@@ -127,8 +126,6 @@ fn zh(en: &str) -> Option<&'static str> {
         "Enter a port from 1 to 65535." => "请输入 1 到 65535 之间的端口。",
         "This connection is already saved." => "此连接已保存。",
         "Connection not found." => "找不到此连接。",
-        "Long-press a computer to rename or forget it." => "长按电脑可重命名或移除。",
-        "Long-press a computer to forget it." => "长按电脑可以忘记它。",
         "Forget {}?" => "忘记 {}？",
         "Its key stays trusted nowhere else; adding it again asks for the password." => "它的主机密钥不再受信任；再次添加时需要输入密码。",
         "Forget" => "忘记",
@@ -169,9 +166,6 @@ fn zh(en: &str) -> Option<&'static str> {
         "This computer's key was never trusted. Edit the connection to check it." => "这台电脑的主机密钥没有确认过。请编辑连接，重新核对。",
         "Git doesn't take that as a branch name." => "git 不接受这个分支名。",
         "Put some letters or digits in the branch name." => "分支名里要有字母或数字。",
-        "Leave this phone's key on the computer" => "在电脑上留下手机的钥匙",
-        "Then the password isn't kept" => "这样就不保存密码",
-        "The password is kept on this phone, sealed" => "密码加密保存在手机上",
         "Move {}" => "移动 {}",
         "A session is letters, digits and . _ - / only." => "会话名只能用字母、数字和 . _ - /。",
         "Optional: another herdr's HC_SESSION on that computer." => "可选：那台电脑上另一个 herdr 的 HC_SESSION。",
@@ -299,9 +293,7 @@ fn zh(en: &str) -> Option<&'static str> {
         "New space on {}" => "在 {} 上新建空间",
         "New space there" => "在这台机器上新建空间",
         "Loading…" => "加载中…",
-        "Menu" => "菜单",
         "More" => "更多",
-        "New tab" => "新标签页",
         "New space" => "新空间",
         "No spaces yet" => "还没有空间",
         "Loading spaces…" => "正在加载空间…",
@@ -330,19 +322,15 @@ fn zh(en: &str) -> Option<&'static str> {
         "Close" => "关闭",
         "Not now" => "稍后",
         "Tab" => "标签页",
-        "Space" => "空间",
         "{} tabs" => "{} 个标签页",
         "{} ago" => "{}前",
         "1 tab" => "1 个标签页",
         "{} \u{2014} {}, {}" => "{} \u{2014} {}，{}",
         "{} terminals" => "{} 个终端",
-        "1 terminal" => "1 个终端",
         "New tab here" => "在这里新建标签页",
         "Add a machine…" => "添加机器…",
-        "Its spaces show here too" => "它的空间也会显示在这里",
 
         // The more sheet.
-        "New terminal" => "新终端",
         "Split right" => "向右分屏",
         "Split down" => "向下分屏",
         "Zoom" => "放大",
@@ -352,9 +340,7 @@ fn zh(en: &str) -> Option<&'static str> {
         "Changes" => "改动",
         "Worktrees" => "工作树",
         "Rename tab" => "重命名标签页",
-        "Commands" => "命令",
         "Settings" => "设置",
-        "Leave" => "断开",
         "Close pane" => "关闭面板",
         "Close pane?" => "关闭面板？",
         "Close tab?" => "关闭标签页？",
@@ -391,11 +377,8 @@ fn zh(en: &str) -> Option<&'static str> {
         "Then press Enter" => "输完按回车",
         "{}, then Enter" => "{}，然后回车",
         "As at first" => "恢复默认",
-        "Earlier" => "前移",
         "{} earlier" => "{} 前移",
-        "Later" => "后移",
         "{} later" => "{} 后移",
-        "Take off" => "移除",
         "Take {} off" => "移除 {}",
         "Enter" => "回车",
         "Hide keyboard" => "收起键盘",
@@ -409,7 +392,6 @@ fn zh(en: &str) -> Option<&'static str> {
         "Dash" => "减号",
 
         // Agents.
-        "No agents running" => "没有正在运行的 agent",
         "Pin to the top" => "置顶",
         "Unpin" => "取消置顶",
         "Stop it" => "停止",
@@ -426,9 +408,6 @@ fn zh(en: &str) -> Option<&'static str> {
         "idle" => "空闲",
 
         // Commands and the new-menu.
-        "Search commands, spaces, agents" => "搜索命令、空间、agent",
-        "Agent · {} · {}" => "Agent · {} · {}",
-        "Next" => "下一步",
         "New" => "新建",
         "Terminal" => "终端",
         "New worktree…" => "新建工作树…",
@@ -469,7 +448,6 @@ fn zh(en: &str) -> Option<&'static str> {
         "ABOUT" => "关于",
         "Copy diagnostics" => "复制诊断信息",
         "Paste it where you tell what went wrong." => "报告问题时粘贴进去即可。",
-        "LANGUAGE" => "语言",
         "Language" => "语言",
         "System" => "跟随系统",
         "Appearance" => "外观",
@@ -556,63 +534,6 @@ fn zh(en: &str) -> Option<&'static str> {
         "This file is no longer available" => "这个文件已经不在了",
         "Binary file · no text preview" => "二进制文件 · 无法预览文本",
         "Cannot list this folder" => "无法列出这个文件夹",
-
-        // The commands' descriptions (the palette's).
-        "Close a space and end its terminals (asks first unless confirmed)." => "关闭空间并结束它的终端（除非已确认，否则先询问）。",
-        "Rename a space (asks when no name; an empty name: called after where its first terminal is again)." => {
-            "重命名空间（没给名字时会询问；名字留空则重新以第一个终端所在位置命名）。"
-        }
-        "Move a space to a position (1 = first)." => "把空间移到某个位置（1 = 第一个）。",
-        "Close a tab and end its terminals." => "关闭标签页并结束它的终端。",
-        "Rename a tab (asks when no name; an empty name: called by its number again)." => "重命名标签页（没给名字时会询问；名字留空则恢复为编号）。",
-        "Move a tab to a position in its space (1 = first)." => "把标签页移到所在空间的某个位置（1 = 第一个）。",
-        "Close a pane and end its terminal." => "关闭面板并结束它的终端。",
-        "Take a terminal's pane away and disable core keep; it keeps running (a sub-agent shows under its parent again)." => {
-            "去掉终端的面板并取消 core 的保留；它继续运行（子 agent 重新显示在父 agent 下面）。"
-        }
-        "Pin an agent to the top of the agent lists (pinned true) or unpin it (false); every Herdr screen shows it." => {
-            "把 agent 置顶到 agent 列表（pinned 为 true）或取消置顶（false）；所有 Herdr 屏幕都会同步。"
-        }
-        "End a terminal and its sub-agents." => "结束终端和它的子 agent。",
-        "Show a space (by position or id)." => "显示某个空间（按位置或 id）。",
-        "Show the next space." => "显示下一个空间。",
-        "Show the previous space." => "显示上一个空间。",
-        "Show a tab (by position in the space, or id)." => "显示某个标签页（按空间内的位置或 id）。",
-        "Put a tab away on this screen (default: the shown one): out of the lists, still running. It comes back when shown or when an agent in it needs you." => {
-            "在这块屏幕上收起标签页（默认当前的）：从列表里拿掉，但继续运行。显示它或其中的 agent 需要你时会回来。"
-        }
-        "Bring a settled tab back to the lists." => "把收起的标签页放回列表。",
-        "Show the next tab." => "显示下一个标签页。",
-        "Show the previous tab." => "显示上一个标签页。",
-        "Show only this pane of its tab, or all again." => "只显示标签页里的这个面板，或恢复显示全部。",
-        "Focus a pane (or the pane showing a terminal)." => "聚焦面板（或显示某个终端的面板）。",
-        "Swap a pane (default: the focused one) with its neighbor in a direction, or with another pane of its tab (target)." => {
-            "把面板（默认聚焦的那个）和某个方向的相邻面板交换，或和同一标签页的另一个面板（target）交换。"
-        }
-        "Show a terminal in a pane for now, in place of its own (no terminal: back)." => "暂时在面板里显示另一个终端（不给终端则恢复）。",
-        "Show an agent (sub-agents too)." => "显示某个 agent（子 agent 也可以）。",
-        "Show the next agent." => "显示下一个 agent。",
-        "Show the previous agent." => "显示上一个 agent。",
-        "Size a pane or split of a tab." => "调整标签页里面板或分屏的大小。",
-        "Make a space: its name (default: none, so it's called after where its first terminal is), the folder its terminals start in (default: the focused terminal's), its first tab's name, optionally an agent (argv) and its first message (task), and the machine it lives on (default: the shown space's; empty string: the core's own)." => {
-            "新建空间：名字（默认不起名，以第一个终端所在位置命名）、终端的起始文件夹（默认聚焦终端的）、第一个标签页的名字，可选的 agent（argv）和它的第一条消息（task），以及它所在的机器（默认当前空间的；空字符串表示 core 本机）。"
-        }
-        "Make a tab in a space (default: the shown one) with a terminal in folder (default: the focused terminal's), optionally an agent (argv) and its first message (task); or with a mod as its only pane (`mod`, its `props`). With no space open, a new tab starts a space." => {
-            "在空间（默认当前的）里新建标签页，终端在 folder（默认聚焦终端的文件夹），可选 agent（argv）和它的第一条消息（task）；或者只放一个 mod 面板（`mod` 和它的 `props`）。没有打开的空间时，新标签页会新建一个空间。"
-        }
-        "Split a pane (default: the focused one) \"right\" or \"down\" with a new terminal, or with a mod (`mod`, its `props`) beside it." => {
-            "把面板（默认聚焦的那个）向 \"right\" 或 \"down\" 分屏，放一个新终端，或者一个 mod（`mod` 和它的 `props`）。"
-        }
-        "Start a terminal: as a new tab (place \"tab\", default), or \"right\"/\"down\" of the focused pane." => {
-            "启动终端：作为新标签页（place 为 \"tab\"，默认），或放在聚焦面板的 \"right\"/\"down\"。"
-        }
-        "Give a running terminal without a pane (a sub-agent) a pane: a new tab, or \"right\"/\"down\"." => {
-            "给没有面板的运行中终端（子 agent）一个面板：新标签页，或 \"right\"/\"down\"。"
-        }
-        "Where right-clicks in a terminal (default: the focused one) go when its program takes the mouse: \"program\" or \"menu\"." => {
-            "程序接管鼠标时，终端（默认聚焦的那个）里的右键交给谁：\"program\" 或 \"menu\"。"
-        }
-        "Focus the pane to the \"left\", \"right\", \"up\" or \"down\"." => "聚焦 \"left\"、\"right\"、\"up\" 或 \"down\" 方向的面板。",
         _ => return None,
     })
 }
@@ -668,9 +589,6 @@ mod tests {
     /// What the palette shows of every command, and the engine's questions.
     #[test]
     fn the_engines_words_are_known() {
-        for c in herdc_engine::COMMANDS {
-            assert!(zh(c.about).is_some(), "{}: {}", c.name, c.about);
-        }
         for en in ["Close space?", "Rename tab", "Rename space", "Not a git repository"] {
             assert!(zh(en).is_some(), "{en}");
         }

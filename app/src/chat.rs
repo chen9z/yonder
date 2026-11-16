@@ -214,109 +214,7 @@ pub fn chat(live: Live, address: String, name: String) -> impl IntoElement {
     let offset = stored(0.0f32);
     let height = stored(0.0f32);
     let keep = stored(None::<(f32, f32)>);
-    {
-        let (live, address) = (live.clone(), address.clone());
-        spawn(async move {
-            let mut read = Transcript::default();
-            let mut path: Option<(String, String)> = None;
-            let mut seen = (u64::MAX, String::new(), 0u32);
-            let mut earlier_seen = 0u32;
-            let mut last = Instant::now() - RESTING;
-            loop {
-                let (label, cwd, turn, word) = world.with_untracked(|v| {
-                    v.terminal(&address)
-                        .map(|t| (t["labels"]["alma.session"].as_str().unwrap_or_default().to_owned(), t["cwd"].as_str().unwrap_or_default().to_owned(), t["turn"].as_u64().unwrap_or(0), t["status"].as_str().unwrap_or_default().to_owned()))
-                        .unwrap_or_default()
-                });
-                let on = machine_of(&live, &address);
-                // Named by its label; without one, looked for again each
-                // turn (a `/new` shows only as a newer file).
-                let key = if label.is_empty() { format!("turn {turn}") } else { label.clone() };
-                let now = (turn, word.clone(), again.get_untracked());
-                let every = if word == "working" { WORKING } else { RESTING };
-                let due = now != seen || last.elapsed() >= every;
-                let shown = lifecycle() == nsh_core::platform::Lifecycle::Active;
-                if due && shown && let Ok(there) = live.there(on.clone()) {
-                    seen = now;
-                    last = Instant::now();
-                    // Another session (`/new`, a restart): read afresh.
-                    if path.as_ref().is_none_or(|(k, _)| *k != key) {
-                        let (t, l, c) = (there.clone(), label.clone(), cwd.clone());
-                        match off(async move { transcript::find(&t, Some(&l), &c).await }).await {
-                            Some(Ok(Some(file))) => {
-                                if path.as_ref().is_none_or(|(_, f)| *f != file) {
-                                    read = Transcript::default();
-                                }
-                                path = Some((key.clone(), file));
-                            }
-                            // Named and not written yet (a Pi just started): nothing said yet.
-                            Some(Ok(None)) if !label.is_empty() => found.set(Found::Read),
-                            Some(Ok(None)) if path.is_none() => found.set(Found::Not(t!("No Pi session found for it.").into())),
-                            Some(Err(e)) if path.is_none() => found.set(Found::Not(e)),
-                            _ => {}
-                        }
-                    }
-                    if let Some((_, file)) = path.clone() {
-                        let (t, from) = (there.clone(), read.read);
-                        match off(async move { transcript::read(&t, &file, from).await }).await {
-                            Some(Ok(got)) => {
-                                // Shorter than read: made again, read it all again.
-                                if got.lines < read.read {
-                                    read = Transcript::default();
-                                    seen.0 = u64::MAX;
-                                    continue;
-                                }
-                                let first = found.get_untracked() != Found::Read;
-                                if first || !got.text.is_empty() {
-                                    read.take(&got);
-                                    let now = read.lines();
-                                    if !first {
-                                        ui::smoothly();
-                                    }
-                                    lines.set(now);
-                                    cut.set(read.cut());
-                                    found.set(Found::Read);
-                                }
-                            }
-                            Some(Err(e)) => {
-                                if found.get_untracked() != Found::Read {
-                                    found.set(Found::Not(e));
-                                }
-                                path = None;
-                            }
-                            None => {}
-                        }
-                    }
-                }
-                // Earlier lines, asked for: put in above, the place kept.
-                let wanted = earlier.get_untracked();
-                if wanted != earlier_seen {
-                    earlier_seen = wanted;
-                    if let (Some((_, file)), Ok(there)) = (path.clone(), live.there(on)) {
-                        let before = read.start;
-                        if let Some(Ok(got)) = off(async move { transcript::earlier(&there, &file, before).await }).await {
-                            read.take(&got);
-                            keep.replace(Some((height.get(), offset.get())));
-                            lines.set(read.lines());
-                            cut.set(read.cut());
-                        }
-                    }
-                    loading.set(false);
-                }
-                // What was sent and shows now is no longer waiting: once the
-                // core took it, a message of yours not there when it went.
-                let shows = |m: &Sent| m.went && lines.with_untracked(|l| l.iter().any(|l| matches!(&l.said, Said::You { text, .. } if text == m.text.trim()) && !m.known.contains(&l.id)));
-                if sent.with_untracked(|s| s.iter().any(|m| !m.command && shows(m))) {
-                    sent.update(|s| s.retain(|m| m.command || !shows(m)));
-                }
-                // Taken by the core long ago and never shown: let go.
-                if sent.with_untracked(|s| s.iter().any(|m| m.went && m.at.elapsed() > SENT_KEPT)) {
-                    sent.update(|s| s.retain(|m| !(m.went && m.at.elapsed() > SENT_KEPT)));
-                }
-                off(tokio::time::sleep(Duration::from_millis(300))).await;
-            }
-        });
-    }
+    spawn(follow(live.clone(), address.clone(), Reading { lines, cut, found, sent, again, earlier, loading, keep, height, offset }));
 
     // Asked something in its terminal: the question's viewer, while shown.
     let answering = stored(None::<Rc<Viewer>>);
@@ -588,6 +486,127 @@ type Edit = Rc<dyn Fn(String, String)>;
 /// the others.
 const COMMANDS_SHOWN: (usize, usize) = (5, 8);
 
+/// What reading an agent's conversation keeps up to date.
+#[derive(Clone, Copy)]
+struct Reading {
+    lines: Signal<Vec<Line>>,
+    cut: Signal<bool>,
+    found: Signal<Found>,
+    sent: Signal<Vec<Sent>>,
+    again: Signal<u32>,
+    earlier: Signal<u32>,
+    loading: Signal<bool>,
+    keep: Stored<Option<(f32, f32)>>,
+    height: Stored<f32>,
+    offset: Stored<f32>,
+}
+
+/// Reads `address`'s conversation as it goes: its file found (again when
+/// the session changes), what was added since, earlier lines when asked,
+/// and the messages sent let go of once they show.
+async fn follow(live: Live, address: String, r: Reading) {
+    let Reading { lines, cut, found, sent, again, earlier, loading, keep, height, offset } = r;
+    let world = live.view;
+    let mut read = Transcript::default();
+    let mut path: Option<(String, String)> = None;
+    let mut seen = (u64::MAX, String::new(), 0u32);
+    let mut earlier_seen = 0u32;
+    let mut last = Instant::now() - RESTING;
+    loop {
+        let (label, cwd, turn, word) = world.with_untracked(|v| {
+            v.terminal(&address)
+                .map(|t| (t["labels"]["alma.session"].as_str().unwrap_or_default().to_owned(), t["cwd"].as_str().unwrap_or_default().to_owned(), t["turn"].as_u64().unwrap_or(0), t["status"].as_str().unwrap_or_default().to_owned()))
+                .unwrap_or_default()
+        });
+        let on = machine_of(&live, &address);
+        // Named by its label; without one, looked for again each
+        // turn (a `/new` shows only as a newer file).
+        let key = if label.is_empty() { format!("turn {turn}") } else { label.clone() };
+        let now = (turn, word.clone(), again.get_untracked());
+        let every = if word == "working" { WORKING } else { RESTING };
+        let due = now != seen || last.elapsed() >= every;
+        let shown = lifecycle() == nsh_core::platform::Lifecycle::Active;
+        if due && shown && let Ok(there) = live.there(on.clone()) {
+            seen = now;
+            last = Instant::now();
+            // Another session (`/new`, a restart): read afresh.
+            if path.as_ref().is_none_or(|(k, _)| *k != key) {
+                let (t, l, c) = (there.clone(), label.clone(), cwd.clone());
+                match off(async move { transcript::find(&t, Some(&l), &c).await }).await {
+                    Some(Ok(Some(file))) => {
+                        if path.as_ref().is_none_or(|(_, f)| *f != file) {
+                            read = Transcript::default();
+                        }
+                        path = Some((key.clone(), file));
+                    }
+                    // Named and not written yet (a Pi just started): nothing said yet.
+                    Some(Ok(None)) if !label.is_empty() => found.set(Found::Read),
+                    Some(Ok(None)) if path.is_none() => found.set(Found::Not(t!("No Pi session found for it.").into())),
+                    Some(Err(e)) if path.is_none() => found.set(Found::Not(e)),
+                    _ => {}
+                }
+            }
+            if let Some((_, file)) = path.clone() {
+                let (t, from) = (there.clone(), read.read);
+                match off(async move { transcript::read(&t, &file, from).await }).await {
+                    Some(Ok(got)) => {
+                        // Shorter than read: made again, read it all again.
+                        if got.lines < read.read {
+                            read = Transcript::default();
+                            seen.0 = u64::MAX;
+                            continue;
+                        }
+                        let first = found.get_untracked() != Found::Read;
+                        if first || !got.text.is_empty() {
+                            read.take(&got);
+                            let now = read.lines();
+                            if !first {
+                                ui::smoothly();
+                            }
+                            lines.set(now);
+                            cut.set(read.cut());
+                            found.set(Found::Read);
+                        }
+                    }
+                    Some(Err(e)) => {
+                        if found.get_untracked() != Found::Read {
+                            found.set(Found::Not(e));
+                        }
+                        path = None;
+                    }
+                    None => {}
+                }
+            }
+        }
+        // Earlier lines, asked for: put in above, the place kept.
+        let wanted = earlier.get_untracked();
+        if wanted != earlier_seen {
+            earlier_seen = wanted;
+            if let (Some((_, file)), Ok(there)) = (path.clone(), live.there(on)) {
+                let before = read.start;
+                if let Some(Ok(got)) = off(async move { transcript::earlier(&there, &file, before).await }).await {
+                    read.take(&got);
+                    keep.replace(Some((height.get(), offset.get())));
+                    lines.set(read.lines());
+                    cut.set(read.cut());
+                }
+            }
+            loading.set(false);
+        }
+        // What was sent and shows now is no longer waiting: once the
+        // core took it, a message of yours not there when it went.
+        let shows = |m: &Sent| m.went && lines.with_untracked(|l| l.iter().any(|l| matches!(&l.said, Said::You { text, .. } if text == m.text.trim()) && !m.known.contains(&l.id)));
+        if sent.with_untracked(|s| s.iter().any(|m| !m.command && shows(m))) {
+            sent.update(|s| s.retain(|m| m.command || !shows(m)));
+        }
+        // Taken by the core long ago and never shown: let go.
+        if sent.with_untracked(|s| s.iter().any(|m| m.went && m.at.elapsed() > SENT_KEPT)) {
+            sent.update(|s| s.retain(|m| !(m.went && m.at.elapsed() > SENT_KEPT)));
+        }
+        off(tokio::time::sleep(Duration::from_millis(300))).await;
+    }
+}
+
 /// Above the field, as `/` and a name are written: the commands of Pi's
 /// it may be, chosen into the field (those wanting words, with a space
 /// for them); a glyph says it shows in its terminal. Not a scroll: one
@@ -716,6 +735,7 @@ fn before(loading: Signal<bool>, earlier: Signal<u32>) -> impl IntoElement {
         .gap(px(6.0))
         .px(px(14.0))
         .h(px(32.0))
+        .hit_slop(ui::reach(32.0))
         .rounded(px(16.0))
         .active(|s| s.bg(theme::HOVER))
         .role(AccessibilityRole::Button)
@@ -1119,6 +1139,7 @@ fn state(live: Live, address: String, status: Memo<&'static str>, doing: Memo<Op
                             view()
                                 .px(px(8.0))
                                 .h(px(30.0))
+                                .hit_slop(ui::reach(30.0))
                                 .justify_center()
                                 .rounded(px(8.0))
                                 .active(|s| s.bg(theme::HOVER))

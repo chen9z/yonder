@@ -67,7 +67,7 @@ it with the screenshot's name and go on.
    second dot: a sheet "Tab" offers Rename, Put away and Close (red);
    press "Close" (only that one: it was opened here). The dots go.
 4. More (`⋯`): a sheet of icons (Split right, Split down, Zoom, Rename tab,
-   Files, Changes, Worktrees, Put away tab, Commands, Settings) and "Close
+   Files, Changes, Worktrees, Put away tab, Settings) and "Close
    pane" in red. Changes: lists `big.txt`, `blob.bin`, `long.txt` as new.
    Open each: `big.txt` starts `@@ -0,0 +1,20000 @@` and its lines are
    numbered; `blob.bin` says "Binary file · no text diff"; `long.txt` wraps
@@ -86,7 +86,7 @@ it with the screenshot's name and go on.
    (COMPUTER, TERMINAL, GENERAL, THIS PHONE'S KEY, ABOUT), each row with a
    line icon, and Leave this computer (red) alone on the last card.
    COMPUTER has the computer (a green dot, "herdr-core" and its version),
-   Edit connection and Add a machine… (no Commands); GENERAL has Main agent
+   Edit connection and Add a machine…; GENERAL has Main agent
    (None), Language, Appearance (System) and Sort agents (Priority).
    Press Appearance: System, Light, Dark; press Light: the whole app,
    terminals too, turns light at once; back to System. "Fit terminals to the phone" shows a switch,

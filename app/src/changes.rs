@@ -122,6 +122,7 @@ pub fn changes_page(live: Live, place: Place) -> Screen {
                             .border_b_1()
                             .border_color(theme::BORDER)
                             .active(|s| s.bg(theme::HOVER))
+                            .role(AccessibilityRole::Button)
                             .on_press(move || {
                                 if let Some(changes) = found.get_untracked() {
                                     nav::push(Route::Diff { place: place.clone(), changes, file: at.index() });
@@ -219,6 +220,9 @@ fn commit_bar(message: Signal<String>, busy: Signal<bool>, commit: impl Fn() + C
                 .rounded(px(10.0))
                 .justify_center()
                 .bg(move || if message.with(|m| m.trim().is_empty()) || busy.get() { theme::now(theme::RAISED) } else { theme::now(theme::ACCENT) })
+                .hit_slop(ui::reach(42.0))
+                .role(AccessibilityRole::Button)
+                .disabled(move || message.with(|m| m.trim().is_empty()) || busy.get())
                 .on_press(commit)
                 .child(
                     text(move || if busy.get() { t!("Committing…") } else { t!("Commit") })

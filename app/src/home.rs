@@ -126,9 +126,7 @@ fn home_tab(label: impl Fn() -> String + Clone + 'static, icon: &'static str, ta
         .child(dynamic(move || ui::glyph(icon, 22.0, ink()).into_element()))
         .child(when(move || !wide.get(), move || text(label.clone()).max_w(px(80.0)).text_size(theme::SMALL).font_weight(FontWeight::MEDIUM).text_color(move || theme::now(ink())).number_of_lines(1)))
         .child(when(move || count() > 0, move || {
-            view().absolute().left(px(53.0)).top(px(1.0)).rounded(px(9.0)).min_w(px(16.0)).h(px(16.0))
-                .px(px(3.0)).items_center().justify_center().bg(move || theme::now(color())).pointer_events(PointerEvents::None)
-                .child(text(move || count().to_string()).text_size(theme::SMALL).text_color(theme::SOLID_FOREGROUND))
+            ui::badge(count, move || theme::now(color())).left(px(53.0)).top(px(1.0))
         }))
 }
 
@@ -294,6 +292,7 @@ fn spaces(live: Live, reorder: Signal<bool>) -> impl IntoElement {
                             .px(px(16.0))
                             .h(px(48.0))
                             .active(|s| s.bg(theme::HOVER))
+                            .role(AccessibilityRole::Button)
                             .on_press(move || {
                                 if several.get_untracked() && g.with_untracked(|g| !g.loading) {
                                     live.run("space.new", json!({ "machine": g.with_untracked(|g| g.machine.clone()) }));
@@ -388,6 +387,7 @@ fn space_row(live: Live, s: ReadSignal<SpaceView>, g: ReadSignal<Group>, drag: S
         .h(px(52.0))
         .bg(move || if dragged.get() != 0.0 { theme::now(theme::HOVER) } else if s.with(|s| s.active) { theme::now(theme::SELECTED) } else { Hsla::transparent_black() })
         .active(|st| st.bg(theme::HOVER))
+        .role(AccessibilityRole::Button)
         .on_press(move || {
             press.run("space.select", json!({ "id": s.get_untracked().id }));
             nav::workspace();

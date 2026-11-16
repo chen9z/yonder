@@ -13,7 +13,6 @@ pub enum Route {
     Workspace,
     Settings,
     EditConnection,
-    Commands,
     /// A folder's tree.
     Files(Place),
     /// A file of it, by its path under the folder; at a line (from 1)

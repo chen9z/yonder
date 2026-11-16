@@ -704,25 +704,18 @@ fn compose(viewer: Rc<Viewer>, writing: Signal<bool>, draft: Signal<String>) -> 
         dismiss_keyboard();
     };
     let none = move || draft.with(|d| d.trim().is_empty());
-    nsh_base::sheet()
+    ui::bottom_sheet()
         .open(move || Some(writing.get()))
-        .close_on_swipe(true)
-        .backdrop_class("bg-black/40")
         .on_close(done)
         .on_cancel(done)
         .child(when(move || writing.get(), move || {
             let send = send.clone();
-            view().w_full().items_center().child(
-                view()
-                    .w_full()
-                    .max_w(px(560.0))
-                    .rounded_t(px(18.0))
-                    .bg(theme::CHROME)
-                    .pt(px(8.0))
+            view().w_full().child(
+                ui::sheet_panel()
                     .px(px(16.0))
                     .pb(move || ui::bottom_inset() + px(12.0))
                     .gap(px(10.0))
-                    .child(view().w(px(36.0)).h(px(4.0)).rounded(px(2.0)).bg(theme::BORDER).self_center())
+                    .child(ui::grabber())
                     .child(
                         view()
                             .flex_row()
@@ -735,6 +728,7 @@ fn compose(viewer: Rc<Viewer>, writing: Signal<bool>, draft: Signal<String>) -> 
                                     .gap(px(6.0))
                                     .px(px(10.0))
                                     .h(px(32.0))
+                                    .hit_slop(ui::reach(32.0))
                                     .rounded(px(8.0))
                                     .active(|s| s.bg(theme::HOVER))
                                     .role(AccessibilityRole::Button)

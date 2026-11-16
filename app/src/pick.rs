@@ -3,7 +3,6 @@
 //! Asked from anywhere, one at a time; [`host`] draws it over every page.
 
 use crate::{theme, ui};
-use nsh_base::sheet;
 use nsh_core::prelude::*;
 use serde_json::Value;
 use std::cell::RefCell;
@@ -109,10 +108,8 @@ pub fn host() -> impl IntoElement {
         }
     });
     let (close, cancel) = (finish.clone(), finish.clone());
-    sheet()
+    ui::bottom_sheet()
         .open(move || Some(shown.with(Option::is_some)))
-        .close_on_swipe(true)
-        .backdrop_class("bg-black/40")
         .on_close(move || close(None))
         .on_cancel(move || cancel(None))
         .child(dynamic(move || {
@@ -120,16 +117,10 @@ pub fn host() -> impl IntoElement {
             let finish = finish.clone();
             view()
                 .w_full()
-                .items_center()
                 .child(
-                    view()
-                        .w_full()
-                        .max_w(px(560.0))
-                        .rounded_t(px(18.0))
-                        .bg(theme::CHROME)
-                        .pt(px(8.0))
+                    ui::sheet_panel()
                         .pb(move || px(safe_area().bottom.0 + 8.0))
-                        .child(view().w(px(36.0)).h(px(4.0)).rounded(px(2.0)).bg(theme::BORDER).self_center().mb(px(4.0)))
+                        .child(ui::grabber().mb(px(4.0)))
                         .child(text(menu.0.clone()).px(px(20.0)).py(px(8.0)).text_size(theme::FOOTNOTE).font_weight(FontWeight::SEMIBOLD).text_color(theme::MUTED))
                         .child(
                             scroll().max_h(move || px(window().height.0 * 0.7)).child(

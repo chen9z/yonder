@@ -342,6 +342,7 @@ fn connection_form(
                     .items_center()
                     .gap(px(6.0))
                     .h(px(32.0))
+                    .hit_slop(ui::reach(32.0))
                     .role(AccessibilityRole::Button)
                     .label(t!("More options"))
                     .on_press(move || more.set(true))

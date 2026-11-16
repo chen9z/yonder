@@ -21,6 +21,13 @@ pub fn top_bar() -> View {
         .border_color(theme::BORDER)
 }
 
+/// Room around a press target `high` tall that a touch still reaches it
+/// in, up to 44 pt: drawn small, pressed as a whole button.
+pub fn reach(high: f32) -> EdgeInsets {
+    let y = px(((44.0 - high) / 2.0).max(0.0));
+    Edges { top: y, right: px(0.0), bottom: y, left: px(0.0) }
+}
+
 /// A square press target with one of the lists' glyphs (`assets/chrome`).
 pub fn icon_button(icon: &'static str, label: &'static str, press: impl Fn() + 'static) -> View {
     view()
@@ -271,6 +278,38 @@ pub fn space_badge(name: impl Fn() -> String + 'static, color: impl Fn() -> usiz
             .bg(theme::POPOVER)
             .child(program_icon(program, 11.0)),
     )
+}
+
+/// A sheet from the bottom, swiped down or tapped beside to close.
+pub fn bottom_sheet() -> nsh_base::SheetElement {
+    nsh_base::sheet().close_on_swipe(true).backdrop_class("bg-black/40")
+}
+
+/// A bottom sheet's panel: as wide as the window up to 560 pt, centered,
+/// its top rounded. What goes in, and the room under it, the caller's.
+pub fn sheet_panel() -> View {
+    view().w_full().max_w(px(560.0)).self_center().rounded_t(px(18.0)).bg(theme::CHROME).pt(px(8.0))
+}
+
+/// The bar on a sheet's top that says it pulls down.
+pub fn grabber() -> View {
+    view().w(px(36.0)).h(px(4.0)).rounded(px(2.0)).bg(theme::BORDER).self_center()
+}
+
+/// A count on a corner of what it counts (agents waiting), in `color`;
+/// placed by the caller, touches go through it.
+pub fn badge(count: impl Fn() -> usize + 'static, color: impl Fn() -> Hsla + 'static) -> View {
+    view()
+        .absolute()
+        .min_w(px(16.0))
+        .h(px(16.0))
+        .px(px(4.0))
+        .rounded(px(8.0))
+        .items_center()
+        .justify_center()
+        .bg(color)
+        .pointer_events(PointerEvents::None)
+        .child(text(move || count().to_string()).text_size(theme::SMALL).text_color(theme::SOLID_FOREGROUND))
 }
 
 /// An agent's status as a dot (nothing when it has none).

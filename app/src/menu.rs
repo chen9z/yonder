@@ -6,7 +6,6 @@ use crate::live::Live;
 use crate::nav::{self, Route};
 use crate::i18n::tr;
 use crate::{theme, ui};
-use nsh_base::sheet;
 use nsh_core::prelude::*;
 use serde_json::json;
 
@@ -17,7 +16,7 @@ type Action = (&'static str, &'static str, &'static str);
 // Settings (and the home menu).
 const PANE: [Action; 4] = [("right", "columns-2", "Split right"), ("down", "rows-2", "Split down"), ("zoom", "maximize-2", "Zoom"), ("rename", "pencil", "Rename tab")];
 const HERE: [Action; 4] = [("files", "folder", "Files"), ("changes", "file-diff", "Changes"), ("worktrees", "branch", "Worktrees"), ("settle", "archive", "Put away tab")];
-const APP: [Action; 2] = [("commands", "command", "Commands"), ("settings", "settings", "Settings")];
+const APP: [Action; 1] = [("settings", "settings", "Settings")];
 
 pub fn more_sheet(live: Live, open: Signal<bool>) -> impl IntoElement {
     let zoomed = {
@@ -43,22 +42,15 @@ pub fn more_sheet(live: Live, open: Signal<bool>) -> impl IntoElement {
             }))
         }
     };
-    sheet()
+    ui::bottom_sheet()
         .open(move || Some(open.get()))
-        .close_on_swipe(true)
-        .backdrop_class("bg-black/40")
         .on_close(move || open.set(false))
         .on_cancel(move || open.set(false))
         .child(
-            view().w_full().items_center().child(
-                view()
-                    .w_full()
-                    .max_w(px(560.0))
-                    .rounded_t(px(18.0))
-                    .bg(theme::CHROME)
-                    .pt(px(8.0))
+            view().w_full().child(
+                ui::sheet_panel()
                     .pb(move || px(safe_area().bottom.0 + 8.0))
-                    .child(view().w(px(36.0)).h(px(4.0)).rounded(px(2.0)).bg(theme::BORDER).self_center().mb(px(8.0)))
+                    .child(ui::grabber().mb(px(8.0)))
                     .child(group(&PANE))
                     .child(group(&HERE))
                     .child(group(&APP))
@@ -117,7 +109,6 @@ async fn act(live: Live, picked: &str) {
                 _ => Route::Worktrees(place),
             });
         }
-        "commands" => nav::push(Route::Commands),
         "settings" => nav::push(Route::Settings),
         _ => {}
     }

@@ -18,7 +18,7 @@ mod live;
 mod machines;
 mod menu;
 mod nav;
-mod palette;
+mod new_menu;
 mod pick;
 mod prefs;
 mod search;
@@ -137,7 +137,6 @@ fn page(live: Live, route: Route) -> Screen {
         Route::EditConnection => connect::edit_current_page(live),
         Route::Settings => settings::settings_page(live),
         Route::KeyBar => keybar::keybar_page(),
-        Route::Commands => palette::commands_page(live),
         Route::Files(place) => files::files_page(live, place),
         Route::File { place, path, line } => files::file_page(live, place, path, line),
         Route::Changes(place) => changes::changes_page(live, place),

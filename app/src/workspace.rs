@@ -90,19 +90,7 @@ fn header(
             view()
                 .child(ui::icon_button("chevron-left", t!("Spaces and agents"), nav::home).pr(px(4.0)))
                 .child(when(move || waiting.get().0 > 0, move || {
-                    view()
-                        .absolute()
-                        .top(px(4.0))
-                        .right(px(2.0))
-                        .min_w(px(16.0))
-                        .h(px(16.0))
-                        .px(px(4.0))
-                        .rounded(px(8.0))
-                        .bg(move || theme::now(theme::status(waiting.get().1)))
-                        .items_center()
-                        .justify_center()
-                        .pointer_events(PointerEvents::None)
-                        .child(text(move || waiting.get().0.to_string()).text_size(theme::SMALL).text_color(rgb(0xffffff)))
+                    ui::badge(move || waiting.get().0, move || theme::now(theme::status(waiting.get().1))).top(px(4.0)).right(px(2.0))
                 })),
         )
         .child(
@@ -156,7 +144,7 @@ fn header(
         .child(ui::icon_button("plus", t!("New"), {
             let live = live.clone();
             move || {
-                spawn(crate::palette::new_terminal(live.clone()));
+                spawn(crate::new_menu::new_terminal(live.clone()));
             }
         }))
         .child(ui::icon_button("ellipsis", t!("More"), move || {
