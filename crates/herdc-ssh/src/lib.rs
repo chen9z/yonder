@@ -120,7 +120,8 @@ pub struct Greeted {
 const GREET: Duration = Duration::from_secs(10);
 
 /// Connects and exchanges keys. Pass the fingerprint trusted before (if any):
-/// a different key fails here, before anything secret travels. Something
+/// a different key fails here, before anything secret travels. Without
+/// one, the caller shows `host_key` to be trusted before logging in. Something
 /// that takes the connection and says nothing is unreachable too.
 pub async fn greet(target: &Target, trusted: Option<&str>) -> Result<Greeted, Error> {
     let timed_out = || Error::Unreachable(target.host.clone(), std::io::ErrorKind::TimedOut.into());

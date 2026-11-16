@@ -37,7 +37,7 @@ pub async fn known(there: &There) -> Result<Vec<Known>, String> {
     let out = match there.run(&argv, None, TIMEOUT).await {
         Ok(ran) => ran.out(),
         Err(e) if e.contains("cannot start sh: program not found") => {
-            let names = commands.iter().map(|c| format!("'{}'", c.replace('\'', "''"))).collect::<Vec<_>>().join(",");
+            let names = commands.iter().map(|c| super::ps_quote(c)).collect::<Vec<_>>().join(",");
             let script = format!(
                 "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); foreach($c in @({names})){{ if(Get-Command $c -ErrorAction SilentlyContinue){{ \"herdr-has:$c\" }} }}"
             );

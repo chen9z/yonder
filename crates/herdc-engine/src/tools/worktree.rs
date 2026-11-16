@@ -91,6 +91,20 @@ pub fn slug(branch: &str) -> String {
     out.trim_matches('-').to_owned()
 }
 
+/// Why git or the folder wouldn't take `branch`, before anything runs: a
+/// name read as an option, one going up out of the worktrees (`..`), or
+/// one leaving no folder name.
+pub fn unfit(branch: &str) -> Option<&'static str> {
+    if branch.starts_with('-') || branch.starts_with('.') || branch.contains("..") {
+        return Some("Git doesn't take that as a branch name.");
+    }
+    let slug = slug(branch);
+    if slug.is_empty() || slug.starts_with('.') {
+        return Some("Put some letters or digits in the branch name.");
+    }
+    None
+}
+
 /// Where a new checkout of `repo` on `branch` goes.
 pub fn path(home: &str, repo: &Repo, branch: &str) -> String {
     format!("{home}/.herdr/worktrees/{}/{}", repo.name, slug(branch))
@@ -102,6 +116,9 @@ pub async fn create(there: &There, repo: &Repo, home: &str, branch: &str) -> Res
     let branch = branch.trim();
     if branch.is_empty() {
         return Err("Type a branch name.".into());
+    }
+    if let Some(why) = unfit(branch) {
+        return Err(why.into());
     }
     let path = path(home, repo, branch);
     let head = format!("refs/heads/{branch}");
@@ -251,6 +268,12 @@ mod tests {
         assert_eq!(slug("feat/phone ui"), "feat-phone-ui");
         assert_eq!(slug("--a//b--"), "a-b");
         assert_eq!(slug("v1.2_x"), "v1.2_x");
+        for wrong in ["..", "../up", "a..b", "-f", "--force", ".hidden", "新功能", "/./"] {
+            assert!(unfit(wrong).is_some(), "{wrong}");
+        }
+        for fine in ["feat/phone ui", "v1.2_x", "fix-新"] {
+            assert_eq!(unfit(fine), None, "{fine}");
+        }
     }
 
     #[test]

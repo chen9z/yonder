@@ -12,7 +12,7 @@ use crate::view::View;
 use herdc_wire::{Attach, Client, Item, Stream};
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::{oneshot, watch};
 
 /// Scrollback lines the first paint brings: as many as a screen keeps.
@@ -45,9 +45,15 @@ pub struct Info {
 
 enum Keys {
     Typing(Arc<Stream>),
-    /// Typed before a typing stream could take it.
-    Waiting(Vec<u8>),
+    /// Typed before a typing stream could take it, since the first.
+    Waiting(Vec<u8>, Option<Instant>),
 }
+
+/// Keys kept while the terminal isn't taken yet: a few lines at most.
+const WAITING_MOST: usize = 4096;
+/// Keys waited longer go nowhere: typed into what was on screen then,
+/// not what shows when the line is back (an Enter could run anything).
+const WAITING_LONGEST: Duration = Duration::from_secs(10);
 
 /// What a viewer needs from its engine.
 pub(crate) struct Seat {
@@ -132,7 +138,7 @@ impl Viewer {
             eager: Mutex::new(false),
             here: seat.here,
             screen: Mutex::new(Screen::new(cols, rows, palette)),
-            keys: Mutex::new(Keys::Waiting(Vec::new())),
+            keys: Mutex::new(Keys::Waiting(Vec::new(), None)),
             info: Mutex::new(Info::default()),
             changed: watch::Sender::new(0),
             touched: Mutex::new(None),
@@ -215,8 +221,11 @@ impl Viewer {
                 stream.input(bytes);
                 false
             }
-            Keys::Waiting(typed) => {
-                typed.extend_from_slice(bytes);
+            Keys::Waiting(typed, since) => {
+                if typed.len() + bytes.len() <= WAITING_MOST {
+                    typed.extend_from_slice(bytes);
+                    since.get_or_insert_with(Instant::now);
+                }
                 true
             }
         };
@@ -361,7 +370,9 @@ async fn pump(shared: Arc<Shared>, mut clients: watch::Receiver<Option<Client>>,
         if m != Mode::Watch {
             // What waited goes first, under the lock new typing takes.
             let mut keys = shared.keys.lock().unwrap();
-            if let Keys::Waiting(typed) = std::mem::replace(&mut *keys, Keys::Typing(stream.clone())) {
+            if let Keys::Waiting(typed, since) = std::mem::replace(&mut *keys, Keys::Typing(stream.clone()))
+                && since.is_some_and(|at| at.elapsed() <= WAITING_LONGEST)
+            {
                 stream.input(&typed);
             }
         }
@@ -435,7 +446,7 @@ async fn pump(shared: Arc<Shared>, mut clients: watch::Receiver<Option<Client>>,
         {
             let mut keys = shared.keys.lock().unwrap();
             if matches!(*keys, Keys::Typing(_)) {
-                *keys = Keys::Waiting(Vec::new());
+                *keys = Keys::Waiting(Vec::new(), None);
             }
         }
         match ended {

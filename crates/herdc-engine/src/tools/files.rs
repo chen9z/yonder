@@ -47,9 +47,9 @@ pub async fn list(there: &There, path: &str) -> Result<Listing, String> {
 
 /// The same from PowerShell, where there is no sh.
 async fn windows(there: &There, path: &str) -> Result<Vec<Entry>, String> {
-    let quoted: String = path.chars().flat_map(|c| if matches!(c, '\'' | '‘' | '’' | '‚' | '‛') { vec![c, c] } else { vec![c] }).collect();
+    let quoted = super::ps_quote(path);
     let script = format!(
-        "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); & {{ param($p) @(Get-ChildItem -LiteralPath $p -Force -ErrorAction Stop | Where-Object Name -ne '.git' | Select-Object -First 501 | ForEach-Object {{ @{{ name=$_.Name; dir=($_.PSIsContainer -and (-not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -or -not $_.LinkType -or ($_.Target -and [IO.Directory]::Exists(([IO.Path]::Combine([IO.Path]::GetDirectoryName($_.FullName), $_.Target[0])))))) }} }}) | ConvertTo-Json -Compress }} '{quoted}'"
+        "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); & {{ param($p) @(Get-ChildItem -LiteralPath $p -Force -ErrorAction Stop | Where-Object Name -ne '.git' | Select-Object -First 501 | ForEach-Object {{ @{{ name=$_.Name; dir=($_.PSIsContainer -and (-not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -or -not $_.LinkType -or ($_.Target -and [IO.Directory]::Exists(([IO.Path]::Combine([IO.Path]::GetDirectoryName($_.FullName), $_.Target[0])))))) }} }}) | ConvertTo-Json -Compress }} {quoted}"
     );
     let ran = there.run(&["powershell", "-NoProfile", "-Command", &script], None, super::TIMEOUT).await?;
     if !ran.ok() {

@@ -52,7 +52,7 @@ core 能力和内置 mods 的功能全部复刻，界面按手机重新设计；
 | palette（命令面板） | 命令面板：同一套命令名和参数 |
 | new-menu | 顶栏的 `+`：终端、本机探测到的 agent 程序（结果按机器缓存，先显示上次的再在后台重查）、新 space、新建/打开 worktree |
 | machine-add | 首页菜单「Add a machine…」：电脑 `~/.ssh/config` 里的 host（含 Include）或手填，经 `machine.add` 添加；需要回答时提示在终端里跑的命令 |
-| files / changes / worktree | 对应页面，经 `machine.exec`（mods 原样的命令行）实现，远程目录每 10 s 刷新（只在页面在最上层、app 在前台时；盖住或进后台就不问，回来立刻刷新一次，`nav::while_looked_at`）；打开的文件用 nsh-base 的只读 `Editor` 显示，按文件名高亮 |
+| files / changes / worktree | 对应页面，经 `machine.exec`（mods 原样的命令行）实现，远程目录每 10 s 刷新（只在页面在最上层、app 在前台时；盖住或进后台就不问，回来立刻刷新一次，`nav::while_looked_at`）；打开的文件用 nsh-base 的只读 `Editor` 显示，按文件名高亮。Windows 上读文件用 PowerShell 的 `Get-Content -LiteralPath`（路径用 `tools::ps_quote` 包成单引号字符串），不走 `cmd /c type`（路径里的 `&` 会被当成命令）。新 worktree 的分支名先在手机上检查：以 `-` 或 `.` 开头、含 `..`、变成文件夹名后为空的都拒绝（`worktree::unfit`），不会建到 `.herdr/worktrees/<repo>` 外面 |
 | help（快捷键表） | 手机没有快捷键，不复刻；命令页列出全部命令 |
 | settings | 手机端设置：电脑（连接、添加机器、命令、断开）、字号（终端上也可双指缩放）、打字时适配、按键栏、语言（跟随系统 / English / 中文）、外观（跟随系统 / 浅色 / 深色）、Agents 排序、本机密钥 |
 
@@ -62,7 +62,7 @@ core 能力和内置 mods 的功能全部复刻，界面按手机重新设计；
 
 - **用 herdr-app 自己的模型代码**而不是按文档重写：文档格式、分屏增删的权重分配、命名规则、
   attention 规则都与桌面逐行一致，并且直接带上它们的单元测试。
-- **SSH 是唯一的鉴权边界**，PC 端零安装。主机指纹首次连接后固定，变化时拒绝并提示；
+- **SSH 是唯一的鉴权边界**，PC 端零安装。主机指纹首次连接后固定，变化时拒绝并提示；保存的电脑没有指纹时不拨号，报“主机密钥没有确认过”，要编辑连接重新核对（`link::login`）；
   密码加密保存在手机上，不往电脑上写任何东西（不自动配置公钥）。密码方式被拒就是密码错了，不再拿它试 keyboard-interactive：macOS 的 sshd 在密码失败后走 keyboard-interactive 会一直不回应（OpenSSH 客户端也一样）。只有电脑不接受 `password` 方式时才用 keyboard-interactive；登录最多等 30 s；连上电脑、交换密钥最多等 10 s（只接连接不说话的也算连不上）。保存的密码被拒（电脑改了密码）就不再重试（每次失败都会记到账户上），提示条上给“重新输入密码”。电脑上已经有手机公钥的（用户自己从设置页复制过去加的），就用钥匙登录。
   不支持 RSA 主机/用户密钥：russh 的 `rsa` 特性锁定的 `rsa` 预发布版与 NSH 依赖冲突，只支持 ed25519 和 ECDSA。
 - **只 attach 可见的 pane**，离屏即 CLOSE，节省流量和电量；尺寸遵循 core 的“最后活跃的观看者定尺寸”，
@@ -121,6 +121,7 @@ core 能力和内置 mods 的功能全部复刻，界面按手机重新设计；
   nsh-base 保留默认的 `highlight` 功能，文件查看器按文件名提供语法高亮。
 - **诊断信息**：设置 → 关于 → 复制诊断信息：版本、系统、偏好、密钥怎么存的、电脑地址和用户、线路和各机器的状态、数量。不含密码和密钥。
 - **CI**：`.github/workflows/check.yml` 在 Ubuntu 上装指定版本的 herdr-core（`HC_VERSION`），跑 `scripts/check.sh`。
+- **没连上时的按键**：viewer 还没拿到终端时打的字先存着，连上再发；最多 4 KB，等了超过 10 s 就丢掉（那时屏幕上已经不是打字时看到的东西，一个回车可能执行别的）。
 - **大量输出限速**：viewer 以 512 KiB/s 归还 credit（`Attach::pace`）。输出超过这个速度持续 1 s，就算“落后”，断开重新 attach，从当前屏幕开始，不再一个字节一个字节追 core 那边最多 4 MiB 的积压。省流量、省电，刷屏结束后 0.5 s 内看到最后的输出。
 - **后台不收输出**：app 进后台时 viewer 放开终端（`Engine::set_shown(false)`），状态事件照收；回前台从当前屏幕重新 attach。以前后台刷屏 24 s 照样收 16 MB。
 - **SSH 压缩**：优先 `zlib@openssh.com`，其次 `zlib`，电脑不支持就不压缩。

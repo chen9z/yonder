@@ -24,6 +24,13 @@ pub const LONG: Duration = Duration::from_secs(600);
 /// `readTextFile`'s limit (herdr-app `mod_files.rs`).
 pub const TEXT_LIMIT: usize = 1024 * 1024;
 
+/// `s` as one PowerShell string, taken as it is: in single quotes, each
+/// quote PowerShell ends a string at (its curly ones too) doubled.
+pub(crate) fn ps_quote(s: &str) -> String {
+    let inner: String = s.chars().flat_map(|c| if matches!(c, '\'' | '‘' | '’' | '‚' | '‛') { vec![c, c] } else { vec![c] }).collect();
+    format!("'{inner}'")
+}
+
 /// A folder on a machine: the mods' `location()`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Place {
@@ -78,9 +85,14 @@ impl There {
     /// `readTextFile(.., {on})` doesn't tell the two apart).
     pub async fn read_text(&self, path: &str) -> Result<Option<String>, String> {
         let ran = match self.run(&["cat", "--", path], None, TIMEOUT).await {
+            // Windows: the path quoted for PowerShell, never read by cmd
+            // (where `&` in a name would be a command).
             Err(e) if e.contains("cannot start") => {
-                let windows = path.replace('/', "\\");
-                self.run(&["cmd", "/d", "/c", "type", &windows], None, TIMEOUT).await?
+                let script = format!(
+                    "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); [Console]::Write((Get-Content -LiteralPath {} -Raw -Encoding UTF8 -ErrorAction Stop))",
+                    ps_quote(path)
+                );
+                self.run(&["powershell.exe", "-NoProfile", "-Command", &script], None, TIMEOUT).await?
             }
             other => other?,
         };
@@ -121,4 +133,16 @@ fn said(ran: &Ran, fallback: &str) -> String {
 /// `text` cut to `max` chars.
 fn cut(text: &str, max: usize) -> &str {
     text.char_indices().nth(max).map_or(text, |(i, _)| &text[..i])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_powershell_string_ends_only_where_quoted() {
+        assert_eq!(ps_quote(r"C:\a & b\x.txt"), r"'C:\a & b\x.txt'");
+        assert_eq!(ps_quote("it's ’ok’; rm"), "'it''s ’’ok’’; rm'");
+        assert_eq!(ps_quote("$HOME`n"), "'$HOME`n'");
+    }
 }

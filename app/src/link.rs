@@ -254,9 +254,14 @@ pub fn runtime() -> tokio::runtime::Handle {
     runtime.handle().clone()
 }
 
-/// Logs in with what the phone keeps for `computer`.
+/// Why a computer kept without its key's fingerprint isn't dialed.
+const NOT_TRUSTED: &str = "This computer's key was never trusted. Edit the connection to check it.";
+
+/// Logs in with what the phone keeps for `computer`: only to the key the
+/// person trusted when adding it (one never trusted is no computer's).
 async fn login(computer: &Computer, key: &str) -> Result<Session, String> {
-    let greeted = herdc_ssh::greet(&computer.target(), computer.fingerprint.as_deref()).await.map_err(|e| e.to_string())?;
+    let Some(trusted) = computer.fingerprint.as_deref() else { return Err(NOT_TRUSTED.to_owned()) };
+    let greeted = herdc_ssh::greet(&computer.target(), Some(trusted)).await.map_err(|e| e.to_string())?;
     greeted.login(&computer.user, &computer.credential(key)).await.map_err(|e| e.to_string())
 }
 
@@ -340,6 +345,14 @@ mod tests {
     fn each_computer_has_a_view_file_of_its_own() {
         assert_eq!(super::view_name("me@h:22"), "6d6540683a3232.json");
         assert_ne!(super::view_name("me@h:22/a"), super::view_name("me@h:22/b"));
+    }
+
+    #[test]
+    fn a_computer_whose_key_was_never_trusted_is_not_dialed() {
+        // Port 9 of a documentation address: it would hang, were it dialed.
+        let pc = super::Computer { name: "pc".into(), host: "192.0.2.1".into(), port: 9, user: "me".into(), fingerprint: None, password: None, windows: false, session: None };
+        let got = super::runtime().block_on(super::login(&pc, ""));
+        assert_eq!(got.err().as_deref(), Some(super::NOT_TRUSTED));
     }
 
     #[test]
