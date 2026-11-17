@@ -523,6 +523,9 @@ pub fn talk_bar(placeholder: impl Fn() -> String + 'static, send: impl Fn(String
             });
         }
     });
+    // Its words' height, as last measured.
+    let tall = signal(0.0f32);
+    let most = move || (window().height.0 * 0.25).clamp(64.0, 160.0);
     let stop = offers.stop.clone();
     let stopping = computed(move || stop.as_ref().is_some_and(|(working, _)| working.get()) && none());
     view()
@@ -563,13 +566,15 @@ pub fn talk_bar(placeholder: impl Fn() -> String + 'static, send: impl Fn(String
                 .element_ref(&field)
                 .test_id("talk")
                 .multiline(true)
+                // As tall as its words, up to a quarter of the window; past
+                // it, they scroll inside.
+                .on_content_size_change(move |s: &Size<Points>| tall.set(s.height.0))
+                .h(move || px(field_height(tall.get(), most())))
                 .value(move || draft.with(|d| d.0.clone()))
                 .on_change(move |t: &str| draft.set(Unsent(t.to_owned())))
                 .placeholder(placeholder)
                 .placeholder_color(move || theme::now(theme::DIM))
                 .flex_1()
-                .min_h(px(40.0))
-                .max_h(move || px((window().height.0 * 0.25).clamp(64.0, 132.0)))
                 .px(px(14.0))
                 .py(px(9.0))
                 .rounded(px(20.0))
@@ -612,6 +617,12 @@ pub fn talk_bar(placeholder: impl Fn() -> String + 'static, send: impl Fn(String
                 }
             }
         }))
+}
+
+/// The field's height for words `words` tall: one line at least (with
+/// its padding and border), `most` at most.
+fn field_height(words: f32, most: f32) -> f32 {
+    (words + 2.0 * 9.0 + 2.0).clamp(40.0, most.max(40.0))
 }
 
 /// How many rows a question shows at most.
@@ -1400,6 +1411,17 @@ fn paint(s: &Snapshot, cell: Cell, scale: f32, cursor: Hsla) -> Painter {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_field_grows_with_its_words_up_to_a_point() {
+        // Empty (one line, 22 pt): its least.
+        assert_eq!(super::field_height(22.0, 160.0), 42.0);
+        assert_eq!(super::field_height(0.0, 160.0), 40.0);
+        // Four lines: all shown.
+        assert_eq!(super::field_height(88.0, 160.0), 108.0);
+        // Twenty: as tall as it may be, the rest scrolled to.
+        assert_eq!(super::field_height(440.0, 160.0), 160.0);
+    }
+
     use super::{typed, line_keys};
 
     #[test]

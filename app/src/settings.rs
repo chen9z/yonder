@@ -4,6 +4,7 @@
 //! key.
 
 use crate::i18n::Language;
+use crate::notes::Notify;
 use crate::theme::Look;
 use crate::live::{self, Live};
 use crate::prefs::Prefs;
@@ -116,6 +117,31 @@ pub fn settings_page(live: Live) -> nsh_core::element::Screen {
                                     Some("system") => prefs.look.set(Look::System),
                                     Some("light") => prefs.look.set(Look::Light),
                                     Some("dark") => prefs.look.set(Look::Dark),
+                                    _ => {}
+                                }
+                            });
+                        },
+                    ),
+                    // Which agents' news comes over the page.
+                    leads(
+                        setting("bell", || t!("Notes").into(), move || match prefs.notify.get() {
+                            Notify::Important => t!("Important only").into(),
+                            Notify::All => t!("All").into(),
+                            Notify::Off => t!("Off").into(),
+                        }),
+                        move || {
+                            spawn(async move {
+                                use crate::pick::{self, Icon, Item};
+                                let now = prefs.notify.get_untracked();
+                                let items = vec![
+                                    Item::new("important", t!("Important only"), Icon::None).checked(now == Notify::Important),
+                                    Item::new("all", t!("All"), Icon::None).checked(now == Notify::All),
+                                    Item::new("off", t!("Off"), Icon::None).checked(now == Notify::Off),
+                                ];
+                                match pick::one(t!("Notes"), items).await.as_deref() {
+                                    Some("important") => prefs.notify.set(Notify::Important),
+                                    Some("all") => prefs.notify.set(Notify::All),
+                                    Some("off") => prefs.notify.set(Notify::Off),
                                     _ => {}
                                 }
                             });

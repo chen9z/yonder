@@ -204,7 +204,9 @@ pub fn switch_connection(computer: Computer, first: Option<Session>, replacing: 
         spawn(async move {
             loop {
                 match said.recv().await {
-                    Ok(note) if note.toast => shown.say(note),
+                    // Agents' news while the app is away isn't kept for
+                    // later: the badges say it then.
+                    Ok(note) if note.toast && (note.alert.is_none() || lifecycle() == nsh_core::platform::Lifecycle::Active) => shown.say(note),
                     Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
                     Err(_) => break,
                 }
@@ -353,10 +355,10 @@ impl Live {
         let notes = self.notes;
         let id = self.noted.get() + 1;
         self.noted.replace(id);
-        // An agent that needs you has one note, there while it waits (the
-        // workspace shows it then), not a few seconds.
+        // An agent that needs you has one note, a while longer than others;
+        // after it, the badges still say so.
         let waits = waits_on(&note);
-        let lasts = if waits.is_some() { 30 * 60 } else { 5 };
+        let lasts = if waits.is_some() { 10 } else { 5 };
         // It slides in, and fades away.
         crate::ui::smoothly();
         notes.update(|all| {

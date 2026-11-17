@@ -10,29 +10,61 @@ use crate::prefs::Prefs;
 use crate::{nav, theme, ui};
 use herdc_engine::Note;
 use nsh_core::prelude::*;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Pulled up this far, a note goes.
 const PUT_AWAY: f32 = 28.0;
+
+/// Which agents' news comes over the page (Settings → Notes); the rest
+/// shows on the Agents tab's badge and in its list only. What went wrong
+/// with something the person did always shows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Notify {
+    /// An agent waiting for the person, and the main agent done.
+    #[default]
+    Important,
+    /// Every agent waiting or done too.
+    All,
+    /// None.
+    Off,
+}
+
+impl Notify {
+    /// Whether `note` comes over the page; `lead`: the main agent's
+    /// terminal.
+    pub fn shows(self, note: &Note, lead: Option<&str>) -> bool {
+        match (note.alert, self) {
+            (None, _) => true,
+            (Some(_), Notify::Off) => false,
+            (Some(_), Notify::All) | (Some("blocked"), _) => true,
+            (Some(_), Notify::Important) => lead.is_some_and(|l| about(note).as_deref() == Some(l)),
+        }
+    }
+}
 
 pub fn notes(live: Live) -> impl IntoElement {
     let (all, world, routes) = (live.notes, live.view, nav::routes());
     let lead = crate::lead::found(&live);
     // Newest first; a waiting agent's only while it waits and isn't shown
     // (in the workspace, or the main agent on its tab).
+    let prefs = use_context::<Prefs>().unwrap();
     let notes = computed(move || {
+        let wanted = prefs.notify.get();
+        let lead = lead.with(|l| l.as_ref().map(|l| l.address.clone()));
         let on_lead = routes.with(|r| r.0.is_empty()) && home::shown().get() == Home::Lead;
         let on_workspace = routes.with(|r| r.0.last() == Some(&nav::Route::Workspace));
         world.with(|v| {
             let shown = if on_workspace {
                 v.focused.as_ref().and_then(|f| f.terminal.clone())
             } else if on_lead {
-                lead.with(|l| l.as_ref().map(|l| l.address.clone()))
+                lead.clone()
             } else {
                 None
             };
             let waiting = |a: &String| v.terminals.iter().any(|t| t["address"] == a.as_str() && matches!(t["status"].as_str(), Some("blocked" | "error")));
-            all.with(|all| all.iter().rev().filter(|(_, n)| waits_on(n).is_none_or(|a| waiting(&a) && shown.as_ref() != Some(&a))).cloned().collect::<Vec<_>>())
+            all.with(|all| all.iter().rev().filter(|(_, n)| wanted.shows(n, lead.as_deref()))
+                .filter(|(_, n)| waits_on(n).is_none_or(|a| waiting(&a) && shown.as_ref() != Some(&a))).cloned().collect::<Vec<_>>())
         })
     });
     let opened = signal(false);
@@ -41,7 +73,6 @@ pub fn notes(live: Live) -> impl IntoElement {
     let open = computed(move || opened.get() && !typing.get() && notes.with(Vec::len) > 1);
     let shown = computed(move || notes.with(|n| if open.get() { n.clone() } else { n.iter().take(1).cloned().collect() }));
     let more = computed(move || notes.with(Vec::len).saturating_sub(1));
-    let prefs = use_context::<Prefs>().unwrap();
     view()
         .absolute()
         .top(move || px(safe_area().top.0 + 6.0))
@@ -220,4 +251,29 @@ fn note(live: Live, prefs: Prefs, n: ReadSignal<(u64, Note)>) -> impl IntoElemen
                 })),
         )
         .child(ui::icon_button("x", t!("Not now"), move || put_away(&closed, id)).w(px(40.0)).h(px(40.0)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Notify;
+    use herdc_engine::{Action, Note};
+
+    fn of(alert: Option<&'static str>, terminal: &str) -> Note {
+        let action = Action { name: "agent.focus".into(), args: serde_json::json!({ "terminal": terminal }) };
+        Note { title: "x".into(), body: None, level: "info", action: Some(action), alert, toast: true }
+    }
+
+    #[test]
+    fn only_what_matters_comes_over_the_page() {
+        let lead = Some("t1");
+        // Waiting, anyone; done, only the main agent.
+        assert!(Notify::Important.shows(&of(Some("blocked"), "t9"), lead));
+        assert!(Notify::Important.shows(&of(Some("done"), "t1"), lead));
+        assert!(!Notify::Important.shows(&of(Some("done"), "t9"), lead));
+        assert!(!Notify::Important.shows(&of(Some("done"), "t9"), None));
+        assert!(Notify::All.shows(&of(Some("done"), "t9"), lead));
+        // Off: no agent's; what went wrong still.
+        assert!(!Notify::Off.shows(&of(Some("blocked"), "t1"), lead));
+        assert!(Notify::Off.shows(&Note::error("Split failed", "no room"), lead));
+    }
 }
