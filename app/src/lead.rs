@@ -130,7 +130,7 @@ pub fn title(live: Live) -> impl IntoElement {
     // Drawn again for another agent, not for each turn of this one.
     let who = computed(move || found.with(|f| f.as_ref().map(|a| (a.space.clone(), a.space_name.clone()))));
     dynamic(move || match who.get() {
-        None => text(name.clone()).flex_1().pl(px(12.0)).text_size(theme::TITLE).font_weight(FontWeight::BOLD).text_color(theme::FOREGROUND).number_of_lines(1).into_element(),
+        None => text(name.clone()).flex_1().pl(px(4.0)).text_size(theme::TITLE).font_weight(FontWeight::BOLD).text_color(theme::FOREGROUND).number_of_lines(1).into_element(),
         Some((space, space_name)) => {
             let color = prefs.colors.with_untracked(|c| c.get(&format!("{computer}\u{0}{space}")).copied()).unwrap_or(0);
             let program = move || found.with(|f| f.as_ref().map(|a| a.program.clone()).unwrap_or_default());
@@ -141,7 +141,7 @@ pub fn title(live: Live) -> impl IntoElement {
                 .flex_row()
                 .items_center()
                 .gap(px(12.0))
-                .pl(px(12.0))
+                .pl(px(4.0))
                 .h(px(48.0))
                 .role(AccessibilityRole::Button)
                 .label(t!("Main agent: {}", called))

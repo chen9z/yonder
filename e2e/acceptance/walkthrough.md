@@ -120,7 +120,8 @@ it with the screenshot's name and go on.
    Back. Tap the space under "Spaces"
    to go back.
 7a. ‹ to the home page: three tabs at the bottom, "Main" first. Press
-   it: "Your main agent", why, and "Choose an agent". Back on "Agents",
+   it: "Your main agent", why, and "Choose an agent"; the tabs at the
+   bottom are gone, a ‹ at the top left instead. Press ‹: back on "Agents",
    hold an agent's row: its sheet offers "Make it the main agent"; press
    it. The first tab shows, called as the agent's space: the space's
    square, its name and program at the top, the agent's terminal, and
@@ -137,8 +138,12 @@ it with the screenshot's name and go on.
    it). Scroll up a little: a ↓ shows at the bottom right; press it: back
    at the end. If "Show earlier messages" is at the top, press it: older
    lines show above and the screen stays where it was. Times show between
-   lines far apart. Turn the phone sideways: the tabs at the bottom are
-   lower, without words; turn it back.
+   lines far apart. No tabs at the bottom; the ‹ at the top left carries
+   the count of agents waiting. Drag the lines up (reading on): the header
+   and the agents above go, the status bar stays; drag back a little, or
+   tap just under the status bar: they come back. Turn the phone sideways
+   on "Agents": the tabs at the bottom are lower, without words; turn it
+   back.
 7c. Still in that conversation (send nothing): the field says "Message
    <name> · / for commands". Type `/`: a list shows above the field,
    /compact first, each with a few words; some with a terminal glyph.

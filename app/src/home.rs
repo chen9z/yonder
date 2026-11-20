@@ -100,7 +100,7 @@ pub fn home_page(live: Live) -> impl IntoElement {
         .pl(move || safe_area().left)
         .pr(move || safe_area().right)
         // Away, the room it kept under the status bar is still kept.
-        .child(when(move || !reading.get(), move || top_bar(bar.clone(), tab, reorder)).otherwise(|| view().h(move || safe_area().top)))
+        .child(when(move || !reading.get(), move || top_bar(bar.clone(), tab, reorder, waiting)).otherwise(|| view().h(move || safe_area().top)))
         .child(workspace::link_banner(live.clone()))
         .child(dynamic(move || match tab.get() {
             Home::Lead => lead::lead_page(shown_live.clone()).into_element(),
@@ -108,7 +108,9 @@ pub fn home_page(live: Live) -> impl IntoElement {
             // Scrolled, a row swiped open closes.
             Home::Agents => scroll().flex_1().on_scroll(agents::on_scrolled()).child(view().pb(px(8.0)).child(agents::agents_section(live.clone(), false))).into_element(),
         }))
-        .child(when(move || typing.get() || reading.get(), || view().h(ui::bottom_inset)).otherwise(move || {
+        // The main agent's page is the whole screen: its way out is the
+        // header's back arrow, not the tabs.
+        .child(when(move || typing.get() || reading.get() || tab.get() == Home::Lead, || view().h(ui::bottom_inset)).otherwise(move || {
             let lead_name = lead_name.clone();
             view().items_center().pt(px(4.0)).pb(move || ui::bottom_inset() + px(if wide.get() { 2.0 } else { 6.0 })).child(
                 view().flex_row().p(px(4.0)).rounded(px(32.0)).bg(theme::RAISED)
@@ -161,7 +163,7 @@ fn home_tab(label: impl Fn() -> String + Clone + 'static, icon: &'static str, ta
         }))
 }
 
-fn top_bar(live: Live, tab: Signal<Home>, reorder: Signal<bool>) -> impl IntoElement {
+fn top_bar(live: Live, tab: Signal<Home>, reorder: Signal<bool>, waiting: Memo<(usize, &'static str)>) -> impl IntoElement {
     let name = live.computer.name.clone();
     let new_space = live.clone();
     let titled = live.clone();
@@ -172,6 +174,18 @@ fn top_bar(live: Live, tab: Signal<Home>, reorder: Signal<bool>) -> impl IntoEle
     };
     ui::top_bar()
         .border_b(px(0.0))
+        // On the main agent's tab, the way to the others (no tabs there),
+        // saying how many need you, as the workspace's does.
+        .child(when(move || tab.get() == Home::Lead, move || {
+            view()
+                .child(ui::icon_button("chevron-left", t!("Agents"), move || {
+                    ui::smoothly();
+                    tab.set(Home::Agents);
+                }))
+                .child(when(move || waiting.get().0 > 0, move || {
+                    ui::badge(move || waiting.get().0, move || theme::now(theme::status(waiting.get().1))).top(px(4.0)).right(px(-2.0))
+                }))
+        }))
         // The computer's name; on the main agent's tab, the agent.
         .child(dynamic(move || if tab.get() == Home::Lead {
             lead::title(titled.clone()).into_element()
