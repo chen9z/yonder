@@ -121,7 +121,8 @@ it with the screenshot's name and go on.
    to go back.
 7a. ‹ to the home page: three tabs at the bottom, "Main" first. Press
    it: "Your main agent", why, and "Choose an agent"; the tabs at the
-   bottom are gone, a ‹ at the top left instead. Press ‹: back on "Agents",
+   bottom are gone, a ‹ at the top left instead. The system's back: on
+   "Agents" (the app stays). Press "Main" again, then ‹: back on "Agents",
    hold an agent's row: its sheet offers "Make it the main agent"; press
    it. The first tab shows, called as the agent's space: the space's
    square, its name and program at the top, the agent's terminal, and

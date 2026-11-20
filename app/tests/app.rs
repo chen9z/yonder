@@ -879,6 +879,11 @@ fn an_agent_made_the_main_one_has_a_tab_of_its_own_and_the_app_opens_on_it() {
     app.type_text("id:talk", "hello").unwrap();
     app.press("label:Send").unwrap();
     app.wait_for_within("text:Not sent", SLOW).unwrap();
+    // No tabs on its page; back is Agents, where they are.
+    assert_eq!(app.screen().count("label:Spaces"), Ok(0));
+    app.back().unwrap();
+    app.wait_until("on Agents", SLOW, |s| s.count("id:talk") == Ok(0) && s.count("label:Spaces") == Ok(1)).unwrap();
+    app.wait_for("text:Fix the build").unwrap();
     drop(app);
 
     // Opened again, the app shows it, not the space it was on.

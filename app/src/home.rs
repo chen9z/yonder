@@ -120,6 +120,16 @@ pub fn home_page(live: Live) -> impl IntoElement {
                     .child(home_tab(|| t!("Spaces").into(), "spaces", tab, Home::Spaces, None, wide)),
             )
         }))
+        // Back on the main agent's page (nothing over it) is Agents, as its
+        // ‹ is; elsewhere back is as it was (listened to only here).
+        .child(when(move || tab.get() == Home::Lead && nav::routes().with(|r| r.0.is_empty()), move || {
+            on_back_press(move || {
+                ui::smoothly();
+                tab.set(Home::Agents);
+                true
+            });
+            view()
+        }))
         // The bars away, a tap at the top brings them back.
         .child(when(move || reading.get(), || {
             view()
