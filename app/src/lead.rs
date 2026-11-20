@@ -189,7 +189,10 @@ pub fn lead_page(live: Live) -> impl IntoElement {
             let shown = live.clone();
             view()
                 .flex_1()
-                .child(team(live.clone(), address.clone()))
+                .child({
+                    let (live, address) = (live.clone(), address.clone());
+                    when(move || !crate::chat::reading().get().0, move || team(live.clone(), address.clone()))
+                })
                 .child(dynamic(move || {
                     if talking.get() {
                         crate::chat::chat(shown.clone(), address.clone(), name.clone()).into_element()

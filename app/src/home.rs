@@ -81,12 +81,26 @@ pub fn home_page(live: Live) -> impl IntoElement {
             }
         });
     }
+    // Reading the main agent down, its bars go (`chat::reading`); off its
+    // conversation, they are there.
+    let reading = computed(|| crate::chat::reading().get().0);
+    {
+        let routes = nav::routes();
+        effect(move || {
+            let on = tab.get() == Home::Lead && routes.with(|r| r.0.is_empty()) && crate::chat::talking().get().0;
+            if !on {
+                crate::chat::read(false);
+            }
+        });
+    }
+    let bar = live.clone();
     view()
         .flex_1()
         .bg(theme::CHROME)
         .pl(move || safe_area().left)
         .pr(move || safe_area().right)
-        .child(top_bar(live.clone(), tab, reorder))
+        // Away, the room it kept under the status bar is still kept.
+        .child(when(move || !reading.get(), move || top_bar(bar.clone(), tab, reorder)).otherwise(|| view().h(move || safe_area().top)))
         .child(workspace::link_banner(live.clone()))
         .child(dynamic(move || match tab.get() {
             Home::Lead => lead::lead_page(shown_live.clone()).into_element(),
@@ -94,7 +108,7 @@ pub fn home_page(live: Live) -> impl IntoElement {
             // Scrolled, a row swiped open closes.
             Home::Agents => scroll().flex_1().on_scroll(agents::on_scrolled()).child(view().pb(px(8.0)).child(agents::agents_section(live.clone(), false))).into_element(),
         }))
-        .child(when(move || typing.get(), || view().h(ui::bottom_inset)).otherwise(move || {
+        .child(when(move || typing.get() || reading.get(), || view().h(ui::bottom_inset)).otherwise(move || {
             let lead_name = lead_name.clone();
             view().items_center().pt(px(4.0)).pb(move || ui::bottom_inset() + px(if wide.get() { 2.0 } else { 6.0 })).child(
                 view().flex_row().p(px(4.0)).rounded(px(32.0)).bg(theme::RAISED)
@@ -103,6 +117,19 @@ pub fn home_page(live: Live) -> impl IntoElement {
                     .child(home_tab(|| t!("Agents").into(), "inbox", tab, Home::Agents, Some(waiting), wide))
                     .child(home_tab(|| t!("Spaces").into(), "spaces", tab, Home::Spaces, None, wide)),
             )
+        }))
+        // The bars away, a tap at the top brings them back.
+        .child(when(move || reading.get(), || {
+            view()
+                .absolute()
+                .top(px(0.0))
+                .left(px(0.0))
+                .right(px(0.0))
+                .h(move || px(safe_area().top.0 + 28.0))
+                .role(AccessibilityRole::Button)
+                .label(t!("Show the bars"))
+                .test_id("bars")
+                .on_press(|| crate::chat::read(false))
         }))
 }
 
