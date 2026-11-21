@@ -32,3 +32,9 @@ libc = "0.2"
 herdc-testkit = { path = "../crates/herdc-testkit" }
 nsh-engine = "0.4.0"
 nsh-testing = { version = "0.4.0", default-features = false }
+
+# No debug info in tests and clippy builds: on macOS it stays in object
+# files beside them, a new set each incremental build, never cleaned
+# (tens of GB in days). Panics still say where; backtraces have no lines.
+[profile.dev]
+debug = false

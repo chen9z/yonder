@@ -24,3 +24,9 @@ serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["io-util", "macros", "rt", "rt-multi-thread", "sync", "time", "process", "net"] }
 tracing = "0.1"
+
+# No debug info in tests and clippy builds: on macOS it stays in object
+# files beside them, a new set each incremental build, never cleaned
+# (tens of GB in days). Panics still say where; backtraces have no lines.
+[profile.dev]
+debug = false
