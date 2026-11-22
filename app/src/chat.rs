@@ -327,6 +327,9 @@ pub fn chat(live: Live, address: String, name: String) -> impl IntoElement {
     let unseen = signal(false);
     let offset = stored(0.0f32);
     let height = stored(0.0f32);
+    // The lines at the last growth: grown with them the same (a turn
+    // or a card opened), nothing new is unseen.
+    let grown = stored((0usize, None::<Line>));
     let keep = stored(None::<(f32, f32)>);
     spawn(follow(live.clone(), address.clone(), Reading { lines, cut, found, sent, again, earlier, loading, keep, height, offset, footer }));
 
@@ -572,8 +575,12 @@ pub fn chat(live: Live, address: String, name: String) -> impl IntoElement {
                                         } else if stuck.get() {
                                             list.scroll_to_end(false);
                                         } else if now > was + 1.0 {
-                                            unseen.set(true);
+                                            let these = lines.with_untracked(|l| (l.len(), l.last().cloned()));
+                                            if grown.get() != these {
+                                                unseen.set(true);
+                                            }
                                         }
+                                        grown.replace(lines.with_untracked(|l| (l.len(), l.last().cloned())));
                                     })
                                     .px(px(16.0))
                                     .pt(px(8.0))
@@ -985,11 +992,14 @@ fn worked(i: ReadSignal<Item>, key: String, opened: Signal<HashSet<String>>) -> 
 }
 
 /// Words another agent sent it through hc: on the left, under who sent
-/// them (its name and program's icon, as the core lists it), not the
-/// person's bubble. Long ones show their start, the rest a tap away.
+/// them (its name and program's icon, as the core lists it: by its
+/// address, or by its name once that terminal is gone), not the person's
+/// bubble. Long ones show their start, the rest a tap away.
 fn told(from: String, words: impl Fn() -> String + Clone + 'static) -> View {
     let (address, named) = from.split_once(char::is_whitespace).map_or((from.clone(), String::new()), |(a, n)| (a.to_owned(), n.trim().to_owned()));
-    let record = crate::live::live().and_then(|l| l.view.with_untracked(|v| v.terminal(&address).cloned()));
+    let record = crate::live::live().and_then(|l| {
+        l.view.with_untracked(|v| v.terminal(&address).or_else(|| v.terminals.iter().find(|t| !named.is_empty() && t["name"] == named.as_str())).cloned())
+    });
     let name = Some(named)
         .filter(|n| !n.is_empty())
         .or_else(|| record.as_ref().and_then(|r| r["name"].as_str().filter(|n| !n.is_empty()).map(str::to_owned)))
@@ -1035,14 +1045,12 @@ fn told(from: String, words: impl Fn() -> String + Clone + 'static) -> View {
                     live.say(Note::info(t!("Copied"), t!("The message is on the clipboard.")));
                 }
             })
-            .child(
-                view()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(6.0))
-                    .child(ui::program_icon(move || program.clone(), 14.0))
-                    .child(text(t!("From {}", name)).text_size(theme::CAPTION).font_weight(FontWeight::SEMIBOLD).text_color(theme::MUTED).number_of_lines(1)),
-            )
+            .child({
+                // Its icon when the core still knows its program.
+                let head = view().flex_row().items_center().gap(px(6.0));
+                let head = if program["icon"].is_string() { head.child(ui::program_icon(move || program.clone(), 14.0)) } else { head };
+                head.child(text(t!("From {}", name)).text_size(theme::CAPTION).font_weight(FontWeight::SEMIBOLD).text_color(theme::MUTED).number_of_lines(1))
+            })
             .child(
                 text_view()
                     .markdown(move || Some(SharedString::from(shown())))
