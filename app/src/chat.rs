@@ -194,6 +194,10 @@ fn shown_there(name: &str, rest: &str) -> bool {
 enum Item {
     Time(String, u64),
     Said(Line),
+    /// A turn's work before its last words, folded: how many steps, how
+    /// many words on the way, how long (ms, 0: not known), and whether
+    /// it is open.
+    Worked { key: String, steps: usize, words: usize, ms: u64, open: bool },
 }
 
 impl Item {
@@ -201,25 +205,87 @@ impl Item {
         match self {
             Item::Time(id, _) => id.clone(),
             Item::Said(l) => l.id.clone(),
+            Item::Worked { key, .. } => key.clone(),
         }
     }
 }
 
+/// What starts a turn: the person's words, or what hc brought.
+fn starts_turn(s: &Said) -> bool {
+    matches!(s, Said::You { .. } | Said::Told { .. })
+}
+
 /// The lines as rows: the time before the first, and before any said
 /// long after the one before it.
-fn items(lines: &[Line]) -> Vec<Item> {
+///
+/// A turn done shows its last words; what it said and did on the way
+/// there is one row (`Item::Worked`), opened by a tap (`open`, by its
+/// key). The turn going on (`going`: working, or asking) shows whole.
+fn items(lines: &[Line], open: &HashSet<String>, going: bool) -> Vec<Item> {
+    // Each folded line's fold, and each fold by its first line.
+    let mut folded = vec![None::<String>; lines.len()];
+    let mut folds = std::collections::HashMap::new();
+    let mut b = 0;
+    while b < lines.len() {
+        let begin = if starts_turn(&lines[b].said) { b + 1 } else { b };
+        let end = lines[begin..].iter().position(|l| starts_turn(&l.said)).map_or(lines.len(), |p| begin + p);
+        if !(going && end == lines.len()) {
+            let words = (begin..end).rev().find(|&i| matches!(lines[i].said, Said::Reply(_))).unwrap_or(end);
+            let on_the_way: Vec<usize> = (begin..words).filter(|&i| matches!(lines[i].said, Said::Reply(_) | Said::Tools(_))).collect();
+            if let Some(&first) = on_the_way.first() {
+                let steps = on_the_way.iter().map(|&i| match &lines[i].said { Said::Tools(calls) => calls.len(), _ => 0 }).sum();
+                let words = on_the_way.len() - on_the_way.iter().filter(|&&i| matches!(lines[i].said, Said::Tools(_))).count();
+                let from = if begin > b { lines[b].at } else { lines[first].at };
+                let to = lines[begin..end].iter().map(|l| l.at).max().unwrap_or(0);
+                let ms = if from > 0 && to > from { to - from } else { 0 };
+                let key = format!("worked:{}", lines[first].id);
+                for &i in &on_the_way {
+                    folded[i] = Some(key.clone());
+                }
+                folds.insert(first, (key, steps, words, ms));
+            }
+        }
+        b = end.max(b + 1);
+    }
     let mut out = Vec::with_capacity(lines.len() + 4);
     let mut last = 0;
-    for l in lines {
-        if l.at > 0 && (last == 0 || l.at.saturating_sub(last) > APART) {
-            out.push(Item::Time(format!("time:{}", l.id), l.at));
+    let mut time = |out: &mut Vec<Item>, id: &str, at: u64| {
+        if at > 0 && (last == 0 || at.saturating_sub(last) > APART) {
+            out.push(Item::Time(format!("time:{id}"), at));
         }
-        if l.at > 0 {
-            last = l.at;
+        if at > 0 {
+            last = at;
         }
+    };
+    for (i, l) in lines.iter().enumerate() {
+        if let Some((key, steps, words, ms)) = folds.remove(&i) {
+            time(&mut out, &key, l.at);
+            let open = open.contains(&key);
+            out.push(Item::Worked { key, steps, words, ms, open });
+        }
+        if folded[i].as_ref().is_some_and(|k| !open.contains(k)) {
+            continue;
+        }
+        time(&mut out, &l.id, l.at);
         out.push(Item::Said(l.clone()));
     }
     out
+}
+
+/// How long a turn worked: seconds, minutes, or hours and minutes.
+fn worked_for(ms: u64) -> String {
+    let s = ms / 1000;
+    match s {
+        0..60 => t!("{} s", s.max(1)),
+        60..3600 => t!("{} min", s / 60),
+        _ => t!("{} h {} min", s / 3600, s / 60 % 60),
+    }
+}
+
+/// How long it has worked this turn, as a clock: `1:05`, `1:02:05`.
+fn clock(ms: u64) -> String {
+    let s = ms / 1000;
+    if s < 3600 { format!("{}:{:02}", s / 60, s % 60) } else { format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60) }
 }
 
 /// The machine the agent at `address` runs on (None: the core's own).
@@ -231,9 +297,15 @@ fn machine_of(live: &Live, address: &str) -> Option<String> {
 pub fn chat(live: Live, address: String, name: String) -> impl IntoElement {
     let world = live.view;
     let lines = signal(Vec::<Line>::new());
+    // Pi's status line, as last read; the folded turns opened.
+    let footer = signal(None::<transcript::Footer>);
+    let opened = signal(HashSet::<String>::new());
     let cut = signal(false);
     let found = signal(Found::Looking);
     let sent = signal(Vec::<Sent>::new());
+    // When this turn began: the last thing said to it (0, not known while
+    // what was sent isn't in its file yet).
+    let began = computed(move || if sent.with(|s| s.iter().any(|m| m.went)) { 0 } else { lines.with(|l| l.iter().rev().find(|l| starts_turn(&l.said)).map_or(0, |l| l.at)) });
     // A read wanted now (a message went in, it was stopped).
     let again = signal(0u32);
     // Earlier lines asked for, and being read.
@@ -256,7 +328,7 @@ pub fn chat(live: Live, address: String, name: String) -> impl IntoElement {
     let offset = stored(0.0f32);
     let height = stored(0.0f32);
     let keep = stored(None::<(f32, f32)>);
-    spawn(follow(live.clone(), address.clone(), Reading { lines, cut, found, sent, again, earlier, loading, keep, height, offset }));
+    spawn(follow(live.clone(), address.clone(), Reading { lines, cut, found, sent, again, earlier, loading, keep, height, offset, footer }));
 
     // Asked something in its terminal: the question's viewer, while shown.
     let answering = stored(None::<Rc<Viewer>>);
@@ -308,7 +380,7 @@ pub fn chat(live: Live, address: String, name: String) -> impl IntoElement {
                 Some(e) => {
                     let later = lines.with_untracked(|l| {
                         let at = l.iter().position(|l| l.id == e.id)?;
-                        Some(l[at + 1..].iter().filter(|l| matches!(l.said, Said::You { .. })).count())
+                        Some(l[at + 1..].iter().filter(|l| starts_turn(&l.said)).count())
                     });
                     let Some(later) = later else {
                         editing.set(None);
@@ -510,10 +582,11 @@ pub fn chat(live: Live, address: String, name: String) -> impl IntoElement {
                                     .child(when(move || cut.get(), move || before(loading, earlier)))
                                     .child({
                                         let edit = edit.clone();
-                                        each(move || lines.with(|l| items(l)), Item::key, move |i, _| item(i, edit.clone()))
+                                        let going = computed(move || matches!(status.get(), "working" | "blocked"));
+                                        each(move || opened.with(|o| lines.with(|l| items(l, o, going.get()))), Item::key, move |i, _| item(i, edit.clone(), opened))
                                     })
                                     .child(each(move || sent.get(), |m| m.n, move |m, _| waiting(m, working)))
-                                    .child(state(asked.0.clone(), asked.1.clone(), status, doing, asked.2.clone(), answering)),
+                                    .child(state(asked.0.clone(), asked.1.clone(), status, doing, began, asked.2.clone(), answering)),
                             ),
                     )
                     .child(when(move || away.get(), move || {
@@ -529,6 +602,8 @@ pub fn chat(live: Live, address: String, name: String) -> impl IntoElement {
         }))
         .child(when(move || !offered.with(Vec::is_empty), move || commands(offered)))
         .child(when(move || editing.with(Option::is_some), move || edited(editing)))
+        // Not while typing: the room above the keyboard is small.
+        .child(when(move || keyboard_height().0 <= 0.0 && footer.with(Option::is_some), move || status_line(footer)))
         .child(crate::terminal::talk_bar(placeholder, send, offers))
 }
 
@@ -552,13 +627,14 @@ struct Reading {
     keep: Stored<Option<(f32, f32)>>,
     height: Stored<f32>,
     offset: Stored<f32>,
+    footer: Signal<Option<transcript::Footer>>,
 }
 
 /// Reads `address`'s conversation as it goes: its file found (again when
 /// the session changes), what was added since, earlier lines when asked,
 /// and the messages sent let go of once they show.
 async fn follow(live: Live, address: String, r: Reading) {
-    let Reading { lines, cut, found, sent, again, earlier, loading, keep, height, offset } = r;
+    let Reading { lines, cut, found, sent, again, earlier, loading, keep, height, offset, footer } = r;
     let world = live.view;
     let mut read = Transcript::default();
     let mut path: Option<(String, String)> = None;
@@ -582,6 +658,13 @@ async fn follow(live: Live, address: String, r: Reading) {
         if due && shown && let Ok(there) = live.there(on.clone()) {
             seen = now;
             last = Instant::now();
+            // Its status line, as Pi shows it under its field.
+            let (t, a) = (there.clone(), address.clone());
+            if let Some(Ok(now)) = off(async move { transcript::footer_of(&t, &a).await }).await
+                && footer.with_untracked(|f| *f != now)
+            {
+                footer.set(now);
+            }
             // Another session (`/new`, a restart): read afresh.
             if path.as_ref().is_none_or(|(k, _)| *k != key) {
                 let (t, l, c) = (there.clone(), label.clone(), cwd.clone());
@@ -844,17 +927,187 @@ fn missing(why: String) -> impl IntoElement {
 }
 
 /// A row: the time, or what was said.
-fn item(i: ReadSignal<Item>, edit: Edit) -> impl IntoElement {
+fn item(i: ReadSignal<Item>, edit: Edit, opened: Signal<HashSet<String>>) -> impl IntoElement {
     match i.get_untracked() {
         Item::Time(_, at) => text(time_of(at)).self_center().pt(px(4.0)).text_size(theme::CAPTION).font_weight(FontWeight::MEDIUM).text_color(theme::DIM).into_element(),
+        Item::Worked { key, .. } => worked(i, key, opened).into_element(),
         Item::Said(_) => {
             let line = computed(move || match i.get() {
                 Item::Said(l) => l,
                 Item::Time(id, at) => Line { id, said: Said::Stopped, at },
+                Item::Worked { key, .. } => Line { id: key, said: Said::Stopped, at: 0 },
             });
             said(line, edit).into_element()
         }
     }
+}
+
+/// A turn's way to its last words, folded: how long, how many steps; a
+/// tap opens it, or folds it again.
+fn worked(i: ReadSignal<Item>, key: String, opened: Signal<HashSet<String>>) -> impl IntoElement {
+    let open = move || matches!(i.get(), Item::Worked { open: true, .. });
+    let said = move || match i.get() {
+        // Its steps; with none, the words it said on the way.
+        Item::Worked { steps, words, ms, .. } => {
+            let what = match (steps, words) {
+                (1, _) => t!("1 step").to_owned(),
+                (0, 1) => t!("1 message").to_owned(),
+                (0, n) => t!("{} messages", n),
+                (n, _) => t!("{} steps", n),
+            };
+            if ms == 0 { what } else { format!("{} · {what}", t!("Worked {}", worked_for(ms))) }
+        }
+        _ => String::new(),
+    };
+    view()
+        .flex_row()
+        .self_start()
+        .items_center()
+        .gap(px(6.0))
+        .h(px(28.0))
+        .hit_slop(ui::reach(28.0))
+        .pr(px(8.0))
+        .active(|s| s.opacity(0.6))
+        .role(AccessibilityRole::Button)
+        .label(said)
+        .accessibility_state(move || AccessibilityState { expanded: Some(open()), ..Default::default() })
+        .on_press(move || {
+            ui::smoothly();
+            let key = key.clone();
+            opened.update(|o| {
+                if !o.remove(&key) {
+                    o.insert(key);
+                }
+            });
+        })
+        .child(ui::chevron(open, 13.0))
+        .child(text(said).text_size(theme::FOOTNOTE).text_color(theme::DIM))
+}
+
+/// Words another agent sent it through hc: on the left, under who sent
+/// them (its name and program's icon, as the core lists it), not the
+/// person's bubble. Long ones show their start, the rest a tap away.
+fn told(from: String, words: impl Fn() -> String + Clone + 'static) -> View {
+    let (address, named) = from.split_once(char::is_whitespace).map_or((from.clone(), String::new()), |(a, n)| (a.to_owned(), n.trim().to_owned()));
+    let record = crate::live::live().and_then(|l| l.view.with_untracked(|v| v.terminal(&address).cloned()));
+    let name = Some(named)
+        .filter(|n| !n.is_empty())
+        .or_else(|| record.as_ref().and_then(|r| r["name"].as_str().filter(|n| !n.is_empty()).map(str::to_owned)))
+        .or_else(|| record.as_ref().and_then(|r| r["program"]["name"].as_str().map(str::to_owned)))
+        .unwrap_or(address);
+    let program = record.map(|r| r["program"].clone()).unwrap_or_default();
+    let open = signal(false);
+    let long = {
+        let words = words.clone();
+        move || words().chars().count() > TOLD_SHOWN || words().lines().count() > TOLD_LINES
+    };
+    let shown = {
+        let words = words.clone();
+        move || {
+            let all = words();
+            if open.get() || !(all.chars().count() > TOLD_SHOWN || all.lines().count() > TOLD_LINES) {
+                return all;
+            }
+            let start: String = all.lines().take(TOLD_LINES).collect::<Vec<_>>().join("\n").chars().take(TOLD_SHOWN).collect();
+            format!("{}…", start.trim_end())
+        }
+    };
+    let held = words.clone();
+    view().flex_row().pr(px(48.0)).child(
+        view()
+            .flex_shrink(1.0)
+            .gap(px(6.0))
+            .pl(px(12.0))
+            .pr(px(14.0))
+            .py(px(9.0))
+            .rounded(px(14.0))
+            .border_1()
+            .border_color(theme::BORDER)
+            .test_id("told")
+            .role(AccessibilityRole::Text)
+            .label({
+                let (name, words) = (name.clone(), words.clone());
+                move || format!("{}: {}", t!("From {}", name), words())
+            })
+            .on_long_press(move || {
+                set_clipboard(held());
+                if let Some(live) = crate::live::live() {
+                    live.say(Note::info(t!("Copied"), t!("The message is on the clipboard.")));
+                }
+            })
+            .child(
+                view()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(ui::program_icon(move || program.clone(), 14.0))
+                    .child(text(t!("From {}", name)).text_size(theme::CAPTION).font_weight(FontWeight::SEMIBOLD).text_color(theme::MUTED).number_of_lines(1)),
+            )
+            .child(
+                text_view()
+                    .markdown(move || Some(SharedString::from(shown())))
+                    .links(TextViewLinks::Open)
+                    .text_size(theme::ROW)
+                    .line_height(px(22.0))
+                    .text_color(theme::FOREGROUND),
+            )
+            .child(when(long, move || {
+                text(move || if open.get() { t!("Show less") } else { t!("Show all") })
+                    .self_start()
+                    .py(px(4.0))
+                    .hit_slop(ui::reach(26.0))
+                    .text_size(theme::FOOTNOTE)
+                    .text_color(theme::ACCENT)
+                    .role(AccessibilityRole::Button)
+                    .on_press(move || {
+                        ui::smoothly();
+                        open.update(|o| *o = !*o);
+                    })
+            })),
+    )
+}
+
+/// Words hc brought shown whole up to this many lines and characters.
+const TOLD_LINES: usize = 5;
+const TOLD_SHOWN: usize = 280;
+
+/// Pi's status line, over the field: the model, how hard it thinks, how
+/// full its context is (amber past 70%, red past 90%, as Pi's).
+fn status_line(footer: Signal<Option<transcript::Footer>>) -> impl IntoElement {
+    let model = move || footer.with(|f| f.as_ref().map(|f| [Some(f.model.clone()), f.thinking.clone()].into_iter().flatten().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ")).unwrap_or_default());
+    let used = move || footer.with(|f| f.as_ref().and_then(|f| f.used));
+    let ink = move || match used() {
+        Some(u) if u > 90.0 => theme::now(theme::BLOCKED),
+        Some(u) if u > 70.0 => theme::now(theme::WORKING),
+        _ => theme::now(theme::DIM),
+    };
+    view()
+        .flex_row()
+        .items_center()
+        .gap(px(8.0))
+        .px(px(16.0))
+        .pt(px(4.0))
+        .pb(px(2.0))
+        .test_id("pi-status")
+        .child(text(model).flex_1().text_size(theme::CAPTION).text_color(theme::DIM).number_of_lines(1))
+        .child(when(move || used().is_some(), move || {
+            view()
+                .flex_row()
+                .items_center()
+                .gap(px(6.0))
+                .role(AccessibilityRole::Text)
+                .label(move || t!("Context {}% used", used().unwrap_or(0.0).round()))
+                .child(
+                    view()
+                        .w(px(36.0))
+                        .h(px(4.0))
+                        .rounded(px(2.0))
+                        .bg(theme::BORDER)
+                        .overflow_hidden()
+                        .child(view().h_full().w(move || px(36.0 * used().unwrap_or(0.0).clamp(0.0, 100.0) / 100.0)).bg(ink)),
+                )
+                .child(text(move || t!("Context {}%", used().unwrap_or(0.0).round())).text_size(theme::CAPTION).text_color(ink))
+        }))
 }
 
 /// One thing said.
@@ -877,6 +1130,17 @@ fn said(l: Memo<Line>, edit: Edit) -> impl IntoElement {
                 .text_color(theme::FOREGROUND)
                 .into_element(),
             Said::Tools(_) => tools(move || l.with(|l| match &l.said { Said::Tools(calls) => calls.clone(), _ => Vec::new() })).into_element(),
+            Said::Told { from: Some(from), .. } => told(from, move || l.with(|l| match &l.said { Said::Told { text, .. } => text.clone(), _ => String::new() })).into_element(),
+            // hc's own news (one it started ended): a quiet line.
+            Said::Told { from: None, text: news } => text(news)
+                .self_center()
+                .px(px(24.0))
+                .text_size(theme::CAPTION)
+                .font_family(theme::MONO)
+                .text_color(theme::DIM)
+                .text_center()
+                .number_of_lines(2)
+                .into_element(),
             Said::Compacted => view()
                 .flex_row()
                 .items_center()
@@ -1137,16 +1401,23 @@ fn diff(input: &str) -> View {
 /// How the agent is now, under what it said: working (on what), or
 /// asking something in its terminal: the question, as it shows there,
 /// with the keys to answer it.
-fn state(live: Live, address: String, status: Memo<&'static str>, doing: Memo<Option<String>>, name: String, answering: Stored<Option<Rc<Viewer>>>) -> impl IntoElement {
+fn state(live: Live, address: String, status: Memo<&'static str>, doing: Memo<Option<String>>, began: Memo<u64>, name: String, answering: Stored<Option<Rc<Viewer>>>) -> impl IntoElement {
     dynamic(move || match status.get() {
         "working" => {
             answering.replace(None);
+            // How long this turn has gone, by the second.
+            let now = signal(now_ms());
+            set_interval(Duration::from_secs(1), move || now.set(now_ms()));
+            let working = move || match began.get() {
+                at if at > 0 && now.get() > at => t!("Working · {}", clock(now.get() - at)),
+                _ => t!("Working…").to_owned(),
+            };
             view()
                 .flex_row()
                 .items_center()
                 .gap(px(8.0))
                 .child(ui::glyph("spinner", 13.0, theme::WORKING).animate_spin())
-                .child(text(t!("Working…")).flex_shrink(0.0).text_size(theme::FOOTNOTE).text_color(theme::MUTED))
+                .child(text(working).flex_shrink(0.0).text_size(theme::FOOTNOTE).text_color(theme::MUTED))
                 .child(text(move || doing.get().unwrap_or_default()).flex_1().text_size(theme::CAPTION).font_family(theme::MONO).text_color(theme::DIM).number_of_lines(1))
                 .into_element()
         }
@@ -1291,10 +1562,47 @@ mod tests {
         Line { id: id.into(), said: Said::Stopped, at }
     }
 
+    fn said(id: &str, at: u64, said: Said) -> Line {
+        Line { id: id.into(), said, at }
+    }
+
+    fn step(id: &str) -> Said {
+        Said::Tools(vec![Call { id: id.into(), name: "bash".into(), said: "ls".into(), input: String::new(), diff: false, result: Some(String::new()), error: false }])
+    }
+
+    #[test]
+    fn a_turn_done_shows_its_last_words_and_its_way_there_folded() {
+        let s = 1000;
+        let turn = [
+            said("q", 10 * s, Said::You { text: "hi".into(), images: 0 }),
+            said("r1", 11 * s, Said::Reply("looking".into())),
+            said("t1", 12 * s, step("c1")),
+            said("t2", 13 * s, step("c2")),
+            said("r2", 130 * s, Said::Reply("done".into())),
+            said("h", 140 * s, Said::Told { from: Some("t32 ivy".into()), text: "ok".into() }),
+            said("r3", 150 * s, Said::Reply("thanks".into())),
+        ];
+        let keys = |open: &HashSet<String>, going| items(&turn, open, going).iter().map(Item::key).collect::<Vec<_>>();
+        assert_eq!(keys(&HashSet::new(), false), ["time:q", "q", "worked:r1", "r2", "h", "r3"]);
+        match &items(&turn, &HashSet::new(), false)[2] {
+            Item::Worked { steps, words, ms, open, .. } => assert_eq!((*steps, *words, *ms, *open), (2, 1, 120 * s, false)),
+            _ => panic!("not folded"),
+        }
+        // Opened, all of it is there, under its row.
+        let open = HashSet::from(["worked:r1".to_owned()]);
+        assert_eq!(keys(&open, false), ["time:q", "q", "worked:r1", "r1", "t1", "t2", "r2", "h", "r3"]);
+        // The turn going on is whole; the one before stays folded.
+        let going = [&turn[..], &[said("t3", 160 * s, step("c3"))]].concat();
+        let rows: Vec<String> = items(&going, &HashSet::new(), true).iter().map(Item::key).collect();
+        assert_eq!(rows, ["time:q", "q", "worked:r1", "r2", "h", "r3", "t3"]);
+        assert_eq!(clock(65_000), "1:05");
+        assert_eq!(clock(3_725_000), "1:02:05");
+    }
+
     #[test]
     fn the_time_is_said_first_and_where_much_of_it_passed() {
         let hour = 3_600_000;
-        let rows: Vec<String> = items(&[line("a", 10 * hour), line("b", 10 * hour + 60_000), line("c", 12 * hour), line("d", 0)]).iter().map(Item::key).collect();
+        let rows: Vec<String> = items(&[line("a", 10 * hour), line("b", 10 * hour + 60_000), line("c", 12 * hour), line("d", 0)], &HashSet::new(), false).iter().map(Item::key).collect();
         assert_eq!(rows, ["time:a", "a", "b", "time:c", "c", "d"]);
         assert_eq!(civil(0), (1970, 1, 1));
         assert_eq!(civil(20_406), (2025, 11, 14));

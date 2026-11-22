@@ -25,8 +25,13 @@ const INPUT: usize = 20000;
 /// One thing said, as the conversation shows it.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Said {
-    /// What the person (or another agent, through `hc send`) wrote.
+    /// What the person wrote.
     You { text: String, images: usize },
+    /// What came through hc (`<hc from="t32 ivy">…</hc>`): another
+    /// agent's words, `from` it (its address, maybe its name after); with
+    /// no `from`, hc's own news (an agent it started ended). Pi takes it
+    /// as the person's, and so does its tree.
+    Told { from: Option<String>, text: String },
     /// The agent's words, Markdown.
     Reply(String),
     /// Tools used one after another, between words.
@@ -179,7 +184,13 @@ impl Transcript {
         for (id, entry) in branch {
             let at = entry.at;
             match &entry.kind {
-                Kind::You { text, images } => out.push(Line { id, said: Said::You { text: text.clone(), images: *images }, at }),
+                Kind::You { text, images } => {
+                    let said = match told(text) {
+                        Some((from, text)) => Said::Told { from, text },
+                        None => Said::You { text: text.clone(), images: *images },
+                    };
+                    out.push(Line { id, said, at });
+                }
                 Kind::Answer { parts, failed, stopped } => {
                     for (i, part) in parts.iter().enumerate() {
                         match part {
@@ -202,7 +213,7 @@ impl Transcript {
                 }
                 Kind::Compacted => out.push(Line { id, said: Said::Compacted, at }),
                 // Once something was said: before, it is how it began.
-                Kind::Change(change) if out.iter().any(|l| matches!(l.said, Said::You { .. })) => out.push(Line { id, said: Said::Changed(change.clone()), at }),
+                Kind::Change(change) if out.iter().any(|l| matches!(l.said, Said::You { .. } | Said::Told { .. })) => out.push(Line { id, said: Said::Changed(change.clone()), at }),
                 Kind::Change(_) | Kind::Result { .. } | Kind::Other => {}
             }
         }
@@ -254,6 +265,60 @@ fn message(m: &Value) -> Kind {
         },
         _ => Kind::Other,
     }
+}
+
+/// Words hc brought, as `<hc from="…">words</hc>`: who from (None: hc
+/// itself), and the words.
+fn told(text: &str) -> Option<(Option<String>, String)> {
+    let rest = text.trim().strip_prefix("<hc")?;
+    let (attrs, body) = rest.split_once('>')?;
+    if !(attrs.is_empty() || attrs.starts_with(' ')) {
+        return None;
+    }
+    let body = body.strip_suffix("</hc>")?;
+    let from = attrs.split_once("from=\"").and_then(|(_, a)| a.split_once('"')).map(|(f, _)| f.trim().to_owned()).filter(|f| !f.is_empty());
+    Some((from, body.trim().to_owned()))
+}
+
+/// What Pi's status line (its last, under the field) says: how full its
+/// context is (`45.8%/400k`; None: not known yet), the model, how hard
+/// it thinks.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Footer {
+    pub used: Option<f32>,
+    pub window: String,
+    pub model: String,
+    pub thinking: Option<String>,
+}
+
+/// Pi's status line, off its screen: the line with `<used>%/<window>`
+/// (`?/<window>` before it knows), the model right of it (without its
+/// provider's path), `• <level>` after.
+pub fn footer(screen: &str) -> Option<Footer> {
+    // `45.8%/400k`: (Some(45.8), "400k"); `?/1.0M`: (None, "1.0M").
+    let context = |w: &str| {
+        let (used, window) = w.split_once('/')?;
+        let sized = window.ends_with(['k', 'M']) && window[..window.len() - 1].parse::<f32>().is_ok();
+        let used = if used == "?" { None } else { Some(used.strip_suffix('%')?.parse::<f32>().ok()?) };
+        sized.then(|| (used, window.to_owned()))
+    };
+    let (line, (used, window)) = screen.lines().rev().find_map(|l| Some((l, l.split_whitespace().find_map(context)?)))?;
+    let right = line.rsplit("   ").map(str::trim).find(|s| !s.is_empty() && !s.split_whitespace().any(|w| context(w).is_some())).unwrap_or_default();
+    let (model, thinking) = match right.split_once(" • ") {
+        Some((m, t)) => (m.trim(), Some(t.trim().to_owned()).filter(|t| !t.is_empty())),
+        None => (right, None),
+    };
+    Some(Footer {
+        used,
+        window,
+        model: model.rsplit('/').next().unwrap_or(model).to_owned(),
+        thinking,
+    })
+}
+
+/// What Pi's status line says now (None: it doesn't show one).
+pub async fn footer_of(there: &There, terminal: &str) -> Result<Option<Footer>, String> {
+    Ok(footer(&screen(there, terminal).await?))
 }
 
 /// What a tool was given, in a line: the command, the file, the search.
@@ -668,6 +733,25 @@ mod tests {
 
     fn input_of(name: &str, args: Value) -> String {
         input(name, &args).0
+    }
+
+    #[test]
+    fn what_hc_brought_is_told_apart_from_the_person_s_words() {
+        assert_eq!(told(r#"<hc from="t32 ivy">我是 ivy</hc>"#), Some((Some("t32 ivy".into()), "我是 ivy".into())));
+        assert_eq!(told("<hc from=\"t1q\" reach=\"hc send t1q when done\">go\nnow</hc>"), Some((Some("t1q".into()), "go\nnow".into())));
+        assert_eq!(told("<hc>t2r ops exited (exit 0). Read: hc read t2r</hc>"), Some((None, "t2r ops exited (exit 0). Read: hc read t2r".into())));
+        // Not one: words of the person that only mention it.
+        assert_eq!(told("what does <hc> mean?"), None);
+        assert_eq!(told("<hcx>a</hcx>"), None);
+    }
+
+    #[test]
+    fn pi_s_status_line_says_its_context_model_and_thinking() {
+        let screen = "  hi\n────\n\n────\n~/workspace/nova (main)\n↑230 ↓75k R11M W2.2M CH99.8% $21.260 45.8%/400k (auto)   remote-magpie/claude/claude-opus-5-5 • medium\n";
+        assert_eq!(footer(screen), Some(Footer { used: Some(45.8), window: "400k".into(), model: "claude-opus-5-5".into(), thinking: Some("medium".into()) }));
+        let fresh = "~/x\n?/1.0M   gpt-6-sol\n";
+        assert_eq!(footer(fresh), Some(Footer { used: None, window: "1.0M".into(), model: "gpt-6-sol".into(), thinking: None }));
+        assert_eq!(footer("$ ls\nREADME.md\n"), None);
     }
 
     #[test]

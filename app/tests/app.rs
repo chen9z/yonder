@@ -921,7 +921,7 @@ say() { printf '\033]7501;state=%s:app=pi\033\\' "$1"; }
 add() { n=$((n+1)); printf '{"type":"message","id":"e%s","parentId":"%s","timestamp":"2026-11-05T17:59:34.063Z","message":%s}\n' "$n" "$p" "$1" >> "$f"; p="e$n"; }
 you() { printf 'e%s|%s|%s\n' "$((n+1))" "$p" "$1" >> "$u"; add "{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"$1\"}]}"; }
 key() { dd bs=1 count=1 2>/dev/null; }
-field() { printf '%s\n\n%s\n' "$rule" "$rule"; }
+field() { printf '%s\n\n%s\n~/fake\n↑1 ↓2 12.5%%/400k (auto)   fake/model-x • high\n' "$rule" "$rule"; }
 show() {
   printf '\033[2J\033[H  Type to search:\n%s\n' "$rule"; i=0
   while IFS='|' read -r id par text; do i=$((i+1)); if [ "$i" = "$sel" ]; then m='›'; else m=' '; fi; printf '%s • user: %s\n' "$m" "$text"; done < "$u"
@@ -956,6 +956,7 @@ while IFS= read -r m; do
     ask) you ask; reply "Which one?"; say blocked; printf 'Pick one:\n> yes\n  no\n'; IFS= read -r a; reply Answered; say idle;;
     slow) stty -icanon -echo min 1 time 0; you slow; say working; dd bs=1 count=1 >/dev/null 2>&1; stty icanon echo; reply "" aborted; say idle;;
     /tree) tree;;
+    told) t='<hc from=\"t9 ivy\">all done</hc>'; printf 'e%s|%s|%s\n' "$((n+1))" "$p" "ivy" >> "$u"; add "{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"$t\"}]}"; reply "Thanks ivy";;
     /name\ *) printf '{"type":"session_info","id":"i%s","parentId":"%s","name":"%s"}\n' "$n" "$p" "${m#/name }" >> "$f";;
     *) you "$m"; say working
        add '{"role":"assistant","stopReason":"toolUse","content":[{"type":"toolCall","id":"c1","name":"bash","arguments":{"command":"echo hi"}}]}'
@@ -1020,7 +1021,13 @@ fn a_pi_main_agent_is_talked_to_as_a_conversation() {
     app.wait_for_within("text:Done with hello", SLOW).unwrap();
     app.wait_until("no longer waiting", SLOW, |s| s.count("text:Sending…") == Ok(0) && s.count("text:Sent") == Ok(0)).unwrap();
     app.wait_for("text:11/5 17:59").unwrap();
-    // Its step, whole, on a page of its own.
+    // Pi's status line over the field: model, thinking, context used.
+    app.wait_for_within("text:model-x · high", SLOW).unwrap();
+    app.wait_for("text:Context 13%").unwrap();
+    // The turn done: its last words, the way there folded; opened, its
+    // step, whole, on a page of its own.
+    assert_eq!(app.screen().count("label:bash echo hi"), Ok(0), "folded");
+    app.press("label:1 step").unwrap();
     app.press("label:bash echo hi").unwrap();
     app.wait_for_within("id:step-input", SLOW).unwrap();
     app.wait_for("text:echo hi").unwrap();
@@ -1087,6 +1094,17 @@ fn a_pi_main_agent_is_talked_to_as_a_conversation() {
     app.press("label:Send").unwrap();
     app.wait_for_within("text:Named “trip”", SLOW).unwrap();
     assert_eq!(app.screen().count("text:/name trip"), Ok(0), "not a message of yours");
+
+    // Another agent's words, through hc: on the left, from it, not as
+    // the person's.
+    runtime.block_on(async {
+        let core = session.connect().await;
+        core.call("terminal.send", serde_json::json!({ "terminal": address, "text": "told" })).await.unwrap();
+    });
+    app.wait_for_within("text:Thanks ivy", SLOW).unwrap();
+    app.wait_for("id:told").unwrap();
+    app.wait_for("text:From ivy").unwrap();
+    assert_eq!(app.screen().count("text:<hc from=\"t9 ivy\">all done</hc>"), Ok(0), "not the person's bubble");
 
     // Asking while the person is elsewhere: a note at the top says so,
     // and a tap on it is its conversation again.

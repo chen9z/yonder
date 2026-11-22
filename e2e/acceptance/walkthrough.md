@@ -131,8 +131,15 @@ it with the screenshot's name and go on.
 7b. If a Pi agent is the main one (don't send it anything): its tab shows
    a conversation, not a terminal: the person's words in grey bubbles on
    the right, its replies set as Markdown, tools between them as one line
-   ("N steps · bash, read"); press one: it opens on each step; press a
-   step: a page with what it ran and gave back. Back. At the top right a
+   ("N steps · bash, read"). A turn done shows its last reply; what came
+   before it is one line, "Worked N min · M steps": press it, it opens,
+   press it again, it folds. Press a steps line: it opens on each step;
+   press a step: a page with what it ran and gave back. Back. Words
+   another agent sent it are on the left in a bordered card, "From
+   ivy" and its icon over them, no `<hc …>` tags. Over the field a
+   small line: the model · thinking, and "Context N%" with a short bar
+   (amber past 70%, red past 90%); gone while the keyboard is up. While
+   it works, the bottom says "Working · 0:12", counting up. At the top right a
    terminal icon shows the terminal, and then a bubble icon the
    conversation again. Left of the field an image icon; an ↑ on the
    right (a ■ instead while it works and nothing is written: don't press
