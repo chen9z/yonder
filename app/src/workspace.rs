@@ -7,7 +7,7 @@ use crate::live::Live;
 use crate::nav::{self, Route};
 use crate::terminal::{terminal, Swipes};
 use crate::{agents, menu, theme, ui};
-use herdc_engine::{rects, AgentView, Link, PaneView, Rect, TabView};
+use herdc_engine::{rects, Link, PaneView, Rect, TabView};
 use nsh_core::prelude::*;
 
 /// Wide enough to show a tab's split.
@@ -155,13 +155,11 @@ fn header(
 
 /// How many agents in other spaces wait for the person, and what they
 /// wait as: needing you before done.
+/// Those in this space's panes are shown here; the rest count (a
+/// sub-agent without a pane too, whoever started it).
 fn waiting_elsewhere(v: &herdc_engine::View) -> (usize, &'static str) {
-    let elsewhere = |a: &&AgentView| v.active_space().is_none_or(|s| s.id != a.space);
-    let count = |status: &str| v.agents.iter().filter(elsewhere).filter(|a| a.status == status).count();
-    match count("blocked") {
-        0 => (count("done"), "done"),
-        blocked => (blocked, "blocked"),
-    }
+    let here = v.active_space().map(|s| s.id.as_str());
+    crate::agents::waiting(v, |address| v.agents.iter().any(|a| a.address == address && Some(a.space.as_str()) == here))
 }
 
 /// A tab's menu, as the desktop's tab bar offers it.

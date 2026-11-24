@@ -7,7 +7,7 @@ use crate::nav::{self, Route};
 use crate::{theme, ui};
 use herdc_engine::tools::files::{self, Listing, Preview, PER_FOLDER, TOTAL};
 use herdc_engine::tools::Place;
-use nsh_base::{editor, text_view, EditorScrollBeyond};
+use nsh_base::{editor, text_view, EditorScrollBeyond, TextViewLinks};
 use nsh_core::element::Screen;
 use nsh_core::prelude::*;
 use std::collections::{BTreeSet, HashMap};
@@ -309,6 +309,7 @@ pub fn file_page(live: Live, place: Place, path: String, line: Option<u32>) -> S
                     text_view()
                         .markdown(code)
                         .selectable(true)
+                        .links(TextViewLinks::Open)
                         .gap_3()
                         .p(px(16.0))
                         .text_size(theme::ROW)

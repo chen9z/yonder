@@ -53,8 +53,9 @@ fn space_of<'a>(v: &'a herdc_engine::View, t: &Value, depth: usize) -> Option<&'
     space_of(v, v.terminals.iter().find(|o| o["address"] == parent)?, depth + 1)
 }
 
-/// Every live terminal, as the list says it, in its order.
-fn found(v: &herdc_engine::View, computer: &str) -> Vec<Found> {
+/// Every live terminal, as the list says it, in its order: another
+/// machine's by the name the person gave it (`named`).
+fn found(v: &herdc_engine::View, computer: &str, named: impl Fn(&str) -> String) -> Vec<Found> {
     let mut out: Vec<Found> = v
         .terminals
         .iter()
@@ -69,7 +70,8 @@ fn found(v: &herdc_engine::View, computer: &str) -> Vec<Found> {
             let doing = if telling { title } else { t["name"].as_str().map_or_else(|| program.to_owned(), str::to_owned) };
             let tab = t["where"].as_str().or(t.pointer("/labels/where").and_then(Value::as_str)).and_then(|w| w.split_once(" / ")).map(|(_, tab)| tab.to_owned());
             let helper = t["parent"].as_str().is_some_and(|p| !p.is_empty());
-            let machine = address.split_once('/').map_or(computer, |(m, _)| m).to_owned();
+            // Found by its given name and by its own.
+            let (machine, own) = address.split_once('/').map_or_else(|| (computer.to_owned(), ""), |(m, _)| (named(m), m));
             let under = [tab.filter(|_| !helper), Some(machine)].into_iter().flatten().collect::<Vec<_>>().join(" · ");
             let status = match t["status"].as_str() {
                 Some("working") => Some("working"),
@@ -80,7 +82,7 @@ fn found(v: &herdc_engine::View, computer: &str) -> Vec<Found> {
             };
             let in_pane = v.spaces.iter().flat_map(|s| &s.tabs).flat_map(|t| &t.panes).any(|p| [&p.terminal, &p.shown].iter().any(|t| t.as_deref() == Some(address.as_str())));
             let cwd = t["cwd"].as_str().unwrap_or_default();
-            let hay = format!("{space_name} {doing} {program} {under} {cwd} {}", t["name"].as_str().unwrap_or_default()).to_lowercase();
+            let hay = format!("{space_name} {doing} {program} {under} {own} {cwd} {}", t["name"].as_str().unwrap_or_default()).to_lowercase();
             Some(Found { address, space, space_name, doing, under, helper, status, program: t["program"].clone(), in_pane, hay })
         })
         .collect();
@@ -98,13 +100,13 @@ fn matches(f: &Found, query: &str) -> bool {
 pub fn search_page(live: Live) -> nsh_core::element::Screen {
     let query = signal(String::new());
     let computer = live.computer.name.clone();
-    let all = {
-        let world = live.view;
-        computed(move || world.with(|v| found(v, &computer)))
-    };
-    let shown = computed(move || query.with(|q| all.with(|a| a.iter().filter(|f| matches(f, q)).cloned().collect::<Vec<_>>())));
     let prefs = use_context::<crate::prefs::Prefs>().expect("prefs");
     let id = live.computer.id();
+    let all = {
+        let (world, id) = (live.view, id.clone());
+        computed(move || world.with(|v| found(v, &computer, |m| prefs.machine_name(&id, m))))
+    };
+    let shown = computed(move || query.with(|q| all.with(|a| a.iter().filter(|f| matches(f, q)).cloned().collect::<Vec<_>>())));
     ui::page(t!("Jump to a terminal")).child(
         view()
             .flex_1()
@@ -134,7 +136,23 @@ pub fn search_page(live: Live) -> nsh_core::element::Screen {
                                 .return_key_type(ReturnKeyType::Search)
                                 .text_size(theme::BODY)
                                 .text_color(theme::FOREGROUND),
-                        ),
+                        )
+                        // Written in: a tap clears it, the keyboard stays.
+                        .child(when(move || query.with(|q| !q.is_empty()), move || {
+                            view()
+                                .w(px(36.0))
+                                .h(px(36.0))
+                                .mr(px(-6.0))
+                                .rounded(px(18.0))
+                                .items_center()
+                                .justify_center()
+                                .active(|s| s.bg(theme::HOVER))
+                                .role(AccessibilityRole::Button)
+                                .label(t!("Clear"))
+                                .test_id("clear-search")
+                                .on_press(move || query.set(String::new()))
+                                .child(ui::glyph("x", 15.0, theme::DIM))
+                        })),
                 ),
             )
             .child(
@@ -220,10 +238,15 @@ mod tests {
         let mut with_spaces = view.clone();
         with_spaces.spaces = vec![serde_json::from_value(space).unwrap()];
         with_spaces.terminals.push(json!({"address": "vps/t4", "parent": "vps/t2", "state": "live", "title": "Check it | b"}));
-        let named: Vec<_> = super::found(&with_spaces, "pc").into_iter().map(|f| (f.address, f.space_name, f.doing)).collect();
+        let named: Vec<_> = super::found(&with_spaces, "pc", |m| m.to_owned()).into_iter().map(|f| (f.address, f.space_name, f.doing)).collect();
         assert!(named.contains(&("vps/t2".into(), "b".into(), "Fix the build".into())), "{named:?}");
         assert!(named.contains(&("vps/t4".into(), "b".into(), "Check it".into())), "{named:?}");
-        let found = super::found(&view, "pc");
+        let found = super::found(&view, "pc", |m| m.to_owned());
+        // Another machine by the name given to it: shown so, found so.
+        let renamed = super::found(&view, "pc", |m| if m == "vps" { "Cloud box".into() } else { m.to_owned() });
+        assert_eq!(renamed[0].under, "2 · Cloud box");
+        assert!(super::matches(&renamed[0], "cloud"));
+        assert!(super::matches(&renamed[0], "vps"));
         assert_eq!(found.iter().map(|f| (f.address.as_str(), f.doing.as_str(), f.under.as_str())).collect::<Vec<_>>(), [("vps/t2", "Fix the build", "2 · vps"), ("t1", "zsh", "1 · pc")]);
         assert!(super::matches(&found[1], "home/me ZSH"));
         assert!(!super::matches(&found[1], "codex"));

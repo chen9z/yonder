@@ -33,6 +33,9 @@ const FOLDER_FALLBACK: Duration = Duration::from_secs(60);
 /// the screen that started it is writing its layout meanwhile, and two
 /// screens racing to place it would lose that screen's names.
 const ADOPT_AFTER: Duration = Duration::from_secs(1);
+/// How soon the machines may be asked for again (but when connected, or
+/// back in front).
+const MACHINES_AGAIN: Duration = Duration::from_secs(2);
 
 struct FolderCheck {
     at: Instant,
@@ -115,6 +118,9 @@ pub(crate) struct State {
     /// Since when a labeled terminal has been without a pane here.
     orphaned: HashMap<String, Instant>,
     checking_closed: bool,
+    /// `machine.list` asked and not answered yet, and when last asked.
+    machines_asking: bool,
+    machines_asked: Option<Instant>,
     listed_once: bool,
     /// The person has the app in front.
     pub(crate) active: bool,
@@ -172,6 +178,8 @@ impl State {
             born: HashMap::new(),
             orphaned: HashMap::new(),
             checking_closed: false,
+            machines_asking: false,
+            machines_asked: None,
             listed_once: false,
             active: true,
             looking: None,
@@ -247,6 +255,8 @@ impl State {
         self.watching = false;
         self.events = None;
         (self.spawning, self.checking_closed) = (0, false);
+        // An answer from the line before never comes.
+        self.machines_asking = false;
         self.changing.clear();
         self.core = Some(core.clone());
         let _ = self.out.clients.send(Some(core));
@@ -289,9 +299,14 @@ impl State {
                 if all || named { slot.invalidate(); }
             }
         }
+        // A terminal changed: a machine may have come or gone. Asked only
+        // while someone looks, and not again within `MACHINES_AGAIN` (an
+        // agent's title spins many times a second); the tick asks too.
         if pushed.terminals {
             self.events_changed();
-            self.ask_machines();
+            if self.active && self.machines_asked.is_none_or(|at| at.elapsed() >= MACHINES_AGAIN) {
+                self.ask_machines();
+            }
         }
     }
 
@@ -315,19 +330,27 @@ impl State {
         }
         self.ticks += 1;
         // Machines send no events: asked now and then, while someone looks.
-        if self.active && self.ticks.is_multiple_of(5) {
+        if self.active && self.ticks.is_multiple_of(5) && self.machines_asked.is_none_or(|at| at.elapsed() >= MACHINES_AGAIN) {
             self.ask_machines();
         }
         self.tend_terminals(false);
     }
 
+    /// Asks the core for its machines, one ask at a time.
     pub(crate) fn ask_machines(&mut self) {
+        if self.machines_asking {
+            return;
+        }
         let Ok(core) = self.client() else { return };
-        self.later(async move { core.call("machine.list", json!({})).await }, |s, r| match r {
-            Ok(machines) => {
-                s.documents_updated(Some(machines), vec![]);
+        (self.machines_asking, self.machines_asked) = (true, Some(Instant::now()));
+        self.later(async move { core.call("machine.list", json!({})).await }, |s, r| {
+            s.machines_asking = false;
+            match r {
+                Ok(machines) => {
+                    s.documents_updated(Some(machines), vec![]);
+                }
+                Err(e) => tracing::warn!("machine.list: {e}"),
             }
-            Err(e) => tracing::warn!("machine.list: {e}"),
         });
     }
 

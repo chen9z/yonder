@@ -80,8 +80,10 @@ it with the screenshot's name and go on.
    "Add"; a field `user@host` below. Back, then tap the space to return.
 5a. Home's 🔍 (Jump to a terminal): a field over every terminal, each
    row the space's name in bold, what it does after it, its tab under.
-   Type `zzz`: "No terminal is called that". Clear it, type the space's
-   name: its terminal stays; tap it: the workspace, on that terminal.
+   Type `zzz`: "No terminal is called that"; an ✕ at the right of the
+   field: press it, the field is empty, the keyboard still up. Type the
+   space's name: its terminal stays; tap it: the workspace, on that
+   terminal. A machine you renamed shows by its new name.
 6. Settings (in More): its rows sit on rounded cards under small headings
    (COMPUTER, TERMINAL, GENERAL, THIS PHONE'S KEY, ABOUT), each row with a
    line icon, and Leave this computer (red) alone on the last card.

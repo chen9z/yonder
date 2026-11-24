@@ -608,7 +608,8 @@ async fn follow(live: Live, address: String, r: Reading) {
         let now = (turn, word.clone(), again.get_untracked());
         let every = if word == "working" { WORKING } else { RESTING };
         let due = now != seen || last.elapsed() >= every;
-        let shown = lifecycle() == nsh_core::platform::Lifecycle::Active;
+        // Read only while looked at: the app in front, nothing over it.
+        let shown = lifecycle() == nsh_core::platform::Lifecycle::Active && nav::routes().with_untracked(|r| r.0.is_empty());
         if due && shown && let Ok(there) = live.there(on.clone()) {
             seen = now;
             last = Instant::now();
@@ -650,7 +651,9 @@ async fn follow(live: Live, address: String, r: Reading) {
                         if first || !got.text.is_empty() {
                             read.take(&got);
                             let now = read.lines();
-                            if !first {
+                            // Not when a page came over it meanwhile: that
+                            // page's changes would move smoothly too.
+                            if !first && nav::routes().with_untracked(|r| r.0.is_empty()) {
                                 ui::smoothly();
                             }
                             lines.set(now);
@@ -1356,13 +1359,21 @@ fn diff(input: &str) -> View {
 /// How the agent is now, under what it said: working (on what), or
 /// asking something in its terminal: the question, as it shows there,
 /// with the keys to answer it.
+///
+/// A page over it, nothing: no clock ticking, no terminal attached for
+/// a question nobody sees.
 fn state(live: Live, address: String, status: Memo<&'static str>, doing: Memo<Option<String>>, began: Memo<u64>, name: String, answering: Stored<Option<Rc<Viewer>>>) -> impl IntoElement {
-    dynamic(move || match status.get() {
+    let covered = computed(|| nav::routes().with(|r| !r.0.is_empty()));
+    dynamic(move || match if covered.get() { "" } else { status.get() } {
         "working" => {
             answering.replace(None);
             // How long this turn has gone, by the second.
             let now = signal(now_ms());
-            set_interval(Duration::from_secs(1), move || now.set(now_ms()));
+            set_interval(Duration::from_secs(1), move || {
+                if lifecycle() == nsh_core::platform::Lifecycle::Active {
+                    now.set(now_ms());
+                }
+            });
             let working = move || match began.get() {
                 at if at > 0 && now.get() > at => t!("Working · {}", clock(now.get() - at)),
                 _ => t!("Working…").to_owned(),

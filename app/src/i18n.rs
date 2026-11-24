@@ -236,6 +236,7 @@ fn zh(en: &str) -> Option<&'static str> {
         "Working · {}" => "正在工作 · {}",
         "From {}" => "{} 发来",
         "Show all" => "展开全部",
+        "Clear" => "清空",
         "Context {}%" => "上下文 {}%",
         "Context {}% used" => "上下文已用 {}%",
         "(no result yet)" => "（还没有结果）",

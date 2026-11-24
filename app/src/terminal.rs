@@ -402,7 +402,8 @@ fn shown(engine: Engine, address: String, swipes: Swipes, talk: Option<String>) 
             let viewer = viewer.clone();
             move || {
                 hardware_keys(viewer.clone());
-                key_bar(viewer.clone(), latch, writing)
+                // Talked to from the field under it: no sheet to write in.
+                key_bar(viewer.clone(), latch, (!talks).then_some(writing))
             }
         }))
         .child(match talk {
@@ -1167,7 +1168,7 @@ pub fn text_page(live: crate::live::Live, words: Arc<String>) -> nsh_core::eleme
 
 /// The keys a phone keyboard lacks: Enter at one end, Hide keyboard at
 /// the other, the chosen ones scrolling between.
-fn key_bar(viewer: Rc<Viewer>, latch: Latch, writing: Signal<bool>) -> impl IntoElement {
+fn key_bar(viewer: Rc<Viewer>, latch: Latch, writing: Option<Signal<bool>>) -> impl IntoElement {
     let enter_viewer = viewer.clone();
     let keys = use_context::<Prefs>().expect("prefs").keys;
     view()
@@ -1196,7 +1197,10 @@ fn key_bar(viewer: Rc<Viewer>, latch: Latch, writing: Signal<bool>) -> impl Into
                 ),
         )
         .child(view().w(px(1.0)).h(px(24.0)).bg(theme::BORDER))
-        .child(bar_key("✎", move || writing.set(true)))
+        .child(match writing {
+            Some(writing) => bar_key("✎", move || writing.set(true)).into_element(),
+            None => view().into_element(),
+        })
         .child(bar_key("⌄", dismiss_keyboard))
 }
 

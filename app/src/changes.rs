@@ -38,7 +38,7 @@ pub fn changes_page(live: Live, place: Place) -> Screen {
                     }
                     Some(Err(e)) => {
                         found.set(None);
-                        error.set(Some(e));
+                        error.set(Some(crate::i18n::tr_string(&e)));
                     }
                     None => {}
                 }
@@ -65,14 +65,18 @@ pub fn changes_page(live: Live, place: Place) -> Screen {
             if words.trim().is_empty() || busy.get_untracked() {
                 return;
             }
-            let Ok(there) = live.there(place.on.clone()) else { return };
+            let there = match live.there(place.on.clone()) {
+                Ok(there) => there,
+                // Away from the computer: said, not nothing.
+                Err(e) => return note.set(Some(crate::i18n::tr_string(&e))),
+            };
             busy.set(true);
             note.set(None);
             let rescan = rescan.clone();
             spawn(async move {
                 match off(async move { changes::commit(&there, &root, &words).await }).await {
                     Some(Ok(())) => message.set(String::new()),
-                    Some(Err(e)) => note.set(Some(e)),
+                    Some(Err(e)) => note.set(Some(crate::i18n::tr_string(&e))),
                     None => {}
                 }
                 busy.set(false);
@@ -236,6 +240,8 @@ fn commit_bar(message: Signal<String>, busy: Signal<bool>, commit: impl Fn() + C
 /// A changed file's diff; the file before or after it a tap away.
 pub fn diff_page(live: Live, place: Place, changes: Arc<Changes>, at: usize) -> Screen {
     let lines = signal(None::<Vec<Line>>);
+    // Why it can't be read (not connected), else it is on its way.
+    let failed = signal(None::<String>);
     let file = changes.files.get(at).cloned();
     let title = file.as_ref().map(|f| f.path.rsplit('/').next().unwrap_or_default().to_owned()).unwrap_or_default();
     let font = use_context::<crate::prefs::Prefs>().expect("prefs").font.get_untracked();
@@ -259,7 +265,10 @@ pub fn diff_page(live: Live, place: Place, changes: Arc<Changes>, at: usize) -> 
         .child(turn("chevron-right", t!("Next file"), (at + 1 < total).then_some(at + 1)));
     if let Some(file) = file {
         spawn(async move {
-            let Ok(there) = live.there(place.on.clone()) else { return lines.set(Some(Vec::new())) };
+            let there = match live.there(place.on.clone()) {
+                Ok(there) => there,
+                Err(e) => return failed.set(Some(crate::i18n::tr_string(&e))),
+            };
             if let Some(read) = off(async move { changes::diff(&there, &changes, &file).await }).await {
                 lines.set(Some(read));
             }
@@ -288,7 +297,7 @@ pub fn diff_page(live: Live, place: Place, changes: Arc<Changes>, at: usize) -> 
                 )
             })
             .estimated_item_size(px(18.0))
-            .empty(view().p(px(32.0)).items_center().child(text(t!("Loading diff…")).text_size(theme::ROW).text_color(theme::MUTED)))
+            .empty(view().p(px(32.0)).items_center().child(text(move || failed.get().unwrap_or_else(|| t!("Loading diff…").to_owned())).text_size(theme::ROW).text_color(theme::MUTED)))
             // The last line clears the system's bar.
             .footer(view().h(move || px(safe_area().bottom.0)))
             .flex_1(),

@@ -41,13 +41,20 @@ pub fn shown() -> Signal<Home> {
 pub fn home_page(live: Live) -> impl IntoElement {
     let tab = shown();
     let world = live.view;
-    // Agents that need you, else that are done, in the color of what they are.
-    let waiting = computed(move || {
-        world.with(|v| match v.agents.iter().filter(|a| a.status == "blocked").count() {
-            0 => (v.agents.iter().filter(|a| a.status == "done").count(), "done"),
-            blocked => (blocked, "blocked"),
+    // Agents that need you, else that are done, in the color of what they
+    // are, as the Agents list counts them; on the main agent's page, the
+    // others (it and its team show there).
+    let waiting = computed(move || world.with(|v| agents::waiting(v, |_| false)));
+    let others = {
+        let found = lead::found(&live);
+        computed(move || {
+            let lead = found.with(|f| f.as_ref().map(|l| l.address.clone()));
+            world.with(|v| {
+                let team: Vec<String> = lead.iter().flat_map(|l| agents::subs(&v.terminals, l)).map(|s| s.address).collect();
+                agents::waiting(v, |a| lead.as_deref() == Some(a) || team.iter().any(|t| t == a))
+            })
         })
-    });
+    };
     let spaces_live = live.clone();
     // Reordering the spaces: their handles show, and Done ends it.
     let reorder = signal(false);
@@ -87,7 +94,7 @@ pub fn home_page(live: Live) -> impl IntoElement {
         .bg(theme::CHROME)
         .pl(move || safe_area().left)
         .pr(move || safe_area().right)
-        .child(top_bar(bar.clone(), tab, reorder, waiting))
+        .child(top_bar(bar.clone(), tab, reorder, others))
         .child(workspace::link_banner(live.clone()))
         .child(dynamic(move || match tab.get() {
             Home::Lead => lead::lead_page(shown_live.clone()).into_element(),

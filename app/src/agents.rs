@@ -45,6 +45,35 @@ pub fn listed(agents: &[AgentView], terminals: &[Value]) -> Vec<AgentView> {
     agents.iter().filter(|a| a.pinned || !nested.contains(&a.address)).cloned().collect()
 }
 
+/// How many need the person (else how many are done), as the list
+/// counts them: each agent with a row and the sub-agents under it, each
+/// terminal once (a pinned sub-agent has a row too); those at addresses
+/// `skip` says (shown already) left out. A done sub-agent is idle.
+pub fn waiting(v: &herdc_engine::View, skip: impl Fn(&str) -> bool) -> (usize, &'static str) {
+    let listed = listed(&v.agents, &v.terminals);
+    let mut seen = std::collections::HashSet::new();
+    let mut counted = |address: &str| !skip(address) && seen.insert(address.to_owned());
+    let (mut blocked, mut done) = (0, 0);
+    // Rows first: a pinned sub-agent counts as its row does (done too).
+    for a in &listed {
+        if counted(&a.address) {
+            blocked += usize::from(a.status == "blocked");
+            done += usize::from(a.status == "done");
+        }
+    }
+    for a in &listed {
+        for s in listed_subs(&v.terminals, &v.agents, &a.address) {
+            if counted(&s.address) {
+                blocked += usize::from(s.status == Some("blocked"));
+            }
+        }
+    }
+    match blocked {
+        0 => (done, "done"),
+        blocked => (blocked, "blocked"),
+    }
+}
+
 /// A line of the list: a group's heading, an agent, or a sub-agent under it.
 #[derive(Clone, Debug, PartialEq)]
 enum Line {
@@ -846,6 +875,36 @@ mod tests {
         serde_json::from_value(json!({ "address": "t1", "pane": "p1", "space": "s1", "space_name": "Project", "machine": null,
             "tab": "tab", "tab_index": 1, "tab_name": "1", "status": "working", "app": null, "program": {},
             "title": "", "seq": 1, "pinned": false, "focused": false })).unwrap()
+    }
+
+    #[test]
+    fn waiting_counts_each_terminal_once_and_not_those_shown() {
+        let mut lead = agent();
+        lead.status = "blocked";
+        // A sub-agent in a pane of its own, pinned: a row too, counted once.
+        let mut kept = agent();
+        (kept.address, kept.space, kept.status, kept.pinned) = ("t2".into(), "s2".into(), "blocked", true);
+        let mut done = agent();
+        (done.address, done.space, done.status) = ("t3".into(), "s2".into(), "done");
+        let terminals = vec![
+            json!({"address": "t2", "parent": "t1", "state": "live", "status": "blocked"}),
+            json!({"address": "t4", "parent": "t1", "state": "live", "status": "blocked"}),
+        ];
+        let view = herdc_engine::View { agents: vec![lead, kept, done], terminals, ..Default::default() };
+        assert_eq!(super::waiting(&view, |_| false), (3, "blocked"));
+        // The main agent's page: it and its team shown there.
+        assert_eq!(super::waiting(&view, |a| ["t1", "t2", "t4"].contains(&a)), (1, "done"));
+        // A space's page: its panes shown, a sub-agent without one not.
+        assert_eq!(super::waiting(&view, |a| a == "t1"), (2, "blocked"));
+        // A pinned sub-agent done counts as done, wherever its space is.
+        let mut view = view;
+        view.terminals.truncate(1);
+        view.terminals[0]["status"] = json!("done");
+        view.agents[0].status = "idle";
+        view.agents[1].status = "done";
+        assert_eq!(super::waiting(&view, |_| false), (2, "done"));
+        view.agents.swap(0, 1);
+        assert_eq!(super::waiting(&view, |_| false), (2, "done"));
     }
 
     #[test]
