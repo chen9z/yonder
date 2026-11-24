@@ -147,9 +147,8 @@ it with the screenshot's name and go on.
    at the end. If "Show earlier messages" is at the top, press it: older
    lines show above and the screen stays where it was. Times show between
    lines far apart. No tabs at the bottom; the ‹ at the top left carries
-   the count of agents waiting. Drag the lines up (reading on): the header
-   and the agents above go, the status bar stays; drag back a little, or
-   tap just under the status bar: they come back. Turn the phone sideways
+   the count of agents waiting. Drag the lines up: the header and the
+   agents above stay where they are. Turn the phone sideways
    on "Agents": the tabs at the bottom are lower, without words; turn it
    back.
 7c. Still in that conversation (send nothing): the field says "Message

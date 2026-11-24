@@ -47,45 +47,6 @@ impl Default for Talking {
     }
 }
 
-/// Reading the conversation down: the bars around it (the header, the
-/// agents it works with, the tabs) out of the way. The status bar stays:
-/// hidden, Android leaves its strip black (the camera's), not the app's.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct Immersed(pub bool);
-
-pub fn reading() -> Signal<Immersed> {
-    global::<Immersed>()
-}
-
-/// The bars go, or come back, smoothly.
-pub fn read(on: bool) {
-    if reading().get_untracked().0 != on {
-        ui::smoothly();
-        reading().set(Immersed(on));
-    }
-}
-
-/// A finger's run one way, in points (down the conversation: more), once
-/// it moved by `dy` more: turning back starts another.
-fn run(was: f32, dy: f32) -> f32 {
-    if dy == 0.0 || was == 0.0 || dy.signum() == was.signum() { was + dy } else { dy }
-}
-
-/// What a run does to the bars, at `y` from the top: read on past
-/// `BARS_AFTER`, they go; back as far, or at the top, they come.
-fn bars(reading: bool, run: f32, y: f32) -> Option<bool> {
-    if y <= 0.0 || (reading && run <= -BARS_AFTER) {
-        reading.then_some(false)
-    } else if !reading && run >= BARS_AFTER {
-        Some(true)
-    } else {
-        None
-    }
-}
-
-/// How far a finger reads one way before the bars move.
-const BARS_AFTER: f32 = 24.0;
-
 pub fn talking() -> Signal<Talking> {
     global::<Talking>()
 }
@@ -320,9 +281,6 @@ pub fn chat(live: Live, address: String, name: String) -> impl IntoElement {
     // more under it unseen. Earlier lines put in above keep the place:
     // the height and offset before.
     let stuck = stored(true);
-    // A finger on the list (or its fling): where it was, and its run.
-    let dragged = stored(false);
-    let moved = stored((0.0f32, 0.0f32));
     let away = signal(false);
     let unseen = signal(false);
     let offset = stored(0.0f32);
@@ -539,19 +497,8 @@ pub fn chat(live: Live, address: String, name: String) -> impl IntoElement {
                             .flex_1()
                             .element_ref(&list)
                             .keyboard_dismiss_mode(KeyboardDismissMode::OnDrag)
-                            .on_scroll_drag_start(move |_: &Point<Points>| { dragged.replace(true); })
-                            .on_scroll_end(move |_: &Point<Points>| { dragged.replace(false); })
                             .on_scroll(move |e: &ScrollEvent| {
                                 offset.replace(e.offset.y.0);
-                                // Only the person's reading moves the bars, not
-                                // the list kept at the end as it grows.
-                                let (y, (last, was)) = (e.offset.y.0, moved.get());
-                                let now = if dragged.get() { run(was, y - last) } else { 0.0 };
-                                moved.replace((y, now));
-                                if let Some(on) = bars(reading().get_untracked().0, now, y) {
-                                    read(on);
-                                    moved.replace((y, 0.0));
-                                }
                                 let end = e.offset.y.0 + e.size.height.0 >= e.content_size.height.0 - NEAR_END;
                                 stuck.replace(end);
                                 if away.get_untracked() == end {
@@ -1550,21 +1497,6 @@ fn utc_offset(_: i64) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn reading_on_puts_the_bars_away_and_back_brings_them() {
-        // Down a little at a time: one run, past 24 pt they go.
-        assert_eq!(run(run(10.0, 10.0), 10.0), 30.0);
-        assert_eq!(bars(false, 20.0, 400.0), None);
-        assert_eq!(bars(false, 30.0, 400.0), Some(true));
-        // Turned back: a new run; as far back, they come.
-        assert_eq!(run(30.0, -5.0), -5.0);
-        assert_eq!(bars(true, -10.0, 400.0), None);
-        assert_eq!(bars(true, -30.0, 400.0), Some(false));
-        // At the top they are there, whatever the run.
-        assert_eq!(bars(true, 30.0, 0.0), Some(false));
-        assert_eq!(bars(false, 30.0, 0.0), None);
-    }
 
     fn line(id: &str, at: u64) -> Line {
         Line { id: id.into(), said: Said::Stopped, at }

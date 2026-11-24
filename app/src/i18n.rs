@@ -164,7 +164,6 @@ fn zh(en: &str) -> Option<&'static str> {
         "The computer didn't answer in time" => "电脑太久没有回应",
         "Type a branch name." => "输入一个分支名。",
         "Notes" => "提醒",
-        "Show the bars" => "显示顶栏和标签栏",
         "Important only" => "只提醒要紧的",
         "All" => "全部",
         "Off" => "不弹出",
