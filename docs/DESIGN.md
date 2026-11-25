@@ -131,7 +131,7 @@ core 能力和内置 mods 的功能全部复刻，界面按手机重新设计；
 - **tab 名字**：没起名的 tab 显示它里面 agent 的标题，不再只是一个数字；起了名的照旧。
 - **密钥存放**：保存的密码和手机的 ed25519 私钥用 Android Keystore 里的 AES-GCM 密钥加密后再放进 NSH 的 Storage（`app/src/vault.rs`，JNI 调 `javax.crypto`）。Keystore 的密钥不出手机，所以备份或拷走的数据打不开；打不开时再要一次密码。NSH 生成的 manifest 带 `allowBackup`，改不了，所以靠加密而不是关备份。
   Android 12 以前拿不到 JVM，改用 app 自己的 AES-256-GCM 密钥（`ring`），放在 `no_backup` 目录、权限 0600，备份和换机迁移都不带它（前缀 `aside1:`）。
-- **打包**：`app/apk.sh`（`--install` 顺带装到手机）：只打 arm64-v8a，fat LTO，用 `~/.config/herdc/release.jks` 正式签名（密码在 macOS 钥匙串 `herdc-release-keystore`）；签名不可用时停止，只有显式 `--debug` 才使用调试签名。名字 Yonder（包名 `dev.yonder.app`；以前叫 Herdr / `dev.herdc.app`，换包名不能覆盖升级）。桌面图标（`app/icon.png`）为深色底上的米白色终端笑脸和橙色状态点。仓库和 crate 仍叫 herdc，用户看不到。
+- **打包**：`app/apk.sh`（`--install` 顺带装到手机）：只打 arm64-v8a，fat LTO，`--remap-path-prefix` 把源码路径里的家目录换成 `~`（panic 信息带源文件路径，不然包里有本机用户名），用 `~/.config/herdc/release.jks` 正式签名（密码在 macOS 钥匙串 `herdc-release-keystore`）；签名不可用时停止，只有显式 `--debug` 才使用调试签名。名字 Yonder（包名 `dev.yonder.app`；以前叫 Herdr / `dev.herdc.app`，换包名不能覆盖升级）。桌面图标（`app/icon.png`）为深色底上的米白色终端笑脸和橙色状态点。仓库和 crate 仍叫 herdc，用户看不到。
   build 号由 `app/build-number` 或 `HERDC_BUILD` 指定，和提交号一起编进 app，设置 → 关于里显示；更新记录在 `CHANGELOG.md`。
   nsh-base 保留默认的 `highlight` 功能，文件查看器按文件名提供语法高亮。
 - **诊断信息**：设置 → 关于 → 复制诊断信息：版本、系统、偏好、密钥怎么存的、电脑地址和用户、线路和各机器的状态、数量。不含密码和密钥。

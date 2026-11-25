@@ -3,6 +3,8 @@
 # Increment build-number for each distributed release, independently of Git.
 set -eu
 export CARGO_PROFILE_RELEASE_LTO=fat CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
+# Panic messages name their source files: this machine's paths stay out.
+export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }--remap-path-prefix=$HOME=~"
 cd "$(dirname "$0")"
 . ../env.sh
 install=false
