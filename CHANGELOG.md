@@ -2,7 +2,7 @@
 
 APK 的 build 号是打包时的提交数（`app/apk.sh`），版本号在 `app/nsh.json`。
 
-## 0.1.0（未发布）
+## 0.1.0（2026-11-25）
 
 app 改名 **Yonder**，包名 `dev.yonder.app`（以前叫 Herdr / `dev.herdc.app`）。包名变了，旧版不能覆盖升级：要卸载旧版，重新添加电脑。新图标：一条小路通进远处的终端窗口，窗口眨着眼在笑（以前用的是 herdr-app 的图标）。
 
