@@ -289,18 +289,12 @@ pub fn chat(live: Live, address: String, name: String) -> impl IntoElement {
     // or a card opened), nothing new is unseen.
     let grown = stored((0usize, None::<Line>));
     let keep = stored(None::<(f32, f32)>);
-    // Read before (the page made again, its tab come back to): shown at
-    // once, read on from there. Made here, not in `follow`: a task ended
-    // before it ran still gives it back.
+    // Read before (the page made again, its tab come back to): shown by
+    // `follow` at once, read on from there. Taken here, not in `follow`:
+    // a task ended before it ran still gives it back.
     let who = (live.computer.id(), live.view, address.clone());
     let held = match HELD.with(|h| h.borrow_mut().take()).filter(|k| k.who == who) {
-        Some(Kept { read, path, footer: was, .. }) => {
-            lines.set(read.lines());
-            cut.set(read.cut());
-            found.set(Found::Read);
-            footer.set(was.clone());
-            Held { who, read, path, footer: was, ready: true }
-        }
+        Some(Kept { read, path, footer, .. }) => Held { who, read, path, footer, ready: true },
         None => Held { who, read: Transcript::default(), path: None, footer: None, ready: false },
     };
     spawn(follow(live.clone(), address.clone(), Reading { lines, cut, found, sent, again, earlier, loading, keep, height, offset, footer }, held));
@@ -647,6 +641,17 @@ async fn follow(live: Live, address: String, r: Reading, mut held: Held) {
     let world = live.view;
     // Read afresh (another file, or it was made again): shown whole, at once.
     let mut fresh = false;
+    // Kept from before: shown, once the frame that made the page is done.
+    // Not in it: a tab's change moves smoothly, and hundreds of rows made
+    // inside that animation left the page blank, then crashed Android's
+    // renderer (a Galaxy Note10).
+    if held.ready {
+        off(async {}).await;
+        lines.set(held.read.lines());
+        cut.set(held.read.cut());
+        footer.set(held.footer.clone());
+        found.set(Found::Read);
+    }
     let mut seen = (u64::MAX, String::new(), 0u32);
     let mut earlier_seen = 0u32;
     let mut last = Instant::now() - RESTING;
