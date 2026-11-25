@@ -97,17 +97,13 @@ pub fn switch_connection(computer: Computer, first: Option<Session>, replacing: 
     let password: link::Password = Arc::new(std::sync::Mutex::new(computer.password.clone()));
     // Its choices (each space's tab, focus, …) read by the engine as it
     // starts: moved first when the connection was saved under another id.
-    if let Some(was) = replacing.and_then(|id| link::computers().into_iter().find(|c| c.id() == id)) {
-        link::carry_view(&was, &computer);
+    let was = replacing.and_then(|id| link::computers().into_iter().find(|c| c.id() == id));
+    if let Some(was) = &was {
+        link::carry_view(was, &computer);
     }
     let engine = link::open(&computer, first, link::display(&palette, (cell.width, cell.height)), cell.fit((w - 2.0 * crate::terminal::INSET_X, h - 2.0 * crate::terminal::INSET_Y)), password.clone())?;
     let previous = live();
     if let Some(old) = &previous { old.keep(); }
-    let prior_view = previous.as_ref().filter(|old| {
-        replacing.is_some() && old.computer.id() != computer.id()
-            && computer.fingerprint.is_some() && computer.fingerprint == old.computer.fingerprint
-            && computer.session == old.computer.session && computer.user == old.computer.user
-    }).and_then(|old| link::seen(&old.computer.id()));
     let saved = match replacing {
         Some(id) => link::replace(id, &computer),
         None => link::remember(&computer),
@@ -116,6 +112,15 @@ pub fn switch_connection(computer: Computer, first: Option<Session>, replacing: 
         engine.close();
         return Err(error);
     }
+    // Saved again: its choices (main agent, names, colors) move before its
+    // page is made, which would give its spaces new colors meanwhile.
+    if let (Some(was), Some(prefs)) = (&was, use_context::<crate::prefs::Prefs>()) {
+        prefs.saved_again(was, &computer);
+        // Another computer, without a main agent: its page would be empty.
+        if prefs.lead(&computer.id()).is_none() && crate::home::shown().get_untracked() == crate::home::Home::Lead {
+            crate::home::shown().set(crate::home::Home::Agents);
+        }
+    }
     if let Some(previous) = previous {
         previous.engine.close();
         previous.owner.dispose();
@@ -123,7 +128,7 @@ pub fn switch_connection(computer: Computer, first: Option<Session>, replacing: 
     link::set_open(Some(&computer.id()));
     let id = computer.id();
     // Drawn until the computer is known: what it showed last.
-    let seen = prior_view.or_else(|| link::seen(&id));
+    let seen = link::seen(&id);
     // The phone's terminals before it stopped are still its own.
     engine.adopt(seen.iter().flat_map(|s| s.started.clone()));
     let mut stale = seen.map(|s| s.view);

@@ -21,6 +21,8 @@ pub fn computers_page() -> impl IntoElement {
     // the page again (its signals gone) each time the computers change.
     let adding = signal(known.with_untracked(Vec::is_empty));
     let original = stored(None::<Computer>);
+    // A computer's own choices (its main agent, …) follow it, or go.
+    let prefs = use_context::<crate::prefs::Prefs>().expect("prefs");
     let edit = move |computer: Computer| {
         original.replace(Some(computer));
         adding.set(true);
@@ -38,10 +40,11 @@ pub fn computers_page() -> impl IntoElement {
         )
         .child(when(move || adding.get(), move || {
             let old = original.replace(None);
-            let previous = old.as_ref().map(Computer::id);
+            let was = old.clone();
             connection_form(old, !known.with_untracked(Vec::is_empty), move || adding.set(false), move |computer, session| {
-                if let Some(id) = &previous {
-                    link::replace(id, &computer)?;
+                if let Some(was) = &was {
+                    link::replace(&was.id(), &computer)?;
+                    prefs.saved_again(was, &computer);
                     known.set(link::computers());
                     adding.set(false);
                 } else {
@@ -127,6 +130,7 @@ fn now() -> i64 {
 
 /// A computer: its name and address, how its agents were when last seen.
 fn computer_row(c: ReadSignal<Computer>, status: Option<&'static str>, then: impl Fn() -> String + 'static, known: Signal<Vec<Computer>>, editing: Stored<Option<Computer>>, asking: Signal<Option<ui::Prompt>>, edit: impl Fn(Computer) + Copy + 'static) -> View {
+    let prefs = use_context::<crate::prefs::Prefs>().expect("prefs");
     view()
         .flex_row()
         .items_center()
@@ -169,7 +173,9 @@ fn computer_row(c: ReadSignal<Computer>, status: Option<&'static str>, then: imp
                 }
                 let title = t!("Forget {}?", computer.name);
                 if ui::confirm(&title, t!("Its key stays trusted nowhere else; adding it again asks for the password."), t!("Forget")).await {
-                    link::forget(&computer.id());
+                    if link::forget(&computer.id()) {
+                        prefs.carry(&computer.id(), None);
+                    }
                     known.set(link::computers());
                 }
             });
@@ -207,6 +213,7 @@ enum Step {
 pub fn edit_current_page(live: live::Live) -> nsh_core::element::Screen {
     let id = live.computer.id();
     let original = link::computers().into_iter().find(|c| c.id() == id).unwrap_or(live.computer);
+    // Its choices move in `switch_connection`, before its page is made.
     ui::page(t!("Edit connection")).child(connection_form(Some(original), false, crate::nav::back, move |computer, session| {
         live::switch_connection(computer, Some(session), Some(&id))
     }))

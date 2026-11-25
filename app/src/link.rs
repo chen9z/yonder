@@ -124,17 +124,20 @@ pub fn set_open(id: Option<&str>) {
     }
 }
 
-pub fn forget(id: &str) {
+/// Forgets computer `id` and what it showed; false: it couldn't be kept
+/// so (said), nothing changed.
+pub fn forget(id: &str) -> bool {
     let mut all = computers();
     all.retain(|c| c.id() != id);
     if let Err(error) = keep(&all) {
         storage_error(error);
-        return;
+        return false;
     }
     Storage::remove_item(&format!("{SEEN}{id}"));
     if let Some(dir) = views_folder() {
         forget_view_in(&dir, id);
     }
+    true
 }
 
 fn forget_view_in(dir: &std::path::Path, id: &str) {
@@ -159,6 +162,12 @@ fn view_name(id: &str) -> String {
     format!("{name}.json")
 }
 
+/// Whether `now` is the computer `previous` was, saved again: its key,
+/// user and session the same.
+pub fn same(previous: &Computer, now: &Computer) -> bool {
+    previous.fingerprint.is_some() && previous.fingerprint == now.fingerprint && previous.user == now.user && previous.session == now.session
+}
+
 /// A computer saved again under another id: its choices go with it when
 /// it is the same one (its key, user and session), else they go.
 pub fn carry_view(previous: &Computer, now: &Computer) {
@@ -173,8 +182,7 @@ fn carry_view_in(dir: &std::path::Path, previous: &Computer, now: &Computer) {
     if from == to || !old.exists() {
         return;
     }
-    let same = previous.fingerprint.is_some() && previous.fingerprint == now.fingerprint && previous.user == now.user && previous.session == now.session;
-    if same && !new.exists() {
+    if same(previous, now) && !new.exists() {
         let _ = std::fs::rename(&old, &new);
     } else {
         let _ = std::fs::remove_file(&old);
@@ -410,8 +418,13 @@ pub fn replace(previous: &str, computer: &Computer) -> Result<(), String> {
     let was = std::mem::replace(entry, computer.clone());
     keep(&all)?;
     carry_view(&was, computer);
+    // What it showed last goes with it too, the same computer; else it goes.
     if previous != id {
-        Storage::remove_item(&format!("{SEEN}{previous}"));
+        let old = format!("{SEEN}{previous}");
+        if let Some(seen) = Storage::get_item(&old).filter(|_| same(&was, computer)) {
+            let _ = Storage::set_item(format!("{SEEN}{id}"), seen);
+        }
+        Storage::remove_item(&old);
     }
     Ok(())
 }

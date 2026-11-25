@@ -87,6 +87,8 @@ it with the screenshot's name and go on.
 6. Settings (in More): its rows sit on rounded cards under small headings
    (COMPUTER, TERMINAL, GENERAL, THIS PHONE'S KEY, ABOUT), each row with a
    line icon, and Leave this computer (red) alone on the last card.
+   (On the main agent's page first, if there is one: press ‹ to Agents,
+   then its tab again: the conversation is there at once, no spinner.)
    COMPUTER has the computer (a green dot, "herdr-core" and its version),
    Edit connection and Add a machine…; GENERAL has Main agent
    (None), Language, Appearance (System), Notes (Important only) and Sort

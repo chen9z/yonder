@@ -69,6 +69,30 @@ impl Prefs {
         }
     }
 
+    /// A computer saved again under another id (`to`, the same computer):
+    /// its main agent, machines' names, spaces' colors and folds go with
+    /// it; forgotten or another one (None), they go.
+    pub fn carry(self, from: &str, to: Option<&str>) {
+        let mut kept = Kept { folded: self.folded.get_untracked(), colors: self.colors.get_untracked(), leads: self.leads.get_untracked(), aliases: self.aliases.get_untracked(), ..Kept::default() };
+        rekey(&mut kept, from, to);
+        // At once: what reads one of them sees the others moved too.
+        batch(|| {
+            self.folded.set(kept.folded);
+            self.colors.set(kept.colors);
+            self.leads.set(kept.leads);
+            self.aliases.set(kept.aliases);
+        });
+    }
+
+    /// `was` saved again as `now`: its choices go with it if it is the
+    /// same computer (another address), else they go.
+    pub fn saved_again(self, was: &crate::link::Computer, now: &crate::link::Computer) {
+        let (from, to) = (was.id(), now.id());
+        if from != to {
+            self.carry(&from, crate::link::same(was, now).then_some(to.as_str()));
+        }
+    }
+
     /// The main agent chosen on `computer`.
     pub fn lead(self, computer: &str) -> Option<crate::lead::Lead> {
         self.leads.with(|l| l.get(computer).cloned())
@@ -93,5 +117,73 @@ impl Prefs {
         effect(move || prefs.look.get().apply());
         provide_context(prefs);
         prefs
+    }
+}
+
+/// `from`'s entries as `to`'s (not over those it has), or gone. Keys:
+/// `leads` by computer; `aliases`, `colors` by computer, NUL, machine or
+/// space; `folded` a JSON `[computer, machine]`.
+fn rekey(kept: &mut Kept, from: &str, to: Option<&str>) {
+    if to == Some(from) {
+        return;
+    }
+    // A key of `from`'s: what it becomes (None: gone); not one, None.
+    fn moved<V>(map: &mut std::collections::BTreeMap<String, V>, key: impl Fn(&str) -> Option<Option<String>>) {
+        let mine: Vec<String> = map.keys().filter(|k| key(k).is_some()).cloned().collect();
+        for k in mine {
+            if let (Some(v), Some(Some(new))) = (map.remove(&k), key(&k)) {
+                map.entry(new).or_insert(v);
+            }
+        }
+    }
+    let under = |k: &str| k.strip_prefix(from)?.strip_prefix('\0').map(|rest| to.map(|to| format!("{to}\0{rest}")));
+    moved(&mut kept.aliases, under);
+    moved(&mut kept.colors, under);
+    moved(&mut kept.leads, |k| (k == from).then(|| to.map(str::to_owned)));
+    let folds = std::mem::take(&mut kept.folded);
+    for f in folds {
+        let new = match serde_json::from_str::<(String, Option<String>)>(&f) {
+            Ok((computer, machine)) if computer == from => to.map(|to| serde_json::to_string(&(to, machine)).unwrap_or_default()),
+            _ => Some(f),
+        };
+        if let Some(new) = new.filter(|n| !kept.folded.contains(n)) {
+            kept.folded.push(new);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_computer_s_choices_go_with_it_or_go() {
+        let lead = crate::lead::Lead { address: "t1".into(), space: "s1".into(), space_name: "nova".into(), app: Some("pi".into()) };
+        let mut kept = Kept::default();
+        kept.leads.insert("a".into(), lead.clone());
+        kept.leads.insert("b".into(), lead.clone());
+        kept.aliases.insert("a\0vps".into(), "Cloud".into());
+        kept.aliases.insert("ab\0vps".into(), "Other".into());
+        kept.colors.insert("a\0s1".into(), 3);
+        kept.folded = vec![serde_json::to_string(&("a", Some("vps"))).unwrap(), serde_json::to_string(&("b", None::<String>)).unwrap()];
+        // Saved again as `c`: all of `a`'s go with it, no other's.
+        let mut moved = Kept { leads: kept.leads.clone(), aliases: kept.aliases.clone(), colors: kept.colors.clone(), folded: kept.folded.clone(), ..Kept::default() };
+        rekey(&mut moved, "a", Some("c"));
+        assert_eq!(moved.leads.keys().collect::<Vec<_>>(), ["b", "c"]);
+        assert_eq!(moved.aliases.get("c\0vps").map(String::as_str), Some("Cloud"));
+        assert_eq!(moved.aliases.get("ab\0vps").map(String::as_str), Some("Other"));
+        assert_eq!(moved.colors.get("c\0s1"), Some(&3));
+        assert_eq!(moved.folded, [serde_json::to_string(&("c", Some("vps"))).unwrap(), serde_json::to_string(&("b", None::<String>)).unwrap()]);
+        // Onto one that has its own: its own stay.
+        let mut onto = Kept { leads: kept.leads.clone(), ..Kept::default() };
+        onto.leads.get_mut("b").unwrap().address = "t9".into();
+        rekey(&mut onto, "a", Some("b"));
+        assert_eq!((onto.leads.len(), onto.leads["b"].address.as_str()), (1, "t9"));
+        // Forgotten: `a`'s go, the rest stay.
+        rekey(&mut kept, "a", None);
+        assert_eq!(kept.leads.keys().collect::<Vec<_>>(), ["b"]);
+        assert_eq!(kept.aliases.keys().collect::<Vec<_>>(), ["ab\0vps"]);
+        assert!(kept.colors.is_empty());
+        assert_eq!(kept.folded.len(), 1);
     }
 }

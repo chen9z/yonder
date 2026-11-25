@@ -289,7 +289,21 @@ pub fn chat(live: Live, address: String, name: String) -> impl IntoElement {
     // or a card opened), nothing new is unseen.
     let grown = stored((0usize, None::<Line>));
     let keep = stored(None::<(f32, f32)>);
-    spawn(follow(live.clone(), address.clone(), Reading { lines, cut, found, sent, again, earlier, loading, keep, height, offset, footer }));
+    // Read before (the page made again, its tab come back to): shown at
+    // once, read on from there. Made here, not in `follow`: a task ended
+    // before it ran still gives it back.
+    let who = (live.computer.id(), live.view, address.clone());
+    let held = match HELD.with(|h| h.borrow_mut().take()).filter(|k| k.who == who) {
+        Some(Kept { read, path, footer: was, .. }) => {
+            lines.set(read.lines());
+            cut.set(read.cut());
+            found.set(Found::Read);
+            footer.set(was.clone());
+            Held { who, read, path, footer: was, ready: true }
+        }
+        None => Held { who, read: Transcript::default(), path: None, footer: None, ready: false },
+    };
+    spawn(follow(live.clone(), address.clone(), Reading { lines, cut, found, sent, again, earlier, loading, keep, height, offset, footer }, held));
 
     // Asked something in its terminal: the question's viewer, while shown.
     let answering = stored(None::<Rc<Viewer>>);
@@ -584,14 +598,55 @@ struct Reading {
     footer: Signal<Option<transcript::Footer>>,
 }
 
+/// Whose conversation: the computer, its connection (another one, after
+/// a reconnect or an edit, reads afresh), the agent's address.
+type Who = (String, Signal<Arc<herdc_engine::View>>, String);
+
+/// A conversation as read, kept when its page goes: one, the last.
+struct Kept {
+    who: Who,
+    read: Transcript,
+    path: Option<(String, String)>,
+    footer: Option<transcript::Footer>,
+}
+
+thread_local! {
+    static HELD: std::cell::RefCell<Option<Kept>> = const { std::cell::RefCell::new(None) };
+}
+
+/// What `follow` reads into; gone with its page, it is kept ([`HELD`]),
+/// once something was read (`ready`): not while still looking, or
+/// when there was nothing to read.
+struct Held {
+    who: Who,
+    read: Transcript,
+    path: Option<(String, String)>,
+    footer: Option<transcript::Footer>,
+    ready: bool,
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        if !self.ready {
+            return;
+        }
+        let kept = Kept { who: self.who.clone(), read: std::mem::take(&mut self.read), path: self.path.take(), footer: self.footer.take() };
+        let _ = HELD.try_with(|h| {
+            if let Ok(mut h) = h.try_borrow_mut() {
+                *h = Some(kept);
+            }
+        });
+    }
+}
+
 /// Reads `address`'s conversation as it goes: its file found (again when
 /// the session changes), what was added since, earlier lines when asked,
 /// and the messages sent let go of once they show.
-async fn follow(live: Live, address: String, r: Reading) {
+async fn follow(live: Live, address: String, r: Reading, mut held: Held) {
     let Reading { lines, cut, found, sent, again, earlier, loading, keep, height, offset, footer } = r;
     let world = live.view;
-    let mut read = Transcript::default();
-    let mut path: Option<(String, String)> = None;
+    // Read afresh (another file, or it was made again): shown whole, at once.
+    let mut fresh = false;
     let mut seen = (u64::MAX, String::new(), 0u32);
     let mut earlier_seen = 0u32;
     let mut last = Instant::now() - RESTING;
@@ -618,54 +673,75 @@ async fn follow(live: Live, address: String, r: Reading) {
             if let Some(Ok(now)) = off(async move { transcript::footer_of(&t, &a).await }).await
                 && footer.with_untracked(|f| *f != now)
             {
+                held.footer = now.clone();
                 footer.set(now);
             }
             // Another session (`/new`, a restart): read afresh.
-            if path.as_ref().is_none_or(|(k, _)| *k != key) {
+            if held.path.as_ref().is_none_or(|(k, _)| *k != key) {
                 let (t, l, c) = (there.clone(), label.clone(), cwd.clone());
                 match off(async move { transcript::find(&t, Some(&l), &c).await }).await {
                     Some(Ok(Some(file))) => {
-                        if path.as_ref().is_none_or(|(_, f)| *f != file) {
-                            read = Transcript::default();
+                        if held.path.as_ref().is_none_or(|(_, f)| *f != file) {
+                            (held.read, fresh) = (Transcript::default(), true);
                         }
-                        path = Some((key.clone(), file));
+                        held.path = Some((key.clone(), file));
                     }
-                    // Named and not written yet (a Pi just started): nothing said yet.
-                    Some(Ok(None)) if !label.is_empty() => found.set(Found::Read),
-                    Some(Ok(None)) if path.is_none() => found.set(Found::Not(t!("No Pi session found for it.").into())),
-                    Some(Err(e)) if path.is_none() => found.set(Found::Not(e)),
+                    // Named and not written yet (a Pi just started, a `/new`):
+                    // nothing said yet, the session before gone.
+                    Some(Ok(None)) if !label.is_empty() => {
+                        // Whatever was read before (its file may have failed
+                        // a read since, the path let go).
+                        held.path = None;
+                        if held.read.read > 0 {
+                            held.read = Transcript::default();
+                            lines.set(Vec::new());
+                            cut.set(false);
+                        }
+                        found.set(Found::Read);
+                        held.ready = true;
+                    }
+                    Some(Ok(None)) if held.path.is_none() => {
+                        found.set(Found::Not(t!("No Pi session found for it.").into()));
+                        held.ready = false;
+                    }
+                    Some(Err(e)) if held.path.is_none() => {
+                        found.set(Found::Not(e));
+                        held.ready = false;
+                    }
                     _ => {}
                 }
             }
-            if let Some((_, file)) = path.clone() {
-                let (t, from) = (there.clone(), read.read);
+            if let Some((_, file)) = held.path.clone() {
+                let (t, from) = (there.clone(), held.read.read);
                 match off(async move { transcript::read(&t, &file, from).await }).await {
                     Some(Ok(got)) => {
                         // Shorter than read: made again, read it all again.
-                        if got.lines < read.read {
-                            read = Transcript::default();
+                        if got.lines < held.read.read {
+                            (held.read, fresh) = (Transcript::default(), true);
                             seen.0 = u64::MAX;
                             continue;
                         }
-                        let first = found.get_untracked() != Found::Read;
+                        let first = found.get_untracked() != Found::Read || std::mem::take(&mut fresh);
                         if first || !got.text.is_empty() {
-                            read.take(&got);
-                            let now = read.lines();
+                            held.read.take(&got);
+                            let now = held.read.lines();
                             // Not when a page came over it meanwhile: that
                             // page's changes would move smoothly too.
                             if !first && nav::routes().with_untracked(|r| r.0.is_empty()) {
                                 ui::smoothly();
                             }
                             lines.set(now);
-                            cut.set(read.cut());
+                            cut.set(held.read.cut());
                             found.set(Found::Read);
+                            held.ready = true;
                         }
                     }
                     Some(Err(e)) => {
                         if found.get_untracked() != Found::Read {
                             found.set(Found::Not(e));
+                            held.ready = false;
                         }
-                        path = None;
+                        held.path = None;
                     }
                     None => {}
                 }
@@ -675,13 +751,13 @@ async fn follow(live: Live, address: String, r: Reading) {
         let wanted = earlier.get_untracked();
         if wanted != earlier_seen {
             earlier_seen = wanted;
-            if let (Some((_, file)), Ok(there)) = (path.clone(), live.there(on)) {
-                let before = read.start;
+            if let (Some((_, file)), Ok(there)) = (held.path.clone(), live.there(on)) {
+                let before = held.read.start;
                 if let Some(Ok(got)) = off(async move { transcript::earlier(&there, &file, before).await }).await {
-                    read.take(&got);
+                    held.read.take(&got);
                     keep.replace(Some((height.get(), offset.get())));
-                    lines.set(read.lines());
-                    cut.set(read.cut());
+                    lines.set(held.read.lines());
+                    cut.set(held.read.cut());
                 }
             }
             loading.set(false);
