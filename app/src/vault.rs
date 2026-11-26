@@ -210,6 +210,22 @@ mod keychain {
     /// `security`'s exit status for an item that isn't there.
     const NOT_FOUND: i32 = 44;
 
+    /// The path in what `security login-keychain` says: `"<path>"`, one
+    /// pair of quotes around it. It goes on a `security -i` line, where a
+    /// line break would start another command: no control characters (CR,
+    /// LF, NUL, ...), quotes or backslashes in it, else an error.
+    pub fn keychain_path(said: &str) -> Result<String, String> {
+        let quoted = said.trim();
+        let path = quoted
+            .strip_prefix('"')
+            .and_then(|p| p.strip_suffix('"'))
+            .ok_or_else(|| format!("no login keychain: {quoted:?}"))?;
+        if path.is_empty() || path.chars().any(|c| c.is_control() || c == '"' || c == '\\') {
+            return Err(format!("not a keychain path to pass on: {path:?}"));
+        }
+        Ok(path.to_owned())
+    }
+
     impl Keychain {
         pub fn seal(&self, plain: &[u8]) -> Result<String, String> {
             let (iv, sealed) = super::seal_by(&self.key()?, plain)?;
@@ -236,11 +252,10 @@ mod keychain {
         /// The login keychain's file, as `security login-keychain` says it.
         pub fn login_keychain(&self) -> Result<String, String> {
             let out = Command::new(self.tool).arg("login-keychain").stdin(Stdio::null()).output().map_err(|e| format!("{}: {e}", self.tool))?;
-            let path = String::from_utf8_lossy(&out.stdout).trim().trim_matches('"').to_owned();
-            if !out.status.success() || path.is_empty() || path.contains('"') {
+            if !out.status.success() {
                 return Err(format!("no login keychain: {}", String::from_utf8_lossy(&out.stderr).trim()));
             }
-            Ok(path)
+            keychain_path(&String::from_utf8_lossy(&out.stdout))
         }
 
         fn find(&self) -> Result<Option<String>, String> {
@@ -492,6 +507,30 @@ mod tests {
         for kept in [kept, again] {
             let (iv, sealed) = kept.strip_prefix(KEYCHAIN).unwrap().split_once(':').unwrap();
             assert_eq!(TEST.open(&unhex(iv).unwrap(), &unhex(sealed).unwrap()).unwrap(), b"a private key");
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn keychain_path_is_one_line_of_its_own() {
+        use keychain::keychain_path;
+        let at = "/tmp/example/My Keychains/login.keychain-db";
+        assert_eq!(keychain_path(&format!("    \"{at}\"\n")).as_deref(), Ok(at));
+        for said in [
+            "\"/tmp/example\\login.keychain-db\"",
+            "\"/tmp/example/a\"b.keychain-db\"",
+            "\"/tmp/example/a\rb.keychain-db\"",
+            "\"/tmp/example/a\nlist-keychains\"",
+            "\"/tmp/example/a\0b.keychain-db\"",
+            "\"/tmp/example/a\tb.keychain-db\"",
+            "\"/tmp/example/a.keychain-db\"\n\"/tmp/example/b.keychain-db\"",
+            "/tmp/example/login.keychain-db",
+            "\"/tmp/example/login.keychain-db",
+            "\"\"",
+            "\"",
+            "",
+        ] {
+            assert!(keychain_path(said).is_err(), "{said:?}");
         }
     }
 
