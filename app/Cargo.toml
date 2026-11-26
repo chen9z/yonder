@@ -25,9 +25,10 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time", "m
 ring = "0.17"
 
 [features]
-# Passwords kept as they are, for the headless tests (tests/app.rs): they
-# never reach the keychain. A release build with it does not compile.
-plain-vault = []
+# The headless tests' key (tests/app.rs): in the test process's memory,
+# not the keychain; what is kept is still sealed. A release build with it
+# does not compile.
+test-vault = []
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -36,7 +37,7 @@ libc = "0.2"
 jni = "0.21"
 
 [dev-dependencies]
-herdc-app = { path = ".", features = ["plain-vault"] }
+herdc-app = { path = ".", features = ["test-vault"] }
 herdc-testkit = { path = "../crates/herdc-testkit" }
 nsh-engine = "0.4.0"
 nsh-testing = { version = "0.4.0", default-features = false }

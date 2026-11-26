@@ -28,6 +28,14 @@ mod terminal;
 mod theme;
 mod ui;
 mod vault;
+
+/// What the headless tests' build kept, opened (`vault::open`): the tests
+/// check that it is sealed, and sealed what was given.
+#[cfg(feature = "test-vault")]
+#[doc(hidden)]
+pub fn opened_for_tests(kept: &str) -> Option<String> {
+    vault::open(kept)
+}
 mod workspace;
 mod worktrees;
 

@@ -4,8 +4,9 @@
 //! cannot be opened anywhere else. Before Android 12 (which doesn't let an
 //! app reach its JVM this way) the key is the app's own, in its
 //! `no_backup` folder: backups and transfers leave it out. On a Mac the
-//! key is in the login keychain. Only in tests (the unit tests, and the
-//! headless ones with `plain-vault`) do the words stay as they are.
+//! key is in the login keychain. In tests (the unit tests, and the
+//! headless ones with `test-vault`) the key is the test process's own, in
+//! its memory only. Whatever the build, sealed words are never the words.
 
 /// Sealed words start so; what doesn't is kept as it was written.
 const SEALED: &str = "sealed1:";
@@ -14,19 +15,18 @@ const ASIDE: &str = "aside1:";
 /// Sealed with the key in the Mac's login keychain.
 const KEYCHAIN: &str = "keychain1:";
 
-#[cfg(all(feature = "plain-vault", not(debug_assertions)))]
-compile_error!("plain-vault keeps passwords as they are: for the headless tests only, never a release");
+#[cfg(all(feature = "test-vault", not(debug_assertions)))]
+compile_error!("test-vault keeps the key in memory: for the headless tests only, never a release");
 
-/// Encryption failures are errors: nothing is kept as it is, apart from
-/// the tests' explicit plaintext backend.
+/// Encryption failures are errors: nothing is ever kept as it is.
 pub fn seal(plain: &str) -> Result<String, String> {
     #[cfg(target_os = "android")]
     { seal_with(plain, keystore::seal(plain.as_bytes()), || aside::folder().ok_or_else(|| "no app folder".into())) }
-    #[cfg(all(not(target_os = "android"), any(test, feature = "plain-vault")))]
-    { Ok(plain.to_owned()) }
-    #[cfg(all(target_os = "macos", not(any(test, feature = "plain-vault"))))]
+    #[cfg(all(not(target_os = "android"), any(test, feature = "test-vault")))]
+    { seal_by(&aside::test_key()?, plain.as_bytes()).map(|(iv, sealed)| format!("{ASIDE}{}:{}", hex(&iv), hex(&sealed))) }
+    #[cfg(all(target_os = "macos", not(any(test, feature = "test-vault"))))]
     { keychain::LOGIN.seal(plain.as_bytes()) }
-    #[cfg(all(not(any(target_os = "android", target_os = "macos")), not(any(test, feature = "plain-vault"))))]
+    #[cfg(all(not(any(target_os = "android", target_os = "macos")), not(any(test, feature = "test-vault"))))]
     { Err("nothing seals here".into()) }
 }
 
@@ -50,14 +50,17 @@ pub fn open(kept: &str) -> Option<String> {
     } else if let Some(sealed) = kept.strip_prefix(ASIDE) {
         let (iv, sealed) = sealed.split_once(':')?;
         let (iv, sealed) = (unhex(iv)?, unhex(sealed)?);
-        aside::folder().ok_or_else(|| "no app folder".to_owned()).and_then(|dir| aside::open(&dir, &iv, &sealed))
+        #[cfg(all(not(target_os = "android"), any(test, feature = "test-vault")))]
+        { aside::test_key().and_then(|key| open_by(&key, &iv, &sealed)) }
+        #[cfg(not(all(not(target_os = "android"), any(test, feature = "test-vault"))))]
+        { aside::folder().ok_or_else(|| "no app folder".to_owned()).and_then(|dir| aside::open(&dir, &iv, &sealed)) }
     } else if let Some(sealed) = kept.strip_prefix(KEYCHAIN) {
         let (iv, sealed) = sealed.split_once(':')?;
         let (iv, sealed) = (unhex(iv)?, unhex(sealed)?);
         // Tests never reach the person's keychain.
-        #[cfg(all(target_os = "macos", not(any(test, feature = "plain-vault"))))]
+        #[cfg(all(target_os = "macos", not(any(test, feature = "test-vault"))))]
         { keychain::LOGIN.open(&iv, &sealed) }
-        #[cfg(not(all(target_os = "macos", not(any(test, feature = "plain-vault")))))]
+        #[cfg(not(all(target_os = "macos", not(any(test, feature = "test-vault")))))]
         { let _ = (iv, sealed); Err("no keychain here".to_owned()) }
     } else {
         return Some(kept.to_owned());
@@ -101,6 +104,7 @@ mod aside {
     const FILE: &str = "herdc.vault";
 
     /// The app's `no_backup` folder.
+    #[cfg_attr(all(not(target_os = "android"), any(test, feature = "test-vault")), allow(dead_code))]
     pub fn folder() -> Option<PathBuf> {
         crate::app_folder("no_backup")
     }
@@ -138,6 +142,7 @@ mod aside {
         super::seal_by(&key(dir)?, plain)
     }
 
+    #[cfg_attr(all(not(target_os = "android"), feature = "test-vault", not(test)), allow(dead_code))]
     pub fn open(dir: &Path, nonce: &[u8], sealed: &[u8]) -> Result<Vec<u8>, String> {
         super::open_by(&key(dir)?, nonce, sealed)
     }
@@ -152,6 +157,14 @@ mod aside {
         let mut bytes = vec![0u8; 32];
         SystemRandom::new().fill(&mut bytes).map_err(|_| "no randomness")?;
         Ok(bytes)
+    }
+
+    /// The tests' key off a phone: the process's own, made the first time,
+    /// in its memory only (never on disk, gone when the tests end).
+    #[cfg(all(not(target_os = "android"), any(test, feature = "test-vault")))]
+    pub fn test_key() -> Result<LessSafeKey, String> {
+        static KEY: std::sync::OnceLock<Result<Vec<u8>, String>> = std::sync::OnceLock::new();
+        aes(KEY.get_or_init(random_key).as_ref().map_err(Clone::clone)?)
     }
 }
 
@@ -177,10 +190,11 @@ fn open_by(key: &ring::aead::LessSafeKey, nonce: &[u8], sealed: &[u8]) -> Result
 
 /// The key on a Mac: 32 random bytes in the login keychain (service
 /// [`keychain::LOGIN`]'s), made the first time, read and written by
-/// `/usr/bin/security`. The key goes to it on its stdin, never in its
-/// arguments. No keychain, no sealing: the words are never kept as they are.
+/// `/usr/bin/security`, in the login keychain by its path both ways. The
+/// key goes to it on its stdin, never in its arguments. No keychain, no
+/// sealing: the words are never kept as they are.
 #[cfg(target_os = "macos")]
-#[cfg_attr(any(test, feature = "plain-vault"), allow(dead_code))]
+#[cfg_attr(any(test, feature = "test-vault"), allow(dead_code))]
 mod keychain {
     use std::io::Write;
     use std::process::{Command, Stdio};
@@ -219,9 +233,20 @@ mod keychain {
             super::aside::aes(&bytes)
         }
 
+        /// The login keychain's file, as `security login-keychain` says it.
+        pub fn login_keychain(&self) -> Result<String, String> {
+            let out = Command::new(self.tool).arg("login-keychain").stdin(Stdio::null()).output().map_err(|e| format!("{}: {e}", self.tool))?;
+            let path = String::from_utf8_lossy(&out.stdout).trim().trim_matches('"').to_owned();
+            if !out.status.success() || path.is_empty() || path.contains('"') {
+                return Err(format!("no login keychain: {}", String::from_utf8_lossy(&out.stderr).trim()));
+            }
+            Ok(path)
+        }
+
         fn find(&self) -> Result<Option<String>, String> {
+            let login = self.login_keychain()?;
             let out = Command::new(self.tool)
-                .args(["find-generic-password", "-s", self.service, "-a", ACCOUNT, "-w"])
+                .args(["find-generic-password", "-s", self.service, "-a", ACCOUNT, "-w", &login])
                 .stdin(Stdio::null())
                 .output()
                 .map_err(|e| format!("{}: {e}", self.tool))?;
@@ -233,6 +258,7 @@ mod keychain {
         }
 
         fn add(&self, words: &str) -> Result<(), String> {
+            let login = self.login_keychain()?;
             let mut child = Command::new(self.tool)
                 .arg("-i")
                 .stdin(Stdio::piped())
@@ -240,7 +266,7 @@ mod keychain {
                 .stderr(Stdio::piped())
                 .spawn()
                 .map_err(|e| format!("{}: {e}", self.tool))?;
-            let line = format!("add-generic-password -s {} -a {ACCOUNT} -w {words}\n", self.service);
+            let line = format!("add-generic-password -s {} -a {ACCOUNT} -w {words} \"{login}\"\n", self.service);
             let wrote = child.stdin.take().ok_or("no stdin")?.write_all(line.as_bytes());
             let out = child.wait_with_output().map_err(|e| e.to_string())?;
             wrote.map_err(|e| e.to_string())?;
@@ -402,8 +428,12 @@ mod tests {
     }
 
     #[test]
-    fn without_a_keystore_words_stay_as_they_are() {
-        assert_eq!(seal("secret").unwrap(), "secret");
+    fn without_a_keystore_the_tests_key_seals() {
+        let kept = seal("secret").unwrap();
+        assert!(kept.starts_with(ASIDE) && !kept.contains("secret") && !kept.contains(&hex(b"secret")), "{kept}");
+        assert_eq!(open(&kept).as_deref(), Some("secret"));
+        assert_ne!(seal("secret").unwrap(), kept);
+        // Kept unsealed by an earlier build: read as it is.
         assert_eq!(open("secret").as_deref(), Some("secret"));
         assert!(!sealed("secret"));
         // Sealed elsewhere: not opened here, and not taken for the words.
@@ -435,7 +465,8 @@ mod tests {
         }
 
         fn remove() {
-            let _ = std::process::Command::new(TEST.tool).args(["delete-generic-password", "-s", TEST.service]).output();
+            let login = TEST.login_keychain().unwrap();
+            let _ = std::process::Command::new(TEST.tool).args(["delete-generic-password", "-s", TEST.service, &login]).output();
         }
     }
 
@@ -475,6 +506,18 @@ mod tests {
         }
         // The tests' own keychain1 words never open from the person's keychain.
         assert_eq!(open(&format!("{KEYCHAIN}00:00")), None);
+    }
+
+    /// The headless tests' build: the public seal still never keeps the words.
+    #[cfg(feature = "test-vault")]
+    #[test]
+    fn test_vault_seals_too() {
+        for words in ["open sesame", "-----BEGIN OPENSSH PRIVATE KEY-----"] {
+            let kept = seal(words).unwrap();
+            assert!(kept.starts_with(ASIDE) || kept.starts_with(KEYCHAIN), "{kept}");
+            assert!(!kept.contains(words) && !kept.contains(&hex(words.as_bytes())), "{kept}");
+            assert_eq!(open(&kept).as_deref(), Some(words));
+        }
     }
 
     #[test]

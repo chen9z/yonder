@@ -51,6 +51,17 @@ fn local_time(secs: i64) -> String {
     format!("{}/{} {:02}:{:02}", tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min)
 }
 
+/// The computers kept hold `password` sealed: not the words, and opened,
+/// the words.
+fn kept_sealed(storage: &MemoryStorage, password: &str) {
+    let stored = storage.entries();
+    assert!(!format!("{stored:?}").contains(password), "{stored:?}");
+    let raw = stored.iter().find(|(k, _)| k.as_str() == "computers").map(|(_, v)| v.clone()).unwrap_or_default();
+    let computers: Vec<serde_json::Value> = serde_json::from_str(&raw).unwrap();
+    let kept = computers.iter().filter_map(|c| c["password"].as_str()).collect::<Vec<_>>();
+    assert!(kept.iter().any(|k| herdc_app::opened_for_tests(k).as_deref() == Some(password)), "{kept:?}");
+}
+
 #[test]
 fn adds_a_computer_then_works_there() {
     let runtime = tokio::runtime::Runtime::new().unwrap();
@@ -85,11 +96,9 @@ fn adds_a_computer_then_works_there() {
     app.wait_for_within("label:Spaces", SLOW).unwrap();
     app.press("label:Spaces").unwrap();
     app.wait_for_within("text:No spaces yet", SLOW).unwrap();
-    // Nothing is left on the computer: the password is kept (sealed on a
-    // phone; off one, as it is).
+    // Nothing is left on the computer: the password is kept, sealed.
     assert!(!session.path(".ssh/authorized_keys").exists(), "a key was left");
-    let stored = storage.entries();
-    assert!(format!("{stored:?}").contains("open sesame"), "{stored:?}");
+    kept_sealed(&storage, "open sesame");
 
     // A space starts a terminal on the computer.
     app.press("role:button[New space]").unwrap();
@@ -416,8 +425,8 @@ fn a_password_refused_is_asked_for_again_not_tried_again() {
     app.wait_for_within("label:Spaces", SLOW).unwrap();
     app.press("label:Spaces").unwrap();
     app.wait_for_within("text:No spaces yet", SLOW).unwrap();
-    // The new one is kept.
-    assert!(format!("{:?}", storage.entries()).contains("open sesame"), "{:?}", storage.entries());
+    // The new one is kept, sealed.
+    kept_sealed(&storage, "open sesame");
 }
 
 #[test]
@@ -521,7 +530,8 @@ fn edits_a_saved_connection_only_after_it_works() {
     let entries = saved();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0]["port"], served.port);
-    assert_eq!(entries[0]["password"], "open sesame");
+    let password = entries[0]["password"].as_str().unwrap();
+    assert!(password != "open sesame" && herdc_app::opened_for_tests(password).as_deref() == Some("open sesame"), "{password}");
     assert_eq!(entries[0]["fingerprint"], served.fingerprint);
 
     app.press("label:Studio").unwrap();
