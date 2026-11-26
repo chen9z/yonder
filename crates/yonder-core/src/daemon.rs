@@ -10,7 +10,7 @@ use std::io::{Read, Seek, Write};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::time::Duration;
 
 use crate::check_exec::{self, CheckError, CheckOutput};
@@ -23,6 +23,10 @@ use crate::when::format_utc;
 pub const MAX_CHECKS: usize = 2;
 /// The longest yonderd waits for another writer of the ledger.
 pub const LEDGER_WAIT: Duration = Duration::from_secs(1);
+/// How often a wait for a check looks at `stop`.
+const STOP_POLL: Duration = Duration::from_millis(50);
+/// After a stop, how long to wait for checks to end (they end at once).
+const STOP_GRACE: Duration = Duration::from_millis(1000);
 
 /// Somewhere to tell the owner on this computer.
 pub trait Notifier {
@@ -105,9 +109,12 @@ impl<L: Lead, N: Notifier> Daemon<L, N> {
     /// Once `stop` is set: waits for the running checks, which end at once,
     /// keeping nothing of them. Their reminders moved on already; a change
     /// they saw is seen again, against the old baseline, next time.
+    /// Bounded by `STOP_GRACE`: a check slow to end is left to the exit.
     pub fn finish(&mut self) {
+        let until = std::time::Instant::now() + STOP_GRACE;
         while !self.running.is_empty() {
-            match self.done_rx.recv() {
+            let left = until.saturating_duration_since(std::time::Instant::now());
+            match self.done_rx.recv_timeout(left) {
                 Ok((job, _)) => self.running.remove(&job.id),
                 Err(_) => break,
             };
@@ -149,14 +156,27 @@ impl<L: Lead, N: Notifier> Daemon<L, N> {
     }
 
     /// Records finished checks: one, waiting for it, with `block`; else
-    /// those done by now.
+    /// those done by now. Once stopping, records nothing and returns; the
+    /// channel never closes (the daemon holds a sender), so a wait with
+    /// nothing running would never end.
     fn settle_checks(&mut self, now: i64, block: bool) -> Result<(), StoreError> {
         loop {
-            let done = if block { self.done_rx.recv().ok() } else { self.done_rx.try_recv().ok() };
+            if self.stopping() || (block && self.running.is_empty()) {
+                return Ok(());
+            }
+            let done = if block {
+                match self.done_rx.recv_timeout(STOP_POLL) {
+                    Ok(done) => Some(done),
+                    Err(RecvTimeoutError::Timeout) => continue,
+                    Err(RecvTimeoutError::Disconnected) => None,
+                }
+            } else {
+                self.done_rx.try_recv().ok()
+            };
             let Some((job, result)) = done else { return Ok(()) };
             self.running.remove(&job.id);
             if self.stopping() {
-                continue;
+                return Ok(());
             }
             match &result {
                 Ok(out) => (self.log)(&format!("{} check ok, output hash {}", job.id, &out.hash[..12])),

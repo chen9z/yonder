@@ -1,8 +1,9 @@
 //! The lead agent's terminal, through the `hc` command: the first live
 //! terminal carrying its label (`hc ls --json --label key=value`), written
 //! to with `hc send`. Every call is bounded in time and ends when the
-//! daemon stops. A send that hc refused, or that never started, surely did
-//! not arrive; one cut short may have.
+//! daemon stops. A send that never started, or that hc refused before
+//! typing anything (`REFUSED_BEFORE_TYPING`), surely did not arrive; any
+//! other failure may have.
 
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
@@ -17,6 +18,13 @@ const LS_TIMEOUT: Duration = Duration::from_secs(15);
 /// `hc send` waits while someone has a draft typed in the terminal.
 const SEND_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_REPLY: usize = 1 << 20;
+
+/// Error kinds of `terminal.send` (`hc schema`) raised before anything is
+/// typed: no such terminal or machine (checked on an isolated core),
+/// bad parameters, and `--if` not matching (its hint says "nothing was
+/// typed"). Others, `finished` and `blocked` among them, are not known to
+/// come before typing, so they count as maybe arrived.
+pub const REFUSED_BEFORE_TYPING: &[&str] = &["not_found", "machine_unknown", "invalid_params", "status_mismatch"];
 
 /// Where yonderd sends envelopes to.
 pub trait Lead {
@@ -63,9 +71,9 @@ impl Hc {
     }
 }
 
-/// How a run of hc went: refused (it says why, on stderr) or never started
-/// is `NotSent`; cut short, killed, or failing without saying why is
-/// `Unknown`.
+/// How a run of hc went: never started, or refused with an error kind of
+/// `REFUSED_BEFORE_TYPING` (on stderr), is `NotSent`; cut short, killed,
+/// any other kind, or failing without a kind is `Unknown`.
 fn outcome(verb: &str, bin: &Path, run: Result<(ExitStatus, Vec<u8>), CheckError>) -> Result<Vec<u8>, SendError> {
     let (status, out) = match run {
         Ok(done) => done,
@@ -76,10 +84,18 @@ fn outcome(verb: &str, bin: &Path, run: Result<(ExitStatus, Vec<u8>), CheckError
     if status.success() {
         return Ok(out);
     }
-    match (status.code(), hc_error(&out)) {
-        (Some(code), Some(why)) => Err(SendError::NotSent(format!("hc {verb}: exit:{code}: {why}"))),
-        (Some(code), None) => Err(SendError::Unknown(format!("hc {verb}: exit:{code}, not saying why: {}", first_line(&out)))),
-        (None, _) => Err(SendError::Unknown(format!("hc {verb}: killed by signal {}", status.signal().unwrap_or(0)))),
+    let Some(code) = status.code() else {
+        return Err(SendError::Unknown(format!("hc {verb}: killed by signal {}", status.signal().unwrap_or(0))));
+    };
+    match hc_error(&out) {
+        Some(HcError { kind: Some(kind), message }) if REFUSED_BEFORE_TYPING.contains(&kind.as_str()) => {
+            Err(SendError::NotSent(format!("hc {verb}: exit:{code}: {kind}: {message}")))
+        }
+        Some(HcError { kind, message }) => {
+            let kind = kind.as_deref().unwrap_or("no kind");
+            Err(SendError::Unknown(format!("hc {verb}: exit:{code}: {kind}: {message}")))
+        }
+        None => Err(SendError::Unknown(format!("hc {verb}: exit:{code}, not saying why: {}", first_line(&out)))),
     }
 }
 
@@ -106,13 +122,20 @@ fn first_live(out: &[u8]) -> Result<Option<String>, String> {
     Ok(live.and_then(|t| t["address"].as_str()).map(String::from))
 }
 
-/// What hc said went wrong: the `error.message` (or `error.kind`) of a
-/// JSON line `{"error": {...}}`, if it said.
-fn hc_error(out: &[u8]) -> Option<String> {
+/// What hc said went wrong, in a JSON line `{"error": {"kind": ..., "message": ...}}`.
+#[derive(Debug, PartialEq)]
+struct HcError {
+    kind: Option<String>,
+    message: String,
+}
+
+fn hc_error(out: &[u8]) -> Option<HcError> {
     let text = String::from_utf8_lossy(out);
     text.lines().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok()).find_map(|v| {
-        let e = v.get("error")?;
-        e["message"].as_str().or(e["kind"].as_str()).map(String::from)
+        let e = v.get("error")?.as_object()?;
+        let kind = e.get("kind").and_then(|k| k.as_str()).map(String::from);
+        let message = e.get("message").and_then(|m| m.as_str()).unwrap_or("").to_string();
+        Some(HcError { kind, message })
     })
 }
 
@@ -144,9 +167,17 @@ mod tests {
         let refused = br#"{"error":{"hint":"see `hc ls --all`","kind":"not_found","message":"no terminal \"t99\""}}"#.to_vec();
         let o = |run| outcome("send", bin, run);
         assert_eq!(o(Ok((exit(0), b"{}".to_vec()))), Ok(b"{}".to_vec()));
-        assert_eq!(o(Ok((exit(3), refused))), Err(SendError::NotSent("hc send: exit:3: no terminal \"t99\"".into())));
-        let kind_only = br#"{"error":{"kind":"blocked"}}"#.to_vec();
-        assert!(matches!(o(Ok((exit(11), kind_only))), Err(SendError::NotSent(_))));
+        assert_eq!(o(Ok((exit(3), refused))), Err(SendError::NotSent("hc send: exit:3: not_found: no terminal \"t99\"".into())));
+        let kind = |k: &str| format!(r#"{{"error":{{"kind":"{k}","message":"m"}}}}"#).into_bytes();
+        for k in REFUSED_BEFORE_TYPING {
+            assert!(matches!(o(Ok((exit(4), kind(k)))), Err(SendError::NotSent(_))), "{k}");
+        }
+        // Not known to come before typing, or no kind at all: maybe arrived.
+        for k in ["timeout", "blocked", "finished", "cancelled", "unavailable", "config", "internal", "something_new"] {
+            assert!(matches!(o(Ok((exit(11), kind(k)))), Err(SendError::Unknown(_))), "{k}");
+        }
+        let no_kind = br#"{"error":{"message":"no terminal"}}"#.to_vec();
+        assert!(matches!(o(Ok((exit(3), no_kind))), Err(SendError::Unknown(_))));
         let spawn = std::io::Error::from(std::io::ErrorKind::NotFound);
         assert!(matches!(o(Err(CheckError::Spawn(spawn))), Err(SendError::NotSent(_))));
         // Maybe pasted: never again.
@@ -162,14 +193,14 @@ mod tests {
         let dir = crate::test_dir("runs_the_program_it_is_given");
         let bin = dir.join("hc");
         // Errors on stderr, as hc prints them.
-        let script = "#!/bin/sh\ncase $1 in\n ls) echo '{\"terminals\":[{\"address\":\"t9\",\"state\":\"live\"}]}' ;;\n send) printf '%s|%s' \"$2\" \"$3\" > \"$(dirname \"$0\")/sent\" ;;\n *) echo '{\"error\":{\"message\":\"no\"}}' >&2; exit 3 ;;\nesac\n";
+        let script = "#!/bin/sh\ncase $1 in\n ls) echo '{\"terminals\":[{\"address\":\"t9\",\"state\":\"live\"}]}' ;;\n send) printf '%s|%s' \"$2\" \"$3\" > \"$(dirname \"$0\")/sent\" ;;\n *) echo '{\"error\":{\"kind\":\"not_found\",\"message\":\"no\"}}' >&2; exit 3 ;;\nesac\n";
         std::fs::write(&bin, script).unwrap();
         std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         let mut hc = Hc { bin: bin.clone(), label: "yonder.role=lead".into(), stop: &NEVER };
         assert_eq!(hc.find(), Ok(Some("t9".into())));
         hc.send("t9", "[yonder kind=remind]\nwater").unwrap();
         assert_eq!(std::fs::read_to_string(dir.join("sent")).unwrap(), "t9|[yonder kind=remind]\nwater");
-        assert_eq!(hc.call(&["rm"], LS_TIMEOUT), Err(SendError::NotSent("hc rm: exit:3: no".into())));
+        assert_eq!(hc.call(&["rm"], LS_TIMEOUT), Err(SendError::NotSent("hc rm: exit:3: not_found: no".into())));
         let missing = Hc { bin: dir.join("nope"), ..hc };
         assert!(matches!(missing.call(&["ls"], LS_TIMEOUT), Err(SendError::NotSent(e)) if e.contains("cannot run")));
         std::fs::remove_dir_all(dir).unwrap();

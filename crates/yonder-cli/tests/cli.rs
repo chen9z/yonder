@@ -44,8 +44,19 @@ impl Ledger {
 
     /// One yonderd round at `now`, which must succeed.
     fn round(&self, now: i64, lead: &str) {
-        let out = self.yonderd(&["--once", "--now", &when::format_utc(now)]).env("FAKE_HC_LEAD", lead).output().unwrap();
+        self.round_with(now, lead, "");
+    }
+
+    /// One round with the fake hc's send failing with `send_error`, if not empty.
+    fn round_with(&self, now: i64, lead: &str, send_error: &str) {
+        let mut cmd = self.yonderd(&["--once", "--now", &when::format_utc(now)]);
+        cmd.env("FAKE_HC_LEAD", lead).env("FAKE_HC_SEND_ERROR", send_error);
+        let out = cmd.output().unwrap();
         assert!(out.status.success(), "{}", stderr(&out));
+    }
+
+    fn status(&self) -> serde_json::Value {
+        serde_json::from_str(&self.ok(&["ctl", "status", "--json"])).unwrap()
     }
 
     /// What the fake hc was sent.
@@ -354,6 +365,74 @@ fn yonderd_stops_in_time_with_a_check_running() {
     // The stopped check left nothing behind.
     let r = &l.json(&["remind", "ls", "--json"])[0];
     assert_eq!((&r["check_failures"], &r["last_checked_at"]), (&0.into(), &serde_json::Value::Null), "{r}");
+}
+
+#[test]
+fn yonderd_once_stops_in_time_with_a_check_running() {
+    let l = Ledger::new("yonderd_once_stops_in_time_with_a_check_running");
+    let now = when::now();
+    // Set with a quick baseline, then made slow, so the round's run hangs.
+    let flag = l.0.join("slow");
+    let cmd = format!("if [ -f {0} ]; then sleep 30; fi; echo ok", flag.display());
+    l.ok(&["remind", "set", "slow", "--every", "1m", "--check", &cmd]);
+    std::fs::write(&flag, "").unwrap();
+    let before = l.json(&["remind", "ls", "--json"])[0]["next_fire_at"].clone();
+    let mut once = l.yonderd(&["--once", "--now", &when::format_utc(now + 120)]).stderr(Stdio::null()).spawn().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    // The round has fired it (moved it on) and is waiting for its check.
+    while l.json(&["remind", "ls", "--json"])[0]["next_fire_at"] == before {
+        assert!(Instant::now() < deadline, "the check never started");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(once.try_wait().unwrap().is_none(), "the round should still be waiting for the check");
+    // SAFETY: signals the child this test started.
+    unsafe { libc::kill(once.id() as libc::pid_t, libc::SIGTERM) };
+    let stopped = Instant::now();
+    let status = loop {
+        if let Some(status) = once.try_wait().unwrap() {
+            break status;
+        }
+        if stopped.elapsed() > Duration::from_secs(2) {
+            let _ = once.kill();
+            panic!("yonderd --once still running 2s after SIGTERM");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(status.code(), Some(0));
+    let r = &l.json(&["remind", "ls", "--json"])[0];
+    assert_eq!((&r["check_failures"], &r["last_checked_at"]), (&0.into(), &serde_json::Value::Null), "{r}");
+}
+
+#[test]
+fn hc_errors_after_typing_are_never_sent_again() {
+    let l = Ledger::new("hc_errors_after_typing_are_never_sent_again");
+    let now = when::now();
+    l.ok(&["remind", "set", "喝水", "--in", "1m"]);
+    // Typed, then hc failed with a kind that is not a refusal.
+    l.round_with(now + 120, "t9", "timeout");
+    assert_eq!(l.sent().matches("id=R-0001 ").count(), 1);
+    assert_eq!((&l.status()["pending"], &l.status()["lost"]), (&0.into(), &1.into()));
+    for t in [135, 150, 165] {
+        l.round(now + t, "t9");
+    }
+    assert_eq!(l.sent().matches("id=R-0001 ").count(), 1, "{}", l.sent());
+    assert_eq!(l.status()["lost"], 1);
+}
+
+#[test]
+fn hc_refusals_are_sent_again() {
+    let l = Ledger::new("hc_refusals_are_sent_again");
+    let now = when::now();
+    l.ok(&["remind", "set", "喝水", "--in", "1m"]);
+    // Refused before typing: nothing arrived, so it waits.
+    l.round_with(now + 120, "t9", "not_found");
+    assert_eq!(l.sent(), "");
+    assert_eq!((&l.status()["pending"], &l.status()["lost"]), (&1.into(), &0.into()));
+    l.round(now + 135, "t9");
+    l.round(now + 150, "t9");
+    assert_eq!(l.sent().matches("id=R-0001 ").count(), 1, "{}", l.sent());
+    assert_eq!((&l.status()["pending"], &l.status()["lost"]), (&0.into(), &0.into()));
 }
 
 #[test]

@@ -90,7 +90,10 @@ fn run(cli: Cli) -> Result<(), Fail> {
 
     if cli.once {
         let now = now.unwrap_or_else(when::now);
-        return daemon.tick(now, true).map_err(|e| (e.code(), e.to_string(), "try again; the log says more"));
+        let ticked = daemon.tick(now, true);
+        // Stopped mid-round: the checks still running end now, not orphaned.
+        daemon.finish();
+        return ticked.map_err(|e| (e.code(), e.to_string(), "try again; the log says more"));
     }
     let tick = Duration::from_secs(config.daemon.tick_secs);
     log.borrow_mut().line(&format!("started, pid {}, a round every {}s", std::process::id(), tick.as_secs()));
