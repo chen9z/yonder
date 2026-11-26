@@ -93,6 +93,7 @@ pub fn App() -> impl IntoElement {
             }
         }
     });
+    effect(move || desktop_menu(current.with(|c| c.0.is_some())));
     view()
         .flex_1()
         .bg(theme::BACKGROUND)
@@ -107,6 +108,25 @@ pub fn App() -> impl IntoElement {
         }))
         // The sheet of choices, over every page (the computers' too).
         .child(pick::host())
+}
+
+/// The menu bar on a desktop: the platform's usual one (Quit ⌘Q, Close
+/// ⌘W, the text fields' Edit), with Settings ⌘, while a computer is open.
+fn desktop_menu(open: bool) {
+    use nsh_core::desktop::MenuRole;
+    use nsh_core::element::desktop::{set_application_menu, MenuItem};
+    let _ = i18n::chinese();
+    let role = MenuItem::role;
+    let settings = MenuItem::new(t!("Settings")).shortcut("mod+,").disabled(!open).on_select(|| {
+        if nav::routes().with_untracked(|r| r.0.last().map(Route::key)) != Some(Route::Settings.key()) {
+            nav::push(Route::Settings);
+        }
+    });
+    set_application_menu(vec![
+        MenuItem::submenu("Yonder", [role(MenuRole::About), MenuItem::separator(), settings, MenuItem::separator(), role(MenuRole::Hide), role(MenuRole::HideOthers), role(MenuRole::ShowAll), MenuItem::separator(), role(MenuRole::Quit)]),
+        MenuItem::submenu("Edit", [role(MenuRole::Undo), role(MenuRole::Redo), MenuItem::separator(), role(MenuRole::Cut), role(MenuRole::Copy), role(MenuRole::Paste), role(MenuRole::SelectAll)]),
+        MenuItem::submenu("Window", [role(MenuRole::Minimize), role(MenuRole::Zoom), role(MenuRole::ToggleFullScreen), MenuItem::separator(), role(MenuRole::Close)]),
+    ]);
 }
 
 fn connected(live: Live) -> impl IntoElement {

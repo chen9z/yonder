@@ -1571,9 +1571,9 @@ fn civil(days: i64) -> (i64, u32, u32) {
     (yoe + era * 400 + i64::from(month <= 2), month, date)
 }
 
-/// The phone's offset from UTC at `secs`, in seconds (its time zone, as
-/// the system keeps it).
-#[cfg(target_os = "android")]
+/// The phone's (or the Mac's) offset from UTC at `secs`, in seconds (its
+/// time zone, as the system keeps it).
+#[cfg(unix)]
 fn utc_offset(secs: i64) -> i64 {
     let at = secs as libc::time_t;
     // SAFETY: `localtime_r` writes only into `tm`, which outlives the call.
@@ -1581,7 +1581,7 @@ fn utc_offset(secs: i64) -> i64 {
     if unsafe { libc::localtime_r(&at, &mut tm) }.is_null() { 0 } else { tm.tm_gmtoff as i64 }
 }
 
-#[cfg(not(target_os = "android"))]
+#[cfg(not(unix))]
 fn utc_offset(_: i64) -> i64 {
     0
 }
@@ -1589,6 +1589,31 @@ fn utc_offset(_: i64) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Run again by itself in each zone (`TZ` is read once in a process).
+    #[cfg(unix)]
+    #[test]
+    fn utc_offset_follows_local_zone() {
+        // 2025-01-15 and 2025-07-15, noon UTC: New York keeps summer time.
+        const WINTER: i64 = 1_736_942_400;
+        const SUMMER: i64 = 1_752_580_800;
+        const ZONES: [(&str, (i64, i64)); 3] = [("Asia/Shanghai", (28_800, 28_800)), ("America/New_York", (-18_000, -14_400)), ("UTC", (0, 0))];
+        if let Ok(zone) = std::env::var("UTC_OFFSET_ZONE") {
+            let want = ZONES.iter().find(|(z, _)| *z == zone).unwrap().1;
+            assert_eq!((utc_offset(WINTER), utc_offset(SUMMER)), want, "{zone}");
+            return;
+        }
+        for (zone, _) in ZONES {
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "chat::tests::utc_offset_follows_local_zone", "--test-threads=1"])
+                .env("TZ", zone)
+                .env("UTC_OFFSET_ZONE", zone)
+                .output()
+                .unwrap();
+            let said = String::from_utf8_lossy(&out.stdout);
+            assert!(out.status.success() && said.contains("1 passed"), "{zone}: {said}{}", String::from_utf8_lossy(&out.stderr));
+        }
+    }
 
     fn line(id: &str, at: u64) -> Line {
         Line { id: id.into(), said: Said::Stopped, at }

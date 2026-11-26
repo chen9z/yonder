@@ -402,8 +402,9 @@ fn shown(engine: Engine, address: String, swipes: Swipes, talk: Option<String>) 
             let viewer = viewer.clone();
             move || {
                 hardware_keys(viewer.clone());
+                let viewer = viewer.clone();
                 // Talked to from the field under it: no sheet to write in.
-                key_bar(viewer.clone(), latch, (!talks).then_some(writing))
+                when(move || prefs.bar.get(), move || key_bar(viewer.clone(), latch, (!talks).then_some(writing)))
             }
         }))
         .child(match talk {

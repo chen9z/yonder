@@ -10,6 +10,7 @@ use crate::i18n::tr;
 use crate::theme;
 use crate::ui;
 use herdc_engine::AgentView;
+use nsh_core::element::desktop::{popup_menu_at, MenuItem};
 use nsh_core::prelude::*;
 use serde_json::{json, Value};
 
@@ -489,7 +490,7 @@ fn agent_row(live: Live, l: ReadSignal<Line>, now: Signal<u64>, inline: bool, fo
         let elsewhere = elsewhere.clone();
         move || row.with(|r| r.as_ref().map(|r| spoken(&r.4, r.5.as_deref(), elsewhere().as_deref(), r.1)).unwrap_or_default())
     };
-    let (press, hold, swiper, helped, acted) = (live.clone(), live.clone(), live.clone(), live.clone(), live);
+    let (press, hold, swiper, helped, menued, acted) = (live.clone(), live.clone(), live.clone(), live.clone(), live.clone(), live);
     // How far the row is pulled aside (left: open on its buttons), where it
     // was when the finger took it, and whether a finger has it.
     let pulled = signal(0.0f32);
@@ -680,6 +681,22 @@ fn agent_row(live: Live, l: ReadSignal<Line>, now: Signal<u64>, inline: bool, fo
                             nav::workspace();
                         }
                     }
+                })
+                // A right click (on a desktop): the swipe's buttons, as a menu.
+                .on_context_menu(move |e: &ContextMenuEvent| {
+                    let Some(a) = agent() else { return };
+                    close_swiped();
+                    let (pin, stopper, address) = (menued.clone(), menued.clone(), a.address.clone());
+                    drop(popup_menu_at(
+                        vec![
+                            MenuItem::new(if a.pinned { t!("Unpin") } else { t!("Pin") })
+                                .on_select(move || pin.run("terminal.pin", json!({ "terminal": a.address, "pinned": !a.pinned }))),
+                            MenuItem::new(t!("Stop")).on_select(move || {
+                                spawn(stop(stopper.clone(), address.clone()));
+                            }),
+                        ],
+                        e.page_position,
+                    ));
                 })
                 .on_long_press(move || {
                     // Held still while pulled aside, or open: the swipe's, not the menu's.

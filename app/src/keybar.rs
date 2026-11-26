@@ -133,8 +133,8 @@ pub fn spoken(shows: &str) -> String {
     said.to_owned()
 }
 
-/// Settings, Key bar: the keys on it, to move or take off, and the others
-/// to put on.
+/// Settings, Key bar: whether it shows, the keys on it, to move or take
+/// off, and the others to put on.
 pub fn keybar_page() -> nsh_core::element::Screen {
     let prefs = use_context::<Prefs>().expect("prefs");
     let keys = prefs.keys;
@@ -144,6 +144,8 @@ pub fn keybar_page() -> nsh_core::element::Screen {
         scroll().flex_1().bg(theme::CANVAS).keyboard_taps(KeyboardTaps::Handled).child(
             view()
                 .pb(move || ui::bottom_inset() + px(24.0))
+                // Off at first on a desktop: its keyboard has these keys.
+                .child(ui::card(vec![ui::row(|| t!("Show the key bar").into(), String::new).child(ui::toggle(prefs.bar, t!("Show the key bar")))]).mt(px(12.0)))
                 .child(ui::heading(|| t!("ON THE BAR").into()))
                 .child(each(move || keys.get(), |id| id.clone(), move |id, _| on_bar(keys, id)))
                 .child(ui::heading(|| t!("MORE KEYS").into()))

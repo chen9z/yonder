@@ -385,6 +385,7 @@ fn zh(en: &str) -> Option<&'static str> {
         "Type, paste or speak it" => "输入、粘贴，或用语音输入",
         "It goes in as one paste, then Enter." => "整段粘贴进去，再按回车。",
         "Key bar" => "按键栏",
+        "Show the key bar" => "显示按键栏",
         "{} keys" => "{} 个键",
         "ON THE BAR" => "栏上的键",
         "MORE KEYS" => "更多按键",

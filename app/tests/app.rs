@@ -40,6 +40,17 @@ fn answer(app: &mut Headless, button: &'static str, says: &'static str) {
     });
 }
 
+/// `secs` as a conversation dates what was said before yesterday:
+/// month/day hour:minute, in the local zone.
+#[cfg(unix)]
+fn local_time(secs: i64) -> String {
+    let at = secs as libc::time_t;
+    // SAFETY: `localtime_r` writes only into `tm`, which outlives the call.
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    assert!(!unsafe { libc::localtime_r(&at, &mut tm) }.is_null());
+    format!("{}/{} {:02}:{:02}", tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min)
+}
+
 #[test]
 fn adds_a_computer_then_works_there() {
     let runtime = tokio::runtime::Runtime::new().unwrap();
@@ -1020,7 +1031,8 @@ fn a_pi_main_agent_is_talked_to_as_a_conversation() {
     app.wait_for_within("text:Sending…", SLOW).unwrap();
     app.wait_for_within("text:Done with hello", SLOW).unwrap();
     app.wait_until("no longer waiting", SLOW, |s| s.count("text:Sending…") == Ok(0) && s.count("text:Sent") == Ok(0)).unwrap();
-    app.wait_for("text:11/5 17:59").unwrap();
+    // 2026-11-05T17:59:34Z, in this machine's zone (as the app shows it).
+    app.wait_for(&format!("text:{}", local_time(1_793_901_574))).unwrap();
     // Pi's status line over the field: model, thinking, context used.
     app.wait_for_within("text:model-x · high", SLOW).unwrap();
     app.wait_for("text:Context 13%").unwrap();

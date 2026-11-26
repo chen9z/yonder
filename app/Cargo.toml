@@ -24,14 +24,25 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time", "m
 
 ring = "0.17"
 
-[target.'cfg(target_os = "android")'.dependencies]
-jni = "0.21"
+[features]
+# Passwords kept as they are, for the headless tests (tests/app.rs): they
+# never reach the keychain. A release build with it does not compile.
+plain-vault = []
+
+[target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+
 [dev-dependencies]
+herdc-app = { path = ".", features = ["plain-vault"] }
 herdc-testkit = { path = "../crates/herdc-testkit" }
 nsh-engine = "0.4.0"
 nsh-testing = { version = "0.4.0", default-features = false }
+
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"
 
 # No debug info in tests and clippy builds: on macOS it stays in object
 # files beside them, a new set each incremental build, never cleaned

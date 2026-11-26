@@ -1338,6 +1338,7 @@ dependencies = [
 name = "herdc-app"
 version = "0.1.0"
 dependencies = [
+ "herdc-app",
  "herdc-engine",
  "herdc-model",
  "herdc-ssh",
