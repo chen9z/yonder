@@ -139,6 +139,16 @@ fn bad_duration(s: &str) -> Fail {
     Fail { code: "bad_time", msg: format!("{s:?} is not a duration"), hint: DURATION_HINT }
 }
 
+/// `now` and the duration `d` later, no later than the year 9999.
+fn later(now: i64, d: &str) -> Result<i64, Fail> {
+    let secs = when::parse_duration(d).ok_or_else(|| bad_duration(d))?;
+    when::add(now, secs).ok_or(Fail {
+        code: "bad_time",
+        msg: format!("{d:?} from now is past the year 9999"),
+        hint: "give a shorter duration",
+    })
+}
+
 fn main() -> ExitCode {
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
@@ -201,8 +211,7 @@ fn run(cmd: Cmd) -> Result<(), Fail> {
             }
         }
         Cmd::Remind(RemindCmd::Snooze { id, by }) => {
-            let secs = when::parse_duration(&by).ok_or_else(|| bad_duration(&by))?;
-            print_reminder(&store.snooze(&id, now + secs, now)?);
+            print_reminder(&store.snooze(&id, later(now, &by)?, now)?);
         }
         Cmd::Remind(RemindCmd::Cancel { id }) => print_reminder(&store.cancel_reminder(&id, now)?),
         Cmd::Remind(RemindCmd::Due { now: at, json }) => {
@@ -234,7 +243,7 @@ fn set_reminder(
     now: i64,
 ) -> Result<(), Fail> {
     let (next_fire_at, every) = match (when.after, when.at, when.every) {
-        (Some(d), _, _) => (now + when::parse_duration(&d).ok_or_else(|| bad_duration(&d))?, None),
+        (Some(d), _, _) => (later(now, &d)?, None),
         (_, Some(at), _) => {
             let t = when::parse_local(&at).ok_or(Fail {
                 code: "bad_time",
@@ -253,7 +262,12 @@ fn set_reminder(
                 msg: format!("{spec:?} is not a repeat rule"),
                 hint: "use 5m, 2h, 1d, daily@09:00 or weekly:1@09:00 (1 is Monday)",
             })?;
-            (rule.next_after(now), Some(rule))
+            let next = rule.next_after(now).ok_or(Fail {
+                code: "bad_rule",
+                msg: format!("{spec:?} next goes off past the year 9999"),
+                hint: "give a shorter repeat",
+            })?;
+            (next, Some(rule))
         }
         (None, None, None) => unreachable!("clap requires one of --in, --at, --every"),
     };
@@ -281,11 +295,13 @@ fn set_reminder(
     println!("{} set: {}", r.id, r.content);
     println!("next: {} local ({}), {}", when::format_local(next_fire_at), r.next_fire_at, rule_of(&r));
     if let Some(out) = baseline {
+        // Mask first: cutting could leave half a key the masking no longer knows.
+        let out = redact(&out);
         let mut echo: String = out.chars().take(ECHO_CHARS).collect();
         if echo.len() < out.len() {
             echo.push_str("\n…");
         }
-        println!("check baseline:\n{}", redact(&echo));
+        println!("check baseline:\n{echo}");
     }
     Ok(())
 }

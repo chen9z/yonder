@@ -96,7 +96,7 @@ fn daily_reminder_shows_next_local_time() {
     let before = when::now();
     l.ok(&["remind", "set", "早报", "--every", "daily@09:00"]);
     let listed = l.ok(&["remind", "ls"]);
-    let next = when::Rule::parse("daily@09:00").unwrap().next_after(before);
+    let next = when::Rule::parse("daily@09:00").unwrap().next_after(before).unwrap();
     assert!(listed.contains(&when::format_local(next)), "{listed}");
     assert!(listed.contains("daily@09:00"));
 }
@@ -130,6 +130,28 @@ fn check_does_not_see_secrets() {
 }
 
 #[test]
+fn snooze_past_9999_changes_nothing() {
+    let l = Ledger::new("snooze_past_9999_changes_nothing");
+    l.ok(&["remind", "set", "x", "--in", "5m"]);
+    let before = l.json(&["remind", "ls", "--json"]);
+    let out = l.run(&["remind", "snooze", "R-0001", "--by", "9223372036854775807s"]);
+    assert!(!out.status.success());
+    assert!(stderr(&out).starts_with("bad_time: ") && stderr(&out).lines().count() == 1, "{}", stderr(&out));
+    assert_eq!(l.json(&["remind", "ls", "--json"]), before);
+}
+
+#[test]
+fn baseline_is_masked_before_it_is_cut() {
+    let l = Ledger::new("baseline_is_masked_before_it_is_cut");
+    // The key straddles the 1500th character: cut first, its head would
+    // be too short to look like a key and would show.
+    let check = "printf '%1489s' '' | tr ' ' x; echo ' sk-1234567890abcdefghijklmno'";
+    let out = l.ok(&["remind", "set", "x", "--every", "5m", "--check", check]);
+    assert!(!out.contains("sk-"), "{out}");
+    assert!(out.contains("[REDACTED]"), "{out}");
+}
+
+#[test]
 fn bad_input_is_one_line() {
     let l = Ledger::new("bad_input_is_one_line");
     for (args, code) in [
@@ -140,6 +162,11 @@ fn bad_input_is_one_line() {
         (&["remind", "set", "x", "--every", "hourly"][..], "bad_rule: "),
         (&["remind", "set", "x", "--in", "5m", "--task", "T-0009"][..], "not_found: "),
         (&["remind", "due", "--now", "yesterday"][..], "bad_time: "),
+        (&["remind", "set", "x", "--in", "9223372036854775807s"][..], "bad_time: "),
+        (&["remind", "set", "x", "--in", "3000000d"][..], "bad_time: "),
+        (&["remind", "set", "x", "--every", "99999999999d"][..], "bad_rule: "),
+        (&["remind", "set", "x", "--every", "daily@-1:00"][..], "bad_rule: "),
+        (&["remind", "set", "x", "--at", "2030-01-01 -1:00"][..], "bad_time: "),
     ] {
         let out = l.run(args);
         assert!(!out.status.success(), "{args:?}");

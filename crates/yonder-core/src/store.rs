@@ -437,7 +437,7 @@ mod tests {
         let rule = Rule::parse("5m").unwrap();
         let new = NewReminder {
             content: "trainer log".into(),
-            next_fire_at: rule.next_after(T0),
+            next_fire_at: rule.next_after(T0).unwrap(),
             every: Some(rule),
             check: Some(("tail -1 /tmp/example/log".into(), "ab".repeat(32))),
             task_id: Some(task.id.clone()),
