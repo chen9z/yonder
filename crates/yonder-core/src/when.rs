@@ -33,7 +33,8 @@ pub fn parse_utc(s: &str) -> Option<i64> {
     Some(days_from_civil(y, m, d) * 86400 + h * 3600 + min * 60 + sec)
 }
 
-/// A local `YYYY-MM-DD HH:MM[:SS]` (or with `T` between).
+/// A local `YYYY-MM-DD HH:MM[:SS]` (or with `T` between), if the ledger
+/// holds it: west of Greenwich the last hours of 9999 are already 10000.
 pub fn parse_local(s: &str) -> Option<i64> {
     let (date, time) = s.trim().split_once([' ', 'T'])?;
     let (y, m, d) = parse_date(date)?;
@@ -45,7 +46,7 @@ pub fn parse_local(s: &str) -> Option<i64> {
     tm.tm_hour = h as i32;
     tm.tm_min = min as i32;
     tm.tm_sec = sec as i32;
-    from_local(tm)
+    from_local(tm).filter(|t| (0..=MAX_TIME).contains(t))
 }
 
 /// `t` as local `YYYY-MM-DD HH:MM`.
@@ -271,6 +272,12 @@ mod tests {
             assert_eq!(parse_local(bad), None, "{bad}");
         }
         assert_eq!(parse_local("tomorrow"), None);
+        // Whatever the zone, only times the ledger holds (the CLI tests
+        // pin a zone west of Greenwich).
+        let last = parse_local("9999-12-31 23:59");
+        assert!(last.is_none_or(|t| t <= MAX_TIME), "{last:?}");
+        let first = parse_local("1970-01-01 00:00");
+        assert!(first.is_none_or(|t| t >= 0), "{first:?}");
     }
 
     #[test]

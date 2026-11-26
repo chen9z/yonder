@@ -14,11 +14,11 @@ use crate::when::{Rule, format_utc};
 
 /// The schema, one step per ledger version; `PRAGMA user_version` says how
 /// many are applied. Only ever append.
-const MIGRATIONS: &[&str] = &[include_str!("schema.sql")];
+const MIGRATIONS: &[&str] = &[include_str!("schema.sql"), include_str!("schema2.sql")];
 
 const TASK_COLS: &str = "id, title, state, source, created_at, updated_at";
-const REMINDER_COLS: &str =
-    "id, content, state, next_fire_at, every_spec, snooze_until, check_cmd, check_hash, task_id, created_at, updated_at";
+pub(crate) const REMINDER_COLS: &str = "id, content, state, next_fire_at, every_spec, snooze_until, check_cmd, check_hash, \
+     check_once, check_until, last_checked_at, check_failures, check_error, last_fired_at, task_id, created_at, updated_at";
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -55,7 +55,7 @@ impl StoreError {
     }
 }
 
-type Result<T> = std::result::Result<T, StoreError>;
+pub(crate) type Result<T> = std::result::Result<T, StoreError>;
 
 /// `$YONDER_STATE_DIR`, else `~/.local/state/yonder`.
 pub fn state_dir() -> Result<PathBuf> {
@@ -78,11 +78,15 @@ pub struct NewReminder {
     pub every: Option<Rule>,
     /// The check command and the hash of its first output.
     pub check: Option<(String, String)>,
+    /// The check ends after its first change.
+    pub check_once: bool,
+    /// The check stops after this; None: never.
+    pub check_until: Option<i64>,
     pub task_id: Option<String>,
 }
 
 pub struct Store {
-    conn: Connection,
+    pub(crate) conn: Connection,
 }
 
 impl Store {
@@ -167,9 +171,11 @@ impl Store {
         }
         let id = next_id(&tx, "reminders", "R")?;
         let (cmd, hash) = new.check.clone().unzip();
+        let until = new.check.as_ref().and(new.check_until).map(format_utc);
         tx.execute(
-            "INSERT INTO reminders (id, content, state, next_fire_at, every_spec, check_cmd, check_hash, task_id, created_at, updated_at)
-             VALUES (?1, ?2, 'active', ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
+            "INSERT INTO reminders (id, content, state, next_fire_at, every_spec, check_cmd, check_hash, check_once, check_until,
+                                    task_id, created_at, updated_at)
+             VALUES (?1, ?2, 'active', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)",
             params![
                 id,
                 content,
@@ -177,6 +183,8 @@ impl Store {
                 new.every.map(|r| r.spec()),
                 cmd,
                 hash,
+                new.check.is_some() && new.check_once,
+                until,
                 new.task_id,
                 now
             ],
@@ -276,7 +284,7 @@ fn get_task(conn: &Connection, id: &str) -> Result<Task> {
         .ok_or_else(|| StoreError::NotFound("task", id.into()))
 }
 
-fn get_reminder(conn: &Connection, id: &str) -> Result<Reminder> {
+pub(crate) fn get_reminder(conn: &Connection, id: &str) -> Result<Reminder> {
     conn.query_row(&format!("SELECT {REMINDER_COLS} FROM reminders WHERE id = ?1"), [id], reminder_row)
         .optional()?
         .ok_or_else(|| StoreError::NotFound("reminder", id.into()))
@@ -308,9 +316,15 @@ fn reminder_row(r: &Row) -> rusqlite::Result<Reminder> {
         snooze_until: r.get(5)?,
         check_cmd: r.get(6)?,
         check_hash: r.get(7)?,
-        task_id: r.get(8)?,
-        created_at: r.get(9)?,
-        updated_at: r.get(10)?,
+        check_once: r.get(8)?,
+        check_until: r.get(9)?,
+        last_checked_at: r.get(10)?,
+        check_failures: r.get(11)?,
+        check_error: r.get(12)?,
+        last_fired_at: r.get(13)?,
+        task_id: r.get(14)?,
+        created_at: r.get(15)?,
+        updated_at: r.get(16)?,
     })
 }
 
@@ -326,7 +340,15 @@ mod tests {
     }
 
     fn once(content: &str, at: i64) -> NewReminder {
-        NewReminder { content: content.into(), next_fire_at: at, every: None, check: None, task_id: None }
+        NewReminder {
+            content: content.into(),
+            next_fire_at: at,
+            every: None,
+            check: None,
+            check_once: false,
+            check_until: None,
+            task_id: None,
+        }
     }
 
     fn count(s: &Store, table: &str) -> i64 {
@@ -348,6 +370,30 @@ mod tests {
         s.add_task("again", None, T0).unwrap();
         drop(s);
         assert_eq!(Store::open(&dir).unwrap().tasks(true).unwrap().len(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn migrates_a_version_1_ledger() {
+        let dir = crate::test_dir("migrates_a_version_1_ledger");
+        let conn = Connection::open(dir.join("ledger.db")).unwrap();
+        conn.execute_batch(MIGRATIONS[0]).unwrap();
+        conn.pragma_update(None, "user_version", 1).unwrap();
+        conn.execute_batch(
+            "INSERT INTO tasks VALUES ('T-0001', 'back up homelab', 'open', NULL, 't', 't');
+             INSERT INTO reminders VALUES ('R-0001', 'uptime', 'active', '2026-11-26T05:00:00Z', '5m', NULL,
+                                           'uptime', 'ab', 'T-0001', 't', 't');",
+        )
+        .unwrap();
+        drop(conn);
+        let s = Store::open(&dir).unwrap();
+        let r = s.reminder("R-0001").unwrap();
+        assert_eq!((r.check_cmd.as_deref(), r.check_hash.as_deref(), r.task_id.as_deref()), (Some("uptime"), Some("ab"), Some("T-0001")));
+        assert_eq!((r.check_until, r.check_failures, r.check_once), (None, 0, false));
+        let version: i64 = s.conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(version, 2);
+        let fk: i64 = s.conn.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| r.get(0)).unwrap();
+        assert_eq!(fk, 0);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -440,10 +486,15 @@ mod tests {
             next_fire_at: rule.next_after(T0).unwrap(),
             every: Some(rule),
             check: Some(("tail -1 /tmp/example/log".into(), "ab".repeat(32))),
+            check_once: true,
+            check_until: Some(T0 + 7 * 86400),
             task_id: Some(task.id.clone()),
         };
         let r = s.add_reminder(&new, T0).unwrap();
         assert_eq!(r.every.as_deref(), Some("5m"));
+        assert!(r.check_once);
+        assert_eq!(r.check_until.as_deref(), Some("2026-12-03T04:45:22Z"));
+        assert_eq!((r.check_failures, r.last_checked_at.as_deref()), (0, None));
         assert_eq!(r.check_cmd.as_deref(), Some("tail -1 /tmp/example/log"));
         assert_eq!(r.task_id.as_deref(), Some("T-0001"));
 

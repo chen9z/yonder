@@ -4,6 +4,8 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod envelope;
+
 /// An enum stored as a snake_case word: `as_str` gives it, `parse` takes it back.
 macro_rules! words {
     ($(#[$m:meta])* $name:ident { $($(#[$vm:meta])* $v:ident = $s:literal),+ $(,)? }) => {
@@ -37,8 +39,9 @@ words! {
 }
 
 words! {
-    /// `fired`: a one-off reminder that went off.
-    ReminderState { Active = "active", Fired = "fired", Cancelled = "cancelled" }
+    /// `fired`: a one-off reminder that went off, or a `check_once` one
+    /// whose output changed. `expired`: a check past its `check_until`.
+    ReminderState { Active = "active", Fired = "fired", Cancelled = "cancelled", Expired = "expired" }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -68,6 +71,16 @@ pub struct Reminder {
     pub check_cmd: Option<String>,
     /// SHA-256 hex of the command's trimmed output, never the output.
     pub check_hash: Option<String>,
+    /// Ends after the first change.
+    pub check_once: bool,
+    /// The check stops after this; None: never.
+    pub check_until: Option<String>,
+    pub last_checked_at: Option<String>,
+    /// Failures in a row; the third is told once.
+    pub check_failures: u32,
+    /// Why the last check failed: `exit:N`, `timeout` and so on.
+    pub check_error: Option<String>,
+    pub last_fired_at: Option<String>,
     pub task_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
@@ -111,6 +124,12 @@ mod tests {
             snooze_until: None,
             check_cmd: None,
             check_hash: None,
+            check_once: false,
+            check_until: None,
+            last_checked_at: None,
+            check_failures: 0,
+            check_error: None,
+            last_fired_at: None,
             task_id: None,
             created_at: "2026-01-01T00:00:00Z".into(),
             updated_at: "2026-01-01T00:00:00Z".into(),

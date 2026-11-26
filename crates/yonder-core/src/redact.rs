@@ -39,6 +39,18 @@ pub fn redact(text: &str) -> String {
     out
 }
 
+/// `text` masked, then cut to `max` characters (`…` on a line of its own
+/// if cut). Masking first: a cut could leave half a key that no longer
+/// looks like one.
+pub fn excerpt(text: &str, max: usize) -> String {
+    let masked = redact(text);
+    let mut cut: String = masked.chars().take(max).collect();
+    if cut.len() < masked.len() {
+        cut.push_str("\n…");
+    }
+    cut
+}
+
 fn is_key_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_' || c == '-'
 }
@@ -104,6 +116,14 @@ mod tests {
             assert_eq!(redact(text), want, "{text}");
             assert_eq!(redact(want), want, "masking twice changes nothing: {want}");
         }
+    }
+
+    #[test]
+    fn excerpts_mask_before_cutting() {
+        let text = format!("{} sk-1234567890abcdefghijklmno", "x".repeat(10));
+        assert_eq!(excerpt(&text, 15), "xxxxxxxxxx [RED\n…");
+        assert_eq!(excerpt("short", 15), "short");
+        assert_eq!(excerpt("密钥很长很长", 3), "密钥很\n…");
     }
 
     #[test]

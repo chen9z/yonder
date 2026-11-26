@@ -7,6 +7,7 @@ workspace = "/tmp/example/agent-home"
 launch_cmd = ["zsh", "-lic", "exec pi"] # default empty: never started by Yonder
 herdr_space = ""
 extra_labels = []
+label = "yonder.role=lead"              # the label of its terminal; yonderd delivers there
 
 [state_file]
 enabled = true                          # default false
@@ -31,6 +32,9 @@ machine = "gpu-box"
 cwd = "~/bots/ops"
 template = "ops"
 
+[notify]
+local = false                           # default true: a macOS notification too
+
 [notify.ntfy]
 enabled = true                          # default false
 url = "http://ntfy.example:8090/yonder"
@@ -44,3 +48,12 @@ remote_dir = "~/backups/yonder-ledger"
 
 [privacy]
 default_redacted = false
+
+[hc]
+bin = "/tmp/example/bin/hc"             # default empty: hc from PATH; YONDER_HC wins
+
+[daemon]
+tick_secs = 30                          # default 15
+
+[service]
+label = "dev.yonder.daemon"             # the launchd label

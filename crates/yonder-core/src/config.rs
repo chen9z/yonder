@@ -17,6 +17,9 @@ pub struct Config {
     pub notify: Notify,
     pub backup: Backup,
     pub privacy: Privacy,
+    pub hc: Hc,
+    pub daemon: Daemon,
+    pub service: Service,
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -28,6 +31,8 @@ pub struct Lead {
     pub launch_cmd: Vec<String>,
     pub herdr_space: String,
     pub extra_labels: Vec<String>,
+    /// The `key=value` label its terminal carries.
+    pub label: String,
 }
 
 impl Default for Lead {
@@ -38,6 +43,7 @@ impl Default for Lead {
             launch_cmd: Vec::new(),
             herdr_space: String::new(),
             extra_labels: Vec::new(),
+            label: "yonder.role=lead".into(),
         }
     }
 }
@@ -84,10 +90,18 @@ impl Default for Worker {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct Notify {
+    /// A notification on this computer too (macOS only).
+    pub local: bool,
     pub ntfy: Ntfy,
+}
+
+impl Default for Notify {
+    fn default() -> Notify {
+        Notify { local: true, ntfy: Ntfy::default() }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -136,6 +150,39 @@ pub struct Privacy {
     pub default_redacted: bool,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct Hc {
+    /// The hc program; empty: `hc` from PATH. `YONDER_HC` wins over both.
+    pub bin: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct Daemon {
+    /// Seconds between yonderd's rounds.
+    pub tick_secs: u64,
+}
+
+impl Default for Daemon {
+    fn default() -> Daemon {
+        Daemon { tick_secs: 15 }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct Service {
+    /// The launchd label yonderd runs under.
+    pub label: String,
+}
+
+impl Default for Service {
+    fn default() -> Service {
+        Service { label: "dev.yonder.daemon".into() }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
     #[error("reading {0}: {1}")]
@@ -144,13 +191,23 @@ pub enum ConfigError {
     Parse(PathBuf, toml::de::Error),
     #[error("{0}: two workers are named {1:?}")]
     DuplicateWorker(PathBuf, String),
+    #[error("{0}: {1}")]
+    Invalid(PathBuf, &'static str),
 }
 
 impl Config {
-    /// `~/.config/yonder/config.toml`, or nothing without a home.
+    /// `$YONDER_CONFIG`, else `~/.config/yonder/config.toml`, else nothing.
     pub fn default_path() -> Option<PathBuf> {
+        if let Some(path) = std::env::var_os("YONDER_CONFIG").filter(|p| !p.is_empty()) {
+            return Some(path.into());
+        }
         let home = std::env::var_os("HOME").filter(|h| !h.is_empty())?;
         Some(Path::new(&home).join(".config/yonder/config.toml"))
+    }
+
+    /// The config at `default_path`, or the defaults.
+    pub fn load_default() -> Result<Config, ConfigError> {
+        Config::default_path().map_or(Ok(Config::default()), |p| Config::load(&p))
     }
 
     /// The config at `path`, or the defaults if there is no file there.
@@ -166,6 +223,12 @@ impl Config {
             if config.workers[..i].iter().any(|o| o.name == w.name) {
                 return Err(ConfigError::DuplicateWorker(path.into(), w.name.clone()));
             }
+        }
+        if !(1..=3600).contains(&config.daemon.tick_secs) {
+            return Err(ConfigError::Invalid(path.into(), "daemon.tick_secs must be 1 to 3600"));
+        }
+        if !config.lead.label.contains('=') {
+            return Err(ConfigError::Invalid(path.into(), "lead.label must be key=value"));
         }
         Ok(config)
     }
@@ -215,6 +278,11 @@ mod tests {
         assert_eq!(c.backup.remote_machine, "homelab");
         assert_eq!(c.backup.local_keep_days, 14);
         assert!(!c.privacy.default_redacted);
+        assert_eq!(c.lead.label, "yonder.role=lead");
+        assert_eq!(c.hc.bin, "/tmp/example/bin/hc");
+        assert_eq!(c.daemon.tick_secs, 30);
+        assert!(!c.notify.local);
+        assert_eq!(c.service.label, "dev.yonder.daemon");
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
@@ -231,6 +299,11 @@ mod tests {
         assert_eq!(c.notify.ntfy.click_package, "dev.yonder.app");
         assert_eq!(c.backup.local_keep_days, 30);
         assert!(c.backup.remote_machine.is_empty());
+        assert_eq!(c.lead.label, "yonder.role=lead");
+        assert!(c.hc.bin.is_empty());
+        assert_eq!(c.daemon.tick_secs, 15);
+        assert!(c.notify.local);
+        assert_eq!(c.service.label, "dev.yonder.daemon");
         // So does an empty file, and one with only some sections.
         let path = write_temp("missing_config_uses_defaults_empty", "");
         assert_eq!(Config::load(&path).unwrap(), Config::default());
@@ -250,6 +323,10 @@ mod tests {
         let twice = "[[workers]]\nname = \"ops\"\n[[workers]]\nname = \"ops\"\n";
         std::fs::write(&path, twice).unwrap();
         assert!(matches!(Config::load(&path), Err(ConfigError::DuplicateWorker(_, n)) if n == "ops"));
+        for bad in ["[daemon]\ntick_secs = 0\n", "[lead]\nlabel = \"lead\"\n"] {
+            std::fs::write(&path, bad).unwrap();
+            assert!(matches!(Config::load(&path), Err(ConfigError::Invalid(..))), "{bad}");
+        }
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 

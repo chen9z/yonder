@@ -1,10 +1,16 @@
-//! What the `yonder` programs share: the ledger (`store`), times and repeat
-//! rules (`when`), running reminder checks (`check_exec`), masking secrets
-//! (`redact`) and the config file (`config`).
+//! What the `yonder` programs share: the ledger (`store`, and `firing` for
+//! what yonderd does to it), times and repeat rules (`when`), running
+//! reminder checks (`check_exec`), the lead agent's terminal (`hc`),
+//! yonderd's rounds (`daemon`) and its launchd plist (`service`), masking secrets (`redact`) and the config
+//! file (`config`).
 
 pub mod check_exec;
 pub mod config;
+pub mod daemon;
+pub mod firing;
+pub mod hc;
 pub mod redact;
+pub mod service;
 pub mod store;
 pub mod when;
 

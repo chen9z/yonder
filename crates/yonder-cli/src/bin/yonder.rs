@@ -1,19 +1,23 @@
 //! `yonder`: a task list and reminders, kept in the ledger in
-//! `$YONDER_STATE_DIR` (default `~/.local/state/yonder`). On failure it
+//! `$YONDER_STATE_DIR` (default `~/.local/state/yonder`), and a look at
+//! yonderd, which fires the reminders. On failure it
 //! exits non-zero with one line on stderr: a stable code, what went wrong
 //! and what to do next, such as `check_failed: exit:3; ...`.
 
 use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
-use yonder_core::check_exec;
-use yonder_core::redact::redact;
+use yonder_core::config::Config;
+use yonder_core::firing::ECHO_CHARS;
+use yonder_core::hc::Hc;
+use yonder_core::redact::excerpt;
 use yonder_core::when::{self, Rule};
-use yonder_core::{NewReminder, Store, StoreError};
+use yonder_core::{NewReminder, Store, StoreError, check_exec, daemon, service, store};
 use yonder_model::{Reminder, Task, TaskState};
 
-/// What a check's first output is shown up to.
-const ECHO_CHARS: usize = 1500;
+/// How long a check runs if --for does not say, and the most it may say.
+const CHECK_FOR: &str = "7d";
+const CHECK_FOR_MAX: i64 = 90 * 86400;
 
 #[derive(Parser)]
 #[command(name = "yonder", version, about = "A task list and reminders, kept in Yonder's ledger")]
@@ -30,6 +34,20 @@ enum Cmd {
     /// Reminders: once, repeating, or watching a command's output.
     #[command(subcommand)]
     Remind(RemindCmd),
+    /// yonderd, which fires the reminders.
+    #[command(subcommand)]
+    Ctl(CtlCmd),
+}
+
+#[derive(Subcommand)]
+enum CtlCmd {
+    /// Whether yonderd runs, its last round, and what waits to be delivered.
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print a launchd plist that runs yonderd; installing it is up to you.
+    ServicePlist,
 }
 
 #[derive(Subcommand)]
@@ -58,18 +76,7 @@ enum TaskCmd {
 #[derive(Subcommand)]
 enum RemindCmd {
     /// Set a reminder.
-    Set {
-        content: String,
-        #[command(flatten)]
-        when: When,
-        /// A shell command run on each repeat; the reminder is about its
-        /// output changing. Needs --every; it must succeed now.
-        #[arg(long)]
-        check: Option<String>,
-        /// The task it is about.
-        #[arg(long)]
-        task: Option<String>,
-    },
+    Set(SetArgs),
     /// List active reminders, soonest first.
     Ls {
         /// Fired and cancelled ones too.
@@ -95,6 +102,26 @@ enum RemindCmd {
         #[arg(long)]
         json: bool,
     },
+}
+
+#[derive(Args)]
+struct SetArgs {
+    content: String,
+    #[command(flatten)]
+    when: When,
+    /// A shell command run on each repeat; the reminder is about its
+    /// output changing. Needs --every; it must succeed now.
+    #[arg(long)]
+    check: Option<String>,
+    /// How long to keep checking: a duration up to 90d, or forever.
+    #[arg(long = "for", value_name = "DURATION", requires = "check", default_value = CHECK_FOR)]
+    check_for: String,
+    /// Stop after the first change.
+    #[arg(long, requires = "check")]
+    once: bool,
+    /// The task it is about.
+    #[arg(long)]
+    task: Option<String>,
 }
 
 #[derive(Args)]
@@ -178,6 +205,9 @@ fn one_line(text: &str) -> String {
 }
 
 fn run(cmd: Cmd) -> Result<(), Fail> {
+    if let Cmd::Ctl(CtlCmd::ServicePlist) = cmd {
+        return service_plist();
+    }
     let mut store = Store::open_default()?;
     let now = when::now();
     match cmd {
@@ -197,9 +227,9 @@ fn run(cmd: Cmd) -> Result<(), Fail> {
         }
         Cmd::Task(TaskCmd::Done { id }) => print_task(&store.close_task(&id, TaskState::Done, now)?),
         Cmd::Task(TaskCmd::Cancel { id }) => print_task(&store.close_task(&id, TaskState::Cancelled, now)?),
-        Cmd::Remind(RemindCmd::Set { content, when, check, task }) => {
-            set_reminder(&mut store, content, when, check, task, now)?;
-        }
+        Cmd::Remind(RemindCmd::Set(args)) => set_reminder(&mut store, args, now)?,
+        Cmd::Ctl(CtlCmd::Status { json }) => status(&store, json)?,
+        Cmd::Ctl(CtlCmd::ServicePlist) => unreachable!("handled before the ledger opens"),
         Cmd::Remind(RemindCmd::Ls { all, json }) => {
             let reminders = store.reminders(all)?;
             if json {
@@ -234,14 +264,8 @@ fn run(cmd: Cmd) -> Result<(), Fail> {
     Ok(())
 }
 
-fn set_reminder(
-    store: &mut Store,
-    content: String,
-    when: When,
-    check: Option<String>,
-    task_id: Option<String>,
-    now: i64,
-) -> Result<(), Fail> {
+fn set_reminder(store: &mut Store, args: SetArgs, now: i64) -> Result<(), Fail> {
+    let SetArgs { content, when, check, check_for, once, task: task_id } = args;
     let (next_fire_at, every) = match (when.after, when.at, when.every) {
         (Some(d), _, _) => (later(now, &d)?, None),
         (_, Some(at), _) => {
@@ -277,6 +301,14 @@ fn set_reminder(
     if let Some(id) = &task_id {
         store.task(id)?;
     }
+    let check_until = match check_for.as_str() {
+        "forever" => None,
+        d if when::parse_duration(d).is_some_and(|s| s > CHECK_FOR_MAX) => {
+            let msg = format!("--for {d} is longer than 90d");
+            return Err(Fail { code: "bad_time", msg, hint: "give 90d or less, or forever" });
+        }
+        d => Some(later(now, d)?),
+    };
     let mut baseline = None;
     let check = match check {
         None => None,
@@ -290,20 +322,71 @@ fn set_reminder(
             Some((cmd, out.hash))
         }
     };
-    let new = NewReminder { content, next_fire_at, every, check, task_id };
+    let new = NewReminder { content, next_fire_at, every, check, check_once: once, check_until, task_id };
     let r = store.add_reminder(&new, now)?;
     println!("{} set: {}", r.id, r.content);
     println!("next: {} local ({}), {}", when::format_local(next_fire_at), r.next_fire_at, rule_of(&r));
     if let Some(out) = baseline {
-        // Mask first: cutting could leave half a key the masking no longer knows.
-        let out = redact(&out);
-        let mut echo: String = out.chars().take(ECHO_CHARS).collect();
-        if echo.len() < out.len() {
-            echo.push_str("\n…");
-        }
-        println!("check baseline:\n{echo}");
+        let until = r.check_until.as_deref().map_or("forever".into(), local);
+        let after = if r.check_once { ", or its first change" } else { "" };
+        println!("checking until {until}{after}");
+        println!("check baseline:\n{}", excerpt(&out, ECHO_CHARS));
     }
     Ok(())
+}
+
+fn status(store: &Store, json: bool) -> Result<(), Fail> {
+    let dir = store::state_dir()?;
+    let pid = daemon::running_pid(&dir).map_err(|e| Fail {
+        code: "state_dir",
+        msg: format!("reading {}: {e}", daemon::lock_path(&dir).display()),
+        hint: "check the state directory's permissions",
+    })?;
+    let last = store.meta("last_tick_at")?;
+    let pending = store.pending()?;
+    if json {
+        let v = serde_json::json!({"running": pid.is_some(), "pid": pid, "last_tick_at": last, "pending": pending});
+        println!("{}", serde_json::to_string_pretty(&v).expect("plain data"));
+        return Ok(());
+    }
+    match pid {
+        Some(pid) => println!("yonderd: running, pid {pid}"),
+        None => println!("yonderd: not running"),
+    }
+    match &last {
+        Some(t) => println!("last round: {} local ({t})", local(t)),
+        None => println!("last round: never"),
+    }
+    println!("pending deliveries: {pending}");
+    Ok(())
+}
+
+fn service_plist() -> Result<(), Fail> {
+    let config = Config::load_default().map_err(|e| Fail { code: "config", msg: e.to_string(), hint: "fix the config file" })?;
+    let dir = store::state_dir()?;
+    let exe = std::env::current_exe().and_then(|p| p.canonicalize());
+    let program = exe.map(|p| p.with_file_name("yonderd")).map_err(|e| Fail {
+        code: "no_program",
+        msg: format!("where yonder runs from: {e}"),
+        hint: "run yonder from where yonderd sits beside it",
+    })?;
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_default();
+    let hc = Hc::bin(&config.hc.bin, &home);
+    let mut env = vec![("PATH".to_string(), service::path_with(service::find_program(&hc).as_deref()))];
+    env.push(("HOME".into(), home.display().to_string()));
+    for key in ["YONDER_STATE_DIR", "YONDER_CONFIG", "YONDER_HC"] {
+        if let Some(v) = std::env::var_os(key).filter(|v| !v.is_empty()) {
+            env.push((key.into(), v.to_string_lossy().into_owned()));
+        }
+    }
+    let log = dir.join("logs/yonderd.out");
+    print!("{}", service::plist(&config.service.label, &program, &env, &log));
+    Ok(())
+}
+
+/// A ledger time as local `YYYY-MM-DD HH:MM`.
+fn local(utc: &str) -> String {
+    when::parse_utc(utc).map_or_else(|| utc.to_string(), when::format_local)
 }
 
 fn print_json<T: serde::Serialize>(items: &[T]) {
@@ -316,13 +399,17 @@ fn print_task(t: &Task) {
 }
 
 fn print_reminder(r: &Reminder) {
-    let local = |utc: &str| when::parse_utc(utc).map_or_else(|| utc.to_string(), when::format_local);
     let mut extra = String::new();
     if r.due_at() != r.next_fire_at {
         extra += &format!("  snoozed until {}", local(r.due_at()));
     }
     if r.check_cmd.is_some() {
-        extra += "  [check]";
+        let last = r.last_checked_at.as_deref().map_or("never".into(), local);
+        extra += &format!("  [check: last {last}, {} failed", r.check_failures);
+        if let Some(e) = r.check_error.as_ref().filter(|_| r.check_failures > 0) {
+            extra += &format!(" ({e})");
+        }
+        extra += "]";
     }
     if let Some(task) = &r.task_id {
         extra += &format!("  [{task}]");

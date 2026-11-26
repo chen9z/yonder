@@ -2451,6 +2451,7 @@ name = "yonder-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "libc",
  "serde",
  "serde_json",
  "yonder-core",
@@ -2464,6 +2465,7 @@ dependencies = [
  "libc",
  "rusqlite",
  "serde",
+ "serde_json",
  "sha2",
  "thiserror",
  "toml",

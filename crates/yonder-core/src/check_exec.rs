@@ -6,7 +6,8 @@
 use std::io::Read;
 use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
@@ -25,7 +26,7 @@ pub struct CheckOutput {
     pub hash: String,
 }
 
-/// Why a check failed; shown as `exit:N`, `timeout`, `output_too_large`, `spawn_failed`.
+/// Why a check failed; shown as `exit:N`, `signal:N`, `timeout`, `output_too_large`, `spawn_failed`.
 #[derive(Debug, thiserror::Error)]
 pub enum CheckError {
     #[error("exit:{0}")]
@@ -34,6 +35,9 @@ pub enum CheckError {
     Signal(i32),
     #[error("timeout")]
     Timeout,
+    /// Given up because the daemon is stopping: says nothing of the check.
+    #[error("stopped")]
+    Stopped,
     #[error("output_too_large")]
     OutputTooLarge,
     #[error("spawn_failed: {0}")]
@@ -45,7 +49,11 @@ pub fn run(cmd: &str) -> Result<CheckOutput, CheckError> {
 }
 
 pub fn run_with(cmd: &str, timeout: Duration, max_output: usize) -> Result<CheckOutput, CheckError> {
-    let deadline = Instant::now() + timeout;
+    run_until(cmd, timeout, max_output, &AtomicBool::new(false))
+}
+
+/// As `run_with`, but given up (`Stopped`) as soon as `stop` is set.
+pub fn run_until(cmd: &str, timeout: Duration, max_output: usize, stop: &AtomicBool) -> Result<CheckOutput, CheckError> {
     let mut command = Command::new("/bin/sh");
     command
         .arg("-c")
@@ -54,12 +62,36 @@ pub fn run_with(cmd: &str, timeout: Duration, max_output: usize) -> Result<Check
         .envs(std::env::vars_os().filter(|(k, _)| {
             k.to_str().is_some_and(|k| KEEP_ENV.contains(&k) || k.starts_with("LC_"))
         }))
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .process_group(0);
+        .stderr(Stdio::null());
+    let (status, buf) = capture(command, timeout, max_output, stop)?;
+    if let Some(code) = status.code().filter(|c| *c != 0) {
+        return Err(CheckError::Exit(code));
+    }
+    if let Some(sig) = std::os::unix::process::ExitStatusExt::signal(&status) {
+        return Err(CheckError::Signal(sig));
+    }
+    if buf.len() > max_output {
+        return Err(CheckError::OutputTooLarge);
+    }
+    let stdout = String::from_utf8_lossy(&buf).trim().to_string();
+    let hash = hex(&Sha256::digest(stdout.as_bytes()));
+    Ok(CheckOutput { stdout, hash })
+}
+
+/// Runs `command` in a process group of its own and reads its stdout, at
+/// most `max_output` bytes and one more to tell it went past. Ends when it
+/// has exited and its output closed, or at the deadline or `stop`, which
+/// kill the group. The environment and stderr are the caller's to set.
+pub fn capture(
+    mut command: Command,
+    timeout: Duration,
+    max_output: usize,
+    stop: &AtomicBool,
+) -> Result<(ExitStatus, Vec<u8>), CheckError> {
+    let deadline = Instant::now() + timeout;
+    command.stdin(Stdio::null()).stdout(Stdio::piped()).process_group(0);
     let mut child = command.spawn().map_err(CheckError::Spawn)?;
-    // The shell leads its group, and its pid (so the group's id) stays
+    // The child leads its group, and its pid (so the group's id) stays
     // ours until it is reaped: exits are only watched, never reaped, until
     // the group has been killed.
     let group = child.id() as libc::pid_t;
@@ -69,21 +101,27 @@ pub fn run_with(cmd: &str, timeout: Duration, max_output: usize) -> Result<Check
     };
     let mut stdout = child.stdout.take().expect("piped");
     let fd = stdout.as_raw_fd();
-    // SAFETY: changes the flags of the pipe end we own.
-    unsafe { libc::fcntl(fd, libc::F_SETFL, libc::fcntl(fd, libc::F_GETFL) | libc::O_NONBLOCK) };
+    // SAFETY: reads and sets the flags of the pipe end we own.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags == -1 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1 {
+        let e = std::io::Error::last_os_error();
+        kill_group();
+        let _ = child.wait();
+        return Err(CheckError::Spawn(e));
+    }
 
     let mut buf = Vec::new();
     let mut chunk = [0u8; 8192];
     let (mut exited, mut eof) = (false, false);
-    // Until the shell has exited and its output closed, or time is up.
+    // Until the child has exited and its output closed, or time is up.
     // Something that left the group (setsid) may hold the output open
     // forever: the deadline stops reading too.
-    let timed_out = loop {
+    let ended = loop {
         if !exited {
             match has_exited(group) {
                 Ok(true) => {
                     exited = true;
-                    // What the shell left running in its group goes too.
+                    // What it left running in its group goes too.
                     kill_group();
                 }
                 Ok(false) => {}
@@ -95,11 +133,14 @@ pub fn run_with(cmd: &str, timeout: Duration, max_output: usize) -> Result<Check
             }
         }
         if exited && eof {
-            break false;
+            break None;
+        }
+        if stop.load(Ordering::Relaxed) {
+            break Some(CheckError::Stopped);
         }
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
-            break true;
+            break Some(CheckError::Timeout);
         }
         let wait = left.min(Duration::from_millis(20));
         if eof {
@@ -109,7 +150,7 @@ pub fn run_with(cmd: &str, timeout: Duration, max_output: usize) -> Result<Check
         let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
         // SAFETY: one pollfd we own, for at most 20 ms.
         unsafe { libc::poll(&mut pfd, 1, wait.as_millis().max(1) as libc::c_int) };
-        // What is there now, but not past the deadline for a check that
+        // What is there now, but not past the deadline for a command that
         // writes without end.
         while Instant::now() < deadline {
             match stdout.read(&mut chunk) {
@@ -129,25 +170,14 @@ pub fn run_with(cmd: &str, timeout: Duration, max_output: usize) -> Result<Check
     };
     // Stop reading: whatever still holds the pipe gets EPIPE.
     drop(stdout);
-    if timed_out {
+    if let Some(e) = ended {
         kill_group();
         let _ = child.wait();
-        return Err(CheckError::Timeout);
+        return Err(e);
     }
     // Exited already, so this only reaps it.
     let status = child.wait().map_err(CheckError::Spawn)?;
-    if let Some(code) = status.code().filter(|c| *c != 0) {
-        return Err(CheckError::Exit(code));
-    }
-    if let Some(sig) = std::os::unix::process::ExitStatusExt::signal(&status) {
-        return Err(CheckError::Signal(sig));
-    }
-    if buf.len() > max_output {
-        return Err(CheckError::OutputTooLarge);
-    }
-    let stdout = String::from_utf8_lossy(&buf).trim().to_string();
-    let hash = hex(&Sha256::digest(stdout.as_bytes()));
-    Ok(CheckOutput { stdout, hash })
+    Ok((status, buf))
 }
 
 /// Whether `pid` has exited, without reaping it.
@@ -227,40 +257,69 @@ mod tests {
         assert!(start.elapsed() < Duration::from_secs(5), "{:?}", start.elapsed());
     }
 
-    /// A check that puts a process in a session of its own, out of reach
-    /// of the group kill, holding stdout open; its pid lands in `pid_file`.
-    fn escaped(pid_file: &std::path::Path, then: &str) -> String {
-        let perl = r#"use POSIX; setsid(); open my $f, ">", $ARGV[0]; print $f $$; close $f; sleep 30"#;
-        format!("perl -e '{perl}' '{}' & {then}", pid_file.display())
+    /// A process in a session of its own, out of reach of the group kill,
+    /// holding the check's stdout open. Killed when this is dropped, even
+    /// if the test fails.
+    struct Escaped {
+        dir: std::path::PathBuf,
     }
 
-    fn kill_escaped(pid_file: &std::path::Path) {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let pid = loop {
-            if let Some(pid) = std::fs::read_to_string(pid_file).ok().and_then(|p| p.trim().parse().ok()) {
-                break pid;
+    impl Escaped {
+        fn new(name: &str) -> Escaped {
+            Escaped { dir: crate::test_dir(&format!("escaped_{name}")) }
+        }
+
+        /// A check that starts it, waits until it is in its own session
+        /// (it writes its pid after setsid), then runs `then`.
+        fn check(&self, then: &str) -> String {
+            let pid = self.dir.join("pid");
+            let perl = r#"use POSIX; setsid(); open my $f, ">", "$ARGV[0].tmp"; print $f $$; close $f; rename "$ARGV[0].tmp", $ARGV[0]; sleep 30"#;
+            let wait = format!("n=0; while [ ! -s '{p}' ] && [ $n -lt 200 ]; do sleep 0.05; n=$((n+1)); done", p = pid.display());
+            format!("perl -e '{perl}' '{}' & {wait}; {then}", pid.display())
+        }
+    }
+
+    impl Drop for Escaped {
+        fn drop(&mut self) {
+            let pid = std::fs::read_to_string(self.dir.join("pid")).ok().and_then(|p| p.trim().parse().ok());
+            if let Some(pid) = pid {
+                // SAFETY: the test's own stray process.
+                unsafe { libc::kill(pid, libc::SIGKILL) };
             }
-            assert!(Instant::now() < deadline, "the escaped process never started");
-            std::thread::sleep(Duration::from_millis(20));
-        };
-        // SAFETY: a test's own stray process.
-        unsafe { libc::kill(pid, libc::SIGKILL) };
-        std::fs::remove_dir_all(pid_file.parent().unwrap()).unwrap();
+            let _ = std::fs::remove_dir_all(&self.dir);
+            if pid.is_none() && !std::thread::panicking() {
+                panic!("the escaped process never started");
+            }
+        }
     }
 
     #[test]
     fn deadline_holds_against_an_escaped_reader() {
-        let short = Duration::from_millis(500);
+        // The shell still running, and the shell gone with only the
+        // escaped process left holding stdout.
+        let short = Duration::from_secs(1);
         for (name, then) in [("running", "sleep 30"), ("exited", "echo ok")] {
-            let dir = crate::test_dir(&format!("escaped_{name}"));
-            let pid_file = dir.join("pid");
+            let escaped = Escaped::new(name);
             let start = Instant::now();
-            let r = run_with(&escaped(&pid_file, then), short, MAX_OUTPUT);
+            let r = run_with(&escaped.check(then), short, MAX_OUTPUT);
             let took = start.elapsed();
-            kill_escaped(&pid_file);
             assert!(matches!(r, Err(CheckError::Timeout)), "{name}: {r:?}");
             assert!(took < short + Duration::from_secs(2), "{name}: {took:?}");
         }
+    }
+
+    #[test]
+    fn stops_when_told() {
+        let stop = AtomicBool::new(false);
+        let start = Instant::now();
+        let r = std::thread::scope(|s| {
+            let run = s.spawn(|| run_until("sleep 30", TIMEOUT, MAX_OUTPUT, &stop));
+            std::thread::sleep(Duration::from_millis(200));
+            stop.store(true, Ordering::Relaxed);
+            run.join().unwrap()
+        });
+        assert!(matches!(r, Err(CheckError::Stopped)), "{r:?}");
+        assert!(start.elapsed() < Duration::from_secs(2), "{:?}", start.elapsed());
     }
 
     #[test]
