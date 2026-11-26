@@ -1,0 +1,18 @@
+[package]
+name = "yonder-cli"
+description = "The yonder command: a task list and reminders, kept in Yonder's ledger"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "yonder"
+path = "src/bin/yonder.rs"
+
+[dependencies]
+clap = { version = "4", default-features = false, features = ["std", "derive", "help", "usage", "error-context"] }
+serde.workspace = true
+serde_json.workspace = true
+yonder-core.workspace = true
+yonder-model.workspace = true

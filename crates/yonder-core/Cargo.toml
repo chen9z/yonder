@@ -1,0 +1,17 @@
+[package]
+name = "yonder-core"
+description = "Yonder's ledger: tasks and reminders in SQLite, repeat rules, reminder checks, redaction, the config file"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+version.workspace = true
+
+[dependencies]
+libc = "0.2"
+# The system's libsqlite3, not a bundled copy.
+rusqlite = { version = "0.43", default-features = false }
+serde.workspace = true
+sha2 = "0.11"
+thiserror.workspace = true
+toml = { version = "1", default-features = false, features = ["std", "serde", "parse"] }
+yonder-model.workspace = true

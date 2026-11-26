@@ -1,0 +1,12 @@
+[package]
+name = "yonder-model"
+description = "Yonder's ledger records: tasks, reminders and their states, shared with the app"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+version.workspace = true
+
+# Only serde: the Android app depends on this crate.
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true

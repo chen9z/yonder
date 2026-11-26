@@ -1,0 +1,46 @@
+# An example ~/.config/yonder/config.toml. Every section and key is
+# optional; what is left out takes the default shown in the comment.
+
+[lead]
+name = "nova"                           # default "lead"
+workspace = "/tmp/example/agent-home"
+launch_cmd = ["zsh", "-lic", "exec pi"] # default empty: never started by Yonder
+herdr_space = ""
+extra_labels = []
+
+[state_file]
+enabled = true                          # default false
+path = "/tmp/example/state.md"
+
+[startup_guards]
+trusted_hook_sources = []
+
+[[workers]]
+name = "trainer"
+machine = "local"                       # default "local", or an hc machine name
+cwd = "~/bots/trainer"
+template = "trainer"
+session_id = ""
+foreground_match = "codex"
+extra_labels = []
+notify_owner_on_rebind = true           # default true
+
+[[workers]]
+name = "ops"
+machine = "gpu-box"
+cwd = "~/bots/ops"
+template = "ops"
+
+[notify.ntfy]
+enabled = true                          # default false
+url = "http://ntfy.example:8090/yonder"
+token_secret = "ntfy_token"             # the secret store key, never the token
+click_package = "dev.yonder.app"
+
+[backup]
+local_keep_days = 14                    # default 30
+remote_machine = "homelab"              # default empty: local backups only
+remote_dir = "~/backups/yonder-ledger"
+
+[privacy]
+default_redacted = false

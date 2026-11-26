@@ -16,6 +16,8 @@ herdc-ssh = { path = "crates/herdc-ssh" }
 herdc-term = { path = "crates/herdc-term" }
 herdc-engine = { path = "crates/herdc-engine" }
 herdc-testkit = { path = "crates/herdc-testkit" }
+yonder-core = { path = "crates/yonder-core" }
+yonder-model = { path = "crates/yonder-model" }
 anyhow = "1"
 async-channel = "2"
 base64 = "0.22"
@@ -28,5 +30,15 @@ tracing = "0.1"
 # No debug info in tests and clippy builds: on macOS it stays in object
 # files beside them, a new set each incremental build, never cleaned
 # (tens of GB in days). Panics still say where; backtraces have no lines.
+# No incremental caches either: they pile up the same way.
 [profile.dev]
 debug = false
+incremental = false
+
+[profile.test]
+debug = false
+incremental = false
+
+[profile.release]
+strip = "symbols"
+lto = "thin"
