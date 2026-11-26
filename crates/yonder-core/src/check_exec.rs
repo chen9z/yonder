@@ -26,7 +26,7 @@ pub struct CheckOutput {
     pub hash: String,
 }
 
-/// Why a check failed; shown as `exit:N`, `signal:N`, `timeout`, `output_too_large`, `spawn_failed`.
+/// Why a check failed; shown as `exit:N`, `signal:N`, `timeout`, `output_too_large`, `spawn_failed`, `wait_failed`.
 #[derive(Debug, thiserror::Error)]
 pub enum CheckError {
     #[error("exit:{0}")]
@@ -42,6 +42,9 @@ pub enum CheckError {
     OutputTooLarge,
     #[error("spawn_failed: {0}")]
     Spawn(std::io::Error),
+    /// Started, then lost track of: what it did is not known.
+    #[error("wait_failed: {0}")]
+    Wait(std::io::Error),
 }
 
 pub fn run(cmd: &str) -> Result<CheckOutput, CheckError> {
@@ -63,7 +66,7 @@ pub fn run_until(cmd: &str, timeout: Duration, max_output: usize, stop: &AtomicB
             k.to_str().is_some_and(|k| KEEP_ENV.contains(&k) || k.starts_with("LC_"))
         }))
         .stderr(Stdio::null());
-    let (status, buf) = capture(command, timeout, max_output, stop)?;
+    let (status, buf) = capture(command, timeout, max_output, stop, false)?;
     if let Some(code) = status.code().filter(|c| *c != 0) {
         return Err(CheckError::Exit(code));
     }
@@ -78,19 +81,29 @@ pub fn run_until(cmd: &str, timeout: Duration, max_output: usize, stop: &AtomicB
     Ok(CheckOutput { stdout, hash })
 }
 
-/// Runs `command` in a process group of its own and reads its stdout, at
-/// most `max_output` bytes and one more to tell it went past. Ends when it
-/// has exited and its output closed, or at the deadline or `stop`, which
-/// kill the group. The environment and stderr are the caller's to set.
+/// Runs `command` in a process group of its own and reads its stdout (and
+/// stderr, in the same stream, with `stderr_too`), at most `max_output`
+/// bytes and one more to tell it went past. Ends when it has exited and
+/// its output closed, or at the deadline or `stop`, which kill the group.
+/// The environment, and stderr without `stderr_too`, are the caller's.
 pub fn capture(
     mut command: Command,
     timeout: Duration,
     max_output: usize,
     stop: &AtomicBool,
+    stderr_too: bool,
 ) -> Result<(ExitStatus, Vec<u8>), CheckError> {
     let deadline = Instant::now() + timeout;
-    command.stdin(Stdio::null()).stdout(Stdio::piped()).process_group(0);
-    let mut child = command.spawn().map_err(CheckError::Spawn)?;
+    let (mut stdout, writer) = std::io::pipe().map_err(CheckError::Spawn)?;
+    if stderr_too {
+        command.stderr(writer.try_clone().map_err(CheckError::Spawn)?);
+    }
+    command.stdin(Stdio::null()).stdout(writer).process_group(0);
+    let spawned = command.spawn();
+    // The command keeps its copies of the write end: without them gone,
+    // the output would never close.
+    drop(command);
+    let mut child = spawned.map_err(CheckError::Spawn)?;
     // The child leads its group, and its pid (so the group's id) stays
     // ours until it is reaped: exits are only watched, never reaped, until
     // the group has been killed.
@@ -99,7 +112,6 @@ pub fn capture(
         // SAFETY: signals the group the unreaped child leads.
         unsafe { libc::kill(-group, libc::SIGKILL) };
     };
-    let mut stdout = child.stdout.take().expect("piped");
     let fd = stdout.as_raw_fd();
     // SAFETY: reads and sets the flags of the pipe end we own.
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
@@ -107,11 +119,10 @@ pub fn capture(
         let e = std::io::Error::last_os_error();
         kill_group();
         let _ = child.wait();
-        return Err(CheckError::Spawn(e));
+        return Err(CheckError::Wait(e));
     }
 
     let mut buf = Vec::new();
-    let mut chunk = [0u8; 8192];
     let (mut exited, mut eof) = (false, false);
     // Until the child has exited and its output closed, or time is up.
     // Something that left the group (setsid) may hold the output open
@@ -128,7 +139,7 @@ pub fn capture(
                 Err(e) => {
                     kill_group();
                     let _ = child.wait();
-                    return Err(CheckError::Spawn(e));
+                    return Err(CheckError::Wait(e));
                 }
             }
         }
@@ -150,23 +161,7 @@ pub fn capture(
         let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
         // SAFETY: one pollfd we own, for at most 20 ms.
         unsafe { libc::poll(&mut pfd, 1, wait.as_millis().max(1) as libc::c_int) };
-        // What is there now, but not past the deadline for a command that
-        // writes without end.
-        while Instant::now() < deadline {
-            match stdout.read(&mut chunk) {
-                Ok(0) => eof = true,
-                Ok(n) => {
-                    // Past the cap only note that there was more.
-                    let room = (max_output + 1).saturating_sub(buf.len());
-                    buf.extend_from_slice(&chunk[..n.min(room)]);
-                    continue;
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-                Err(_) => eof = true,
-            }
-            break;
-        }
+        eof = read_available(&mut stdout, &mut buf, max_output, deadline, stop);
     };
     // Stop reading: whatever still holds the pipe gets EPIPE.
     drop(stdout);
@@ -176,8 +171,28 @@ pub fn capture(
         return Err(e);
     }
     // Exited already, so this only reaps it.
-    let status = child.wait().map_err(CheckError::Spawn)?;
+    let status = child.wait().map_err(CheckError::Wait)?;
     Ok((status, buf))
+}
+
+/// Reads what `r` has now into `buf`, keeping `max_output` bytes and one
+/// more to tell it went past, but stops at the deadline or `stop` for a
+/// command that writes without end. Whether the output ended.
+fn read_available(r: &mut impl Read, buf: &mut Vec<u8>, max_output: usize, deadline: Instant, stop: &AtomicBool) -> bool {
+    let mut chunk = [0u8; 8192];
+    while Instant::now() < deadline && !stop.load(Ordering::Relaxed) {
+        match r.read(&mut chunk) {
+            Ok(0) => return true,
+            Ok(n) => {
+                let room = (max_output + 1).saturating_sub(buf.len());
+                buf.extend_from_slice(&chunk[..n.min(room)]);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return false,
+            Err(_) => return true,
+        }
+    }
+    false
 }
 
 /// Whether `pid` has exited, without reaping it.
@@ -320,6 +335,47 @@ mod tests {
         });
         assert!(matches!(r, Err(CheckError::Stopped)), "{r:?}");
         assert!(start.elapsed() < Duration::from_secs(2), "{:?}", start.elapsed());
+    }
+
+    #[test]
+    fn reading_stops_on_stop_even_with_output_left() {
+        // io::repeat never runs dry: only the stop ends the reading.
+        let stop = AtomicBool::new(false);
+        let mut buf = Vec::new();
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                std::thread::sleep(Duration::from_millis(200));
+                stop.store(true, Ordering::Relaxed);
+            });
+            let start = Instant::now();
+            let eof = read_available(&mut std::io::repeat(b'y'), &mut buf, 1000, start + TIMEOUT, &stop);
+            assert!(!eof);
+            assert!(start.elapsed() < Duration::from_secs(1), "{:?}", start.elapsed());
+        });
+        assert_eq!(buf.len(), 1001);
+        // And at the deadline.
+        let start = Instant::now();
+        let never = AtomicBool::new(false);
+        read_available(&mut std::io::repeat(b'y'), &mut buf, 1000, start + Duration::from_millis(200), &never);
+        assert!(start.elapsed() < Duration::from_secs(1));
+        assert!(read_available(&mut std::io::empty(), &mut buf, 1000, start + TIMEOUT, &never));
+    }
+
+    #[test]
+    fn stops_a_command_that_writes_without_end() {
+        // Past the output cap the reading goes on, dropping what comes:
+        // the stop must be seen in there too.
+        let stop = AtomicBool::new(false);
+        let r = std::thread::scope(|s| {
+            let run = s.spawn(|| run_until("yes", TIMEOUT, MAX_OUTPUT, &stop));
+            std::thread::sleep(Duration::from_millis(300));
+            stop.store(true, Ordering::Relaxed);
+            let stopped = Instant::now();
+            let r = run.join().unwrap();
+            assert!(stopped.elapsed() < Duration::from_secs(1), "{:?}", stopped.elapsed());
+            r
+        });
+        assert!(matches!(r, Err(CheckError::Stopped)), "{r:?}");
     }
 
     #[test]

@@ -152,6 +152,7 @@ impl From<StoreError> for Fail {
             StoreError::WrongState { .. } => "only open tasks and active reminders change",
             StoreError::Empty(_) => "give it some text",
             StoreError::CheckNeedsEvery => "add --every",
+            StoreError::TooLong(..) => "say it in fewer words; details can go in a file it names",
             StoreError::NoStateDir | StoreError::Dir(..) => "set YONDER_STATE_DIR to a writable directory",
             StoreError::TooNew(_) => "use a newer yonder",
             StoreError::Sql(_) => "try again; if it stays, look at ledger.db in the state directory",
@@ -343,9 +344,9 @@ fn status(store: &Store, json: bool) -> Result<(), Fail> {
         hint: "check the state directory's permissions",
     })?;
     let last = store.meta("last_tick_at")?;
-    let pending = store.pending()?;
+    let (pending, lost) = (store.pending()?, store.lost()?);
     if json {
-        let v = serde_json::json!({"running": pid.is_some(), "pid": pid, "last_tick_at": last, "pending": pending});
+        let v = serde_json::json!({"running": pid.is_some(), "pid": pid, "last_tick_at": last, "pending": pending, "lost": lost});
         println!("{}", serde_json::to_string_pretty(&v).expect("plain data"));
         return Ok(());
     }
@@ -358,6 +359,7 @@ fn status(store: &Store, json: bool) -> Result<(), Fail> {
         None => println!("last round: never"),
     }
     println!("pending deliveries: {pending}");
+    println!("lost deliveries: {lost} (may or may not have arrived; never sent again)");
     Ok(())
 }
 

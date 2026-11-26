@@ -30,6 +30,8 @@ pub enum StoreError {
     Empty(&'static str),
     #[error("a check needs a repeat rule")]
     CheckNeedsEvery,
+    #[error("{0} is {1} bytes, more than {MAX_CONTENT}")]
+    TooLong(&'static str, usize),
     #[error("no state directory: set YONDER_STATE_DIR or HOME")]
     NoStateDir,
     #[error("state directory {0}: {1}")]
@@ -48,6 +50,7 @@ impl StoreError {
             StoreError::WrongState { .. } => "wrong_state",
             StoreError::Empty(_) => "empty",
             StoreError::CheckNeedsEvery => "check_needs_every",
+            StoreError::TooLong(..) => "bad_input",
             StoreError::NoStateDir | StoreError::Dir(..) => "state_dir",
             StoreError::TooNew(_) => "ledger_too_new",
             StoreError::Sql(_) => "ledger",
@@ -56,6 +59,9 @@ impl StoreError {
 }
 
 pub(crate) type Result<T> = std::result::Result<T, StoreError>;
+
+/// The longest reminder, in bytes: its envelope must fit one message.
+pub const MAX_CONTENT: usize = 4096;
 
 /// `$YONDER_STATE_DIR`, else `~/.local/state/yonder`.
 pub fn state_dir() -> Result<PathBuf> {
@@ -111,6 +117,11 @@ impl Store {
         Ok(Store { conn })
     }
 
+    /// How long to wait for another writer before giving up.
+    pub fn set_busy_timeout(&self, wait: Duration) -> Result<()> {
+        Ok(self.conn.busy_timeout(wait)?)
+    }
+
     pub fn add_task(&mut self, title: &str, source: Option<&str>, now: i64) -> Result<Task> {
         let title = redact(title.trim());
         if title.is_empty() {
@@ -160,6 +171,9 @@ impl Store {
         let content = redact(new.content.trim());
         if content.is_empty() {
             return Err(StoreError::Empty("the reminder"));
+        }
+        if content.len() > MAX_CONTENT {
+            return Err(StoreError::TooLong("the reminder", content.len()));
         }
         if new.check.is_some() && new.every.is_none() {
             return Err(StoreError::CheckNeedsEvery);
@@ -431,6 +445,10 @@ mod tests {
         assert_eq!(s.task("T-0001").unwrap(), done);
         assert!(matches!(s.close_task("T-0009", TaskState::Done, T0), Err(StoreError::NotFound("task", _))));
         assert!(matches!(s.add_task("  ", None, T0), Err(StoreError::Empty(_))));
+        let long = once(&"x".repeat(MAX_CONTENT + 1), T0);
+        assert!(matches!(s.add_reminder(&long, T0), Err(StoreError::TooLong(_, n)) if n == MAX_CONTENT + 1));
+        assert_eq!(count(&s, "reminders"), 0);
+        s.add_reminder(&once(&"x".repeat(MAX_CONTENT), T0), T0).unwrap();
         assert_eq!(count(&s, "tasks"), 2);
         std::fs::remove_dir_all(dir).unwrap();
     }

@@ -15,7 +15,8 @@ send)
     echo '{"started":true,"status":"working","turn":2}'
     ;;
 *)
-    echo '{"error":{"kind":"usage","message":"the fake hc knows ls and send"}}'
+    # On stderr, as hc puts its errors.
+    echo '{"error":{"kind":"usage","message":"the fake hc knows ls and send"}}' >&2
     exit 2
     ;;
 esac

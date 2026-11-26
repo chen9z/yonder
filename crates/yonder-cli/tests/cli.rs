@@ -318,6 +318,64 @@ fn yonderd_runs_alone_and_stops_on_sigterm() {
 }
 
 #[test]
+fn yonderd_stops_in_time_with_a_check_running() {
+    let l = Ledger::with_config("yonderd_stops_in_time_with_a_check_running", "[daemon]\ntick_secs = 1\n");
+    // Due now, and writing without end once it runs.
+    let mut store = yonder_core::Store::open(&l.0).unwrap();
+    let new = yonder_core::NewReminder {
+        content: "endless".into(),
+        next_fire_at: when::now() - 1,
+        every: when::Rule::parse("1m"),
+        check: Some(("yes".into(), "baseline".into())),
+        check_once: false,
+        check_until: None,
+        task_id: None,
+    };
+    store.add_reminder(&new, when::now()).unwrap();
+    drop(store);
+    let mut daemon = l.yonderd(&[]).spawn().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while l.json(&["remind", "ls", "--json"])[0]["next_fire_at"] == when::format_utc(new.next_fire_at) {
+        assert!(Instant::now() < deadline, "the check never started");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    // SAFETY: signals the child this test started.
+    unsafe { libc::kill(daemon.id() as libc::pid_t, libc::SIGTERM) };
+    let stopped = Instant::now();
+    let status = loop {
+        if let Some(status) = daemon.try_wait().unwrap() {
+            break status;
+        }
+        assert!(stopped.elapsed() < Duration::from_secs(2), "still running 2s after SIGTERM");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(status.code(), Some(0));
+    // The stopped check left nothing behind.
+    let r = &l.json(&["remind", "ls", "--json"])[0];
+    assert_eq!((&r["check_failures"], &r["last_checked_at"]), (&0.into(), &serde_json::Value::Null), "{r}");
+}
+
+#[test]
+fn reminders_have_a_length_limit() {
+    let l = Ledger::new("reminders_have_a_length_limit");
+    let long = "长".repeat(1500);
+    let out = l.run(&["remind", "set", &long, "--in", "5m"]);
+    assert!(!out.status.success());
+    assert!(stderr(&out).starts_with("bad_input: the reminder is 4500 bytes, more than 4096; "), "{}", stderr(&out));
+    assert!(l.json(&["remind", "ls", "--all", "--json"]).is_empty());
+    l.ok(&["remind", "set", &"x".repeat(4096), "--in", "5m"]);
+}
+
+#[test]
+fn status_counts_lost_deliveries() {
+    let l = Ledger::new("status_counts_lost_deliveries");
+    let status: serde_json::Value = serde_json::from_str(&l.ok(&["ctl", "status", "--json"])).unwrap();
+    assert_eq!(status["lost"], 0);
+    assert!(l.ok(&["ctl", "status"]).contains("lost deliveries: 0"));
+}
+
+#[test]
 fn service_plist_is_valid() {
     let l = Ledger::new("service_plist_is_valid");
     let plist = l.ok(&["ctl", "service-plist"]);

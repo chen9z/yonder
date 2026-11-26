@@ -110,7 +110,7 @@ fn run(cli: Cli) -> Result<(), Fail> {
             std::thread::sleep(Duration::from_millis(100));
         }
     }
-    let _ = daemon.finish(when::now());
+    daemon.finish();
     log.borrow_mut().line("stopped");
     Ok(())
 }

@@ -1,7 +1,8 @@
 //! What yonderd does to the ledger: fire due reminders, start and settle
 //! their checks, and keep the deliveries to the lead agent. Each step is
 //! one immediate transaction, and a trigger is written as a delivery in
-//! the same one that moves its reminder on, so it is sent at most once.
+//! the same one that moves its reminder on. A delivery is sent at most
+//! once: one that may have arrived is `lost`, never sent again.
 
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 use yonder_model::{Reminder, ReminderState, envelope};
@@ -15,6 +16,10 @@ use crate::when::{Rule, format_utc};
 pub const ECHO_CHARS: usize = 1500;
 /// Failures in a row that are told, once.
 pub const FAILURES_TOLD: u32 = 3;
+/// The most bytes of envelopes in one message to the lead agent.
+pub const BATCH_BYTES: usize = 256 << 10;
+/// Envelopes in one message are apart by this.
+pub const SEPARATOR: &str = "\n\n";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Trigger {
@@ -65,6 +70,17 @@ pub struct Delivery {
     pub id: i64,
     pub reminder_id: String,
     pub body: String,
+}
+
+/// How a send of claimed deliveries went.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Outcome<'a> {
+    /// Arrived at this terminal.
+    Sent(&'a str),
+    /// Surely did not arrive, for this reason: send again.
+    Retry(&'a str),
+    /// May have arrived: never send again.
+    Lost(&'a str),
 }
 
 impl Store {
@@ -172,29 +188,61 @@ impl Store {
         Ok(n as usize)
     }
 
-    /// The pending deliveries, oldest first, marked as being sent.
-    pub fn claim_pending(&mut self) -> Result<Vec<Delivery>> {
-        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let claimed = {
-            let mut stmt = tx.prepare("SELECT id, reminder_id, body FROM deliveries WHERE state = 'pending' ORDER BY id")?;
-            stmt.query_map([], |r| Ok(Delivery { id: r.get(0)?, reminder_id: r.get(1)?, body: r.get(2)? }))?
-                .collect::<rusqlite::Result<Vec<_>>>()?
-        };
-        tx.execute("UPDATE deliveries SET state = 'sending', attempts = attempts + 1 WHERE state = 'pending'", [])?;
-        tx.commit()?;
-        Ok(claimed)
+    /// Deliveries that may or may not have arrived, never sent again.
+    pub fn lost(&self) -> Result<usize> {
+        let n: i64 = self.conn.query_row("SELECT count(*) FROM deliveries WHERE state = 'lost'", [], |r| r.get(0))?;
+        Ok(n as usize)
     }
 
-    /// Claimed deliveries sent to `Ok(address)`, or back to pending for `Err(why)`.
-    pub fn settle(&mut self, claimed: &[Delivery], outcome: std::result::Result<&str, &str>, now: i64) -> Result<()> {
+    /// The oldest pending deliveries that fit in one message of `budget`
+    /// bytes (at least one), marked as being sent; the rest wait for the
+    /// next. One too big for any message is lost instead, so it holds up
+    /// nothing; those come back second.
+    pub fn claim_pending(&mut self, budget: usize) -> Result<(Vec<Delivery>, Vec<Delivery>)> {
+        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (mut claimed, mut too_big, mut size) = (Vec::new(), Vec::new(), 0);
+        {
+            let mut stmt = tx.prepare("SELECT id, reminder_id, body FROM deliveries WHERE state = 'pending' ORDER BY id")?;
+            let mut rows = stmt.query([])?;
+            while let Some(r) = rows.next()? {
+                let d = Delivery { id: r.get(0)?, reminder_id: r.get(1)?, body: r.get(2)? };
+                let more = if claimed.is_empty() { d.body.len() } else { SEPARATOR.len() + d.body.len() };
+                if d.body.len() > budget {
+                    too_big.push(d);
+                } else if size + more > budget {
+                    break;
+                } else {
+                    size += more;
+                    claimed.push(d);
+                }
+            }
+        }
+        for d in &claimed {
+            tx.execute("UPDATE deliveries SET state = 'sending', attempts = attempts + 1 WHERE id = ?1", [d.id])?;
+        }
+        for d in &too_big {
+            let why = format!("{} bytes, more than one message holds ({budget})", d.body.len());
+            tx.execute("UPDATE deliveries SET state = 'lost', last_error = ?2 WHERE id = ?1", params![d.id, why])?;
+        }
+        tx.commit()?;
+        Ok((claimed, too_big))
+    }
+
+    /// Claimed deliveries as the send went.
+    pub fn settle(&mut self, claimed: &[Delivery], outcome: Outcome, now: i64) -> Result<()> {
         let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         for d in claimed {
             match outcome {
-                Ok(to) => tx.execute(
+                Outcome::Sent(to) => tx.execute(
                     "UPDATE deliveries SET state = 'sent', sent_to = ?2, sent_at = ?3, last_error = NULL WHERE id = ?1",
                     params![d.id, to, format_utc(now)],
                 )?,
-                Err(why) => tx.execute("UPDATE deliveries SET state = 'pending', last_error = ?2 WHERE id = ?1", params![d.id, why])?,
+                Outcome::Retry(why) => {
+                    tx.execute("UPDATE deliveries SET state = 'pending', last_error = ?2 WHERE id = ?1", params![d.id, why])?
+                }
+                Outcome::Lost(why) => {
+                    tx.execute("UPDATE deliveries SET state = 'lost', last_error = ?2 WHERE id = ?1", params![d.id, why])?
+                }
             };
         }
         tx.commit()?;
@@ -281,8 +329,8 @@ mod tests {
     }
 
     fn bodies(s: &mut Store) -> Vec<String> {
-        let claimed = s.claim_pending().unwrap();
-        s.settle(&claimed, Ok("t9"), T0).unwrap();
+        let (claimed, _) = s.claim_pending(BATCH_BYTES).unwrap();
+        s.settle(&claimed, Outcome::Sent("t9"), T0).unwrap();
         claimed.into_iter().map(|d| d.body).collect()
     }
 
@@ -399,6 +447,30 @@ mod tests {
     }
 
     #[test]
+    fn claims_what_fits_in_one_message() {
+        let (mut s, dir) = store("claims_what_fits_in_one_message");
+        for content in ["a".repeat(100), "b".repeat(100), "c".repeat(500), "d".repeat(100)] {
+            add(&mut s, &content, T0, None, None);
+        }
+        for i in 1..=4 {
+            s.fire(&format!("R-000{i}"), T0).unwrap();
+        }
+        let len = |s: &Store, id: i64| -> usize { s.conn.query_row("SELECT length(body) FROM deliveries WHERE id = ?1", [id], |r| r.get::<_, i64>(0)).unwrap() as usize };
+        let budget = len(&s, 1) + SEPARATOR.len() + len(&s, 2);
+        let ids = |ds: &[Delivery]| ds.iter().map(|d| d.reminder_id.clone()).collect::<Vec<_>>();
+        let (claimed, too_big) = s.claim_pending(budget).unwrap();
+        assert_eq!((ids(&claimed), ids(&too_big)), (vec!["R-0001".to_string(), "R-0002".into()], vec!["R-0003".to_string()]));
+        let why: String = s.conn.query_row("SELECT last_error FROM deliveries WHERE id = 3", [], |r| r.get(0)).unwrap();
+        assert!(why.contains("more than one message holds"), "{why}");
+        assert_eq!(s.pending().unwrap(), 1);
+        s.settle(&claimed, Outcome::Sent("t9"), T0).unwrap();
+        // One at least, even past the budget it is under on its own.
+        let (claimed, too_big) = s.claim_pending(len(&s, 4)).unwrap();
+        assert_eq!((ids(&claimed), too_big.len()), (vec!["R-0004".to_string()], 0));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn deliveries_go_once() {
         let (mut s, dir) = store("deliveries_go_once");
         add(&mut s, "a", T0, None, None);
@@ -406,19 +478,26 @@ mod tests {
         s.fire("R-0001", T0).unwrap();
         s.fire("R-0002", T0).unwrap();
         assert_eq!(s.pending().unwrap(), 2);
-        // Failed: back to pending, sent next time.
-        let claimed = s.claim_pending().unwrap();
+        // Surely not sent: back to pending, sent next time.
+        let (claimed, _) = s.claim_pending(BATCH_BYTES).unwrap();
         assert_eq!(claimed.iter().map(|d| d.reminder_id.as_str()).collect::<Vec<_>>(), ["R-0001", "R-0002"]);
         assert_eq!(s.pending().unwrap(), 0);
-        s.settle(&claimed, Err("no lead"), T0).unwrap();
+        s.settle(&claimed, Outcome::Retry("hc send: exit:3: no terminal"), T0).unwrap();
         assert_eq!(s.pending().unwrap(), 2);
         assert_eq!(bodies(&mut s).len(), 2);
-        // Cut off while sending: never again.
+        // Maybe sent: never again.
         add(&mut s, "c", T0, None, None);
         s.fire("R-0003", T0).unwrap();
-        s.claim_pending().unwrap();
+        let (claimed, _) = s.claim_pending(BATCH_BYTES).unwrap();
+        s.settle(&claimed, Outcome::Lost("hc send: timeout"), T0).unwrap();
+        assert_eq!((s.pending().unwrap(), s.lost().unwrap()), (0, 1));
+        // Cut off while sending: never again.
+        add(&mut s, "d", T0, None, None);
+        s.fire("R-0004", T0).unwrap();
+        s.claim_pending(BATCH_BYTES).unwrap();
         assert_eq!(s.lose_sending().unwrap(), 1);
-        assert!(s.claim_pending().unwrap().is_empty());
+        assert!(s.claim_pending(BATCH_BYTES).unwrap().0.is_empty());
+        assert_eq!(s.lost().unwrap(), 2);
         s.set_meta("last_tick_at", "x").unwrap();
         s.set_meta("last_tick_at", "y").unwrap();
         assert_eq!(s.meta("last_tick_at").unwrap().as_deref(), Some("y"));

@@ -1,23 +1,28 @@
 //! yonderd's rounds: fire what is due, run checks (two at a time, beside
 //! the round, never holding it up), and send what waits to the lead agent
-//! in one message. Also the lock that keeps yonderd to one instance.
+//! in one message of at most `BATCH_BYTES`. Once `stop` is set nothing new
+//! starts, and no step waits long, so yonderd ends within two seconds.
+//! Also the lock that keeps yonderd to one instance.
 
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::{Read, Seek, Write};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
+use std::time::Duration;
 
 use crate::check_exec::{self, CheckError, CheckOutput};
-use crate::firing::{CheckJob, Fired, Step, Trigger};
-use crate::hc::Lead;
+use crate::firing::{BATCH_BYTES, CheckJob, Fired, Outcome, SEPARATOR, Step, Trigger};
+use crate::hc::{Lead, SendError};
 use crate::store::{Store, StoreError};
 use crate::when::format_utc;
 
 /// Checks running at once.
 pub const MAX_CHECKS: usize = 2;
+/// The longest yonderd waits for another writer of the ledger.
+pub const LEDGER_WAIT: Duration = Duration::from_secs(1);
 
 /// Somewhere to tell the owner on this computer.
 pub trait Notifier {
@@ -41,7 +46,7 @@ impl Notifier for LocalNotifier {
             .args(["-e", "on run argv", "-e", "display notification (item 2 of argv) with title (item 1 of argv)", "-e", "end run"])
             .args([title, text])
             .stderr(std::process::Stdio::null());
-        let _ = check_exec::capture(command, std::time::Duration::from_secs(5), 4096, self.stop);
+        let _ = check_exec::capture(command, std::time::Duration::from_secs(5), 4096, self.stop, false);
     }
 }
 
@@ -59,16 +64,24 @@ pub struct Daemon<L: Lead, N: Notifier> {
     done_rx: Receiver<Done>,
     /// Why the last delivery could not go, logged once until it changes.
     trouble: Option<String>,
+    /// The most bytes in one message.
+    batch_bytes: usize,
 }
 
 impl<L: Lead, N: Notifier> Daemon<L, N> {
     pub fn new(mut store: Store, lead: L, notifier: N, stop: &'static AtomicBool, mut log: Box<dyn FnMut(&str)>) -> Result<Self, StoreError> {
+        store.set_busy_timeout(LEDGER_WAIT)?;
         let lost = store.lose_sending()?;
         if lost > 0 {
             log(&format!("{lost} deliveries were being sent when yonderd stopped; not sending them again"));
         }
         let (done_tx, done_rx) = channel();
-        Ok(Daemon { store, lead, notifier, log, stop, running: HashSet::new(), done_tx, done_rx, trouble: None })
+        let batch_bytes = BATCH_BYTES;
+        Ok(Daemon { store, lead, notifier, log, stop, running: HashSet::new(), done_tx, done_rx, trouble: None, batch_bytes })
+    }
+
+    fn stopping(&self) -> bool {
+        self.stop.load(Ordering::Relaxed)
     }
 
     /// One round at `now`. With `wait`, the checks it starts finish in it
@@ -77,27 +90,37 @@ impl<L: Lead, N: Notifier> Daemon<L, N> {
         self.settle_checks(now, false)?;
         loop {
             let deferred = self.fire_due(now)?;
-            if !wait || (self.running.is_empty() && !deferred) {
+            if !wait || self.stopping() || (self.running.is_empty() && !deferred) {
                 break;
             }
             self.settle_checks(now, true)?;
+        }
+        if self.stopping() {
+            return Ok(());
         }
         self.deliver(now)?;
         self.store.set_meta("last_tick_at", &format_utc(now))
     }
 
-    /// Waits for the running checks; they end at once when `stop` is set.
-    pub fn finish(&mut self, now: i64) -> Result<(), StoreError> {
+    /// Once `stop` is set: waits for the running checks, which end at once,
+    /// keeping nothing of them. Their reminders moved on already; a change
+    /// they saw is seen again, against the old baseline, next time.
+    pub fn finish(&mut self) {
         while !self.running.is_empty() {
-            self.settle_checks(now, true)?;
+            match self.done_rx.recv() {
+                Ok((job, _)) => self.running.remove(&job.id),
+                Err(_) => break,
+            };
         }
-        Ok(())
     }
 
     /// Fires what is due; whether a check had to wait for a free slot.
     fn fire_due(&mut self, now: i64) -> Result<bool, StoreError> {
         let mut deferred = false;
         for r in self.store.due(now)? {
+            if self.stopping() {
+                break;
+            }
             if self.running.contains(&r.id) {
                 continue;
             }
@@ -132,6 +155,9 @@ impl<L: Lead, N: Notifier> Daemon<L, N> {
             let done = if block { self.done_rx.recv().ok() } else { self.done_rx.try_recv().ok() };
             let Some((job, result)) = done else { return Ok(()) };
             self.running.remove(&job.id);
+            if self.stopping() {
+                continue;
+            }
             match &result {
                 Ok(out) => (self.log)(&format!("{} check ok, output hash {}", job.id, &out.hash[..12])),
                 Err(e) => (self.log)(&format!("{} check failed: {e}", job.id)),
@@ -156,7 +182,8 @@ impl<L: Lead, N: Notifier> Daemon<L, N> {
         self.notifier.notify(&format!("Yonder {}", f.reminder_id), &format!("{what}{}", f.content));
     }
 
-    /// Everything pending in one `hc send`, or all of it back to wait.
+    /// What is pending, oldest first, in one `hc send` of at most
+    /// `batch_bytes`; the rest goes in later rounds.
     fn deliver(&mut self, now: i64) -> Result<(), StoreError> {
         let waiting = self.store.pending()?;
         if waiting == 0 {
@@ -173,18 +200,31 @@ impl<L: Lead, N: Notifier> Daemon<L, N> {
                 return Ok(());
             }
         };
-        let claimed = self.store.claim_pending()?;
-        let text = claimed.iter().map(|d| d.body.as_str()).collect::<Vec<_>>().join("\n\n");
+        if self.stopping() {
+            return Ok(());
+        }
+        let (claimed, too_big) = self.store.claim_pending(self.batch_bytes)?;
+        for d in &too_big {
+            (self.log)(&format!("lost {}: {} bytes, more than a message holds; not sending it", d.reminder_id, d.body.len()));
+        }
+        if claimed.is_empty() {
+            return Ok(());
+        }
+        let text = claimed.iter().map(|d| d.body.as_str()).collect::<Vec<_>>().join(SEPARATOR);
         let ids = claimed.iter().map(|d| d.reminder_id.as_str()).collect::<Vec<_>>().join(", ");
         match self.lead.send(&to, &text) {
             Ok(()) => {
-                self.store.settle(&claimed, Ok(&to), now)?;
+                self.store.settle(&claimed, Outcome::Sent(&to), now)?;
                 self.trouble = None;
                 (self.log)(&format!("sent {ids} to {to}"));
             }
-            Err(e) => {
-                self.store.settle(&claimed, Err(&e), now)?;
+            Err(SendError::NotSent(e)) => {
+                self.store.settle(&claimed, Outcome::Retry(&e), now)?;
                 self.trouble(format!("{e}; {} waiting", claimed.len()));
+            }
+            Err(SendError::Unknown(e)) => {
+                self.store.settle(&claimed, Outcome::Lost(&e), now)?;
+                (self.log)(&format!("lost {ids}: {e}; they may have arrived, so they are not sent again"));
             }
         }
         Ok(())
@@ -259,23 +299,38 @@ mod tests {
 
     const T0: i64 = 1_795_668_322;
 
+    #[derive(Clone, Copy, Default, PartialEq)]
+    enum Send {
+        #[default]
+        Works,
+        /// hc refused: nothing pasted.
+        Refused,
+        /// Pasted, then cut short: hc timed out.
+        PastedThenTimedOut,
+    }
+
     #[derive(Clone, Default)]
     struct FakeLead {
         to: Rc<RefCell<Option<String>>>,
+        /// What reached the terminal.
         sent: Rc<RefCell<Vec<(String, String)>>>,
-        fail: Rc<RefCell<bool>>,
+        how: Rc<RefCell<Send>>,
     }
 
     impl Lead for FakeLead {
         fn find(&mut self) -> Result<Option<String>, String> {
             Ok(self.to.borrow().clone())
         }
-        fn send(&mut self, to: &str, text: &str) -> Result<(), String> {
-            if *self.fail.borrow() {
-                return Err("hc send: exit:3: busy".into());
+        fn send(&mut self, to: &str, text: &str) -> Result<(), SendError> {
+            let how = *self.how.borrow();
+            if how == Send::Refused {
+                return Err(SendError::NotSent("hc send: exit:3: busy".into()));
             }
             self.sent.borrow_mut().push((to.into(), text.into()));
-            Ok(())
+            match how {
+                Send::PastedThenTimedOut => Err(SendError::Unknown("hc send: timeout".into())),
+                _ => Ok(()),
+            }
         }
     }
 
@@ -339,15 +394,95 @@ mod tests {
         assert_eq!(notes.0.borrow().len(), 1);
         assert_eq!(d.store.pending().unwrap(), 1);
         *lead.to.borrow_mut() = Some("t9".into());
-        *lead.fail.borrow_mut() = true;
+        *lead.how.borrow_mut() = Send::Refused;
         d.tick(T0 + 75, true).unwrap();
         assert_eq!(d.store.pending().unwrap(), 1);
-        *lead.fail.borrow_mut() = false;
+        *lead.how.borrow_mut() = Send::Works;
         d.tick(T0 + 90, true).unwrap();
         d.tick(T0 + 105, true).unwrap();
         assert_eq!(lead.sent.borrow().len(), 1);
         assert_eq!(d.store.pending().unwrap(), 0);
         assert_eq!(notes.0.borrow().len(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn what_may_have_arrived_is_not_sent_again() {
+        let (mut d, lead, _, dir) = daemon("what_may_have_arrived_is_not_sent_again");
+        *lead.to.borrow_mut() = Some("t9".into());
+        *lead.how.borrow_mut() = Send::PastedThenTimedOut;
+        remind(&mut d, "drink water", None, None);
+        d.tick(T0 + 60, true).unwrap();
+        assert_eq!(lead.sent.borrow().len(), 1);
+        assert_eq!((d.store.pending().unwrap(), d.store.lost().unwrap()), (0, 1));
+        *lead.how.borrow_mut() = Send::Works;
+        for t in [75, 90, 105] {
+            d.tick(T0 + t, true).unwrap();
+        }
+        assert_eq!(lead.sent.borrow().len(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_backlog_goes_in_rounds_each_once() {
+        let (mut d, lead, _, dir) = daemon("a_backlog_goes_in_rounds_each_once");
+        d.batch_bytes = 460;
+        for i in 1..=7 {
+            // R-0003 is too big for any message.
+            let content = if i == 3 { "y".repeat(500) } else { format!("{i}{}", "x".repeat(150)) };
+            remind(&mut d, &content, None, None);
+        }
+        d.tick(T0 + 60, true).unwrap();
+        assert_eq!(d.store.pending().unwrap(), 7);
+        let mut rounds = 1;
+        while d.store.pending().unwrap() > 0 {
+            let before = lead.sent.borrow().len();
+            *lead.to.borrow_mut() = Some("t9".into());
+            d.tick(T0 + 60 + 15 * rounds, true).unwrap();
+            assert_eq!(lead.sent.borrow().len(), before + 1, "one send a round");
+            rounds += 1;
+            assert!(rounds < 10);
+        }
+        // Nobody was there the first round.
+        let sent = lead.sent.borrow();
+        assert_eq!(sent.len(), 3);
+        assert!(sent.iter().all(|(_, t)| t.len() <= 460), "{sent:?}");
+        let all: String = sent.iter().map(|(_, t)| t.as_str()).collect();
+        for i in [1, 2, 4, 5, 6, 7] {
+            assert_eq!(all.matches(&format!("id=R-000{i} ")).count(), 1, "R-000{i}");
+        }
+        assert_eq!(all.matches("id=R-0003 ").count(), 0);
+        assert_eq!(d.store.lost().unwrap(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_stopped_daemon_starts_nothing() {
+        static STOPPED: AtomicBool = AtomicBool::new(true);
+        let dir = crate::test_dir("a_stopped_daemon_starts_nothing");
+        let lead = FakeLead::default();
+        *lead.to.borrow_mut() = Some("t9".into());
+        let mut d = Daemon::new(Store::open(&dir).unwrap(), lead.clone(), FakeNotifier::default(), &STOPPED, Box::new(|_| {})).unwrap();
+        remind(&mut d, "drink water", None, None);
+        remind(&mut d, "port up", Some("1m"), Some(("true", "x")));
+        d.tick(T0 + 60, true).unwrap();
+        assert!(lead.sent.borrow().is_empty() && d.running.is_empty());
+        assert_eq!(d.store.due(T0 + 60).unwrap().len(), 2);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn waits_at_most_a_second_for_the_ledger() {
+        let (mut d, _, _, dir) = daemon("waits_at_most_a_second_for_the_ledger");
+        remind(&mut d, "drink water", None, None);
+        let other = rusqlite::Connection::open(dir.join("ledger.db")).unwrap();
+        other.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let start = std::time::Instant::now();
+        assert!(matches!(d.tick(T0 + 60, true), Err(StoreError::Sql(_))));
+        assert!(start.elapsed() < Duration::from_millis(1800), "{:?}", start.elapsed());
+        other.execute_batch("ROLLBACK").unwrap();
+        d.tick(T0 + 60, true).unwrap();
+        assert_eq!(d.store.pending().unwrap(), 1);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
