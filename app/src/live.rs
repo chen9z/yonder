@@ -287,6 +287,12 @@ impl Live {
         self.engine.client().map(|core| There::new(core, on)).ok_or_else(|| "Not connected".to_owned())
     }
 
+    /// Runs `work` as the connection's, not the page's: what started it
+    /// (a button, redrawn as the work goes) may be gone before it ends.
+    pub fn spawn(&self, work: impl std::future::Future<Output = ()> + 'static) {
+        self.owner.run(|| spawn(work));
+    }
+
     /// Runs a command; questions are asked, failures said. It is the
     /// connection's: a row or sheet that asked for it may be gone before
     /// its question is answered (the drawer closes on a pick).

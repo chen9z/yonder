@@ -7,6 +7,7 @@
 //!                           |---hc refused before typing--> waiting
 //!                           \---any other failure (it may have arrived)--> lost
 //!   sending, its sender gone (stopped mid-send) --> lost
+//!   sending, claimed more than STUCK_SECS ago --> lost
 //! ```
 //!
 //! Each move is an `UPDATE ... WHERE state = <from>`, so two senders (a
@@ -30,6 +31,11 @@ type Result<T> = std::result::Result<T, StoreError>;
 
 /// The largest handoff, in bytes: details beyond go in files it names.
 pub const MAX_HANDOFF: usize = 200 * 1024;
+
+/// A handoff still `sending` this long after it was claimed is lost: a
+/// send ends within hc's time limit (120 s), and its sender's pid may
+/// have been reused by another process.
+pub const STUCK_SECS: i64 = 600;
 
 /// What a bot is told to do with a handoff, after its header.
 pub const INSTRUCTIONS: &str = "A handoff for you: read it all, merge what will matter later into MEMORY.md (do not overwrite it), make tasks for follow-ups, read the paths it gives as you need them. Nobody needs a reply.";
@@ -139,10 +145,13 @@ impl Store {
         Ok(self.conn.query_row("SELECT count(*) FROM handoffs WHERE bot = ?1 AND state = 'sending'", [bot], |r| r.get::<_, i64>(0))? > 0)
     }
 
-    /// Takes a waiting handoff to send, as process `pid`: false if it is
-    /// no longer waiting (someone else took it).
-    pub fn claim_handoff(&self, id: &str, pid: u32) -> Result<bool> {
-        let n = self.conn.execute("UPDATE handoffs SET state = 'sending', sender = ?2 WHERE id = ?1 AND state = 'waiting'", params![id, pid])?;
+    /// Takes a waiting handoff to send, as process `pid`, at `now`: false
+    /// if it is no longer waiting (someone else took it).
+    pub fn claim_handoff(&self, id: &str, pid: u32, now: i64) -> Result<bool> {
+        let n = self.conn.execute(
+            "UPDATE handoffs SET state = 'sending', sender = ?2, claimed_at = ?3 WHERE id = ?1 AND state = 'waiting'",
+            params![id, pid, format_utc(now)],
+        )?;
         Ok(n == 1)
     }
 
@@ -172,19 +181,26 @@ impl Store {
         Ok(())
     }
 
-    /// Handoffs being sent by a process that is gone (stopped mid-send):
-    /// they may have arrived, so they are lost. How many.
-    pub fn lose_orphaned_handoffs(&self, alive: impl Fn(u32) -> bool) -> Result<usize> {
-        let mut stmt = self.conn.prepare("SELECT id, sender FROM handoffs WHERE state = 'sending'")?;
-        let sending: Vec<(String, Option<i64>)> = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
+    /// Handoffs being sent by a process that is gone (stopped mid-send),
+    /// or claimed more than `STUCK_SECS` before `now` (or at no known
+    /// time): they may have arrived, so they are lost. How many.
+    pub fn lose_orphaned_handoffs(&self, alive: impl Fn(u32) -> bool, now: i64) -> Result<usize> {
+        let mut stmt = self.conn.prepare("SELECT id, sender, claimed_at FROM handoffs WHERE state = 'sending'")?;
+        let sending: Vec<(String, Option<i64>, Option<String>)> =
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<rusqlite::Result<_>>()?;
         let mut lost = 0;
-        for (id, sender) in sending {
-            if sender.is_some_and(|pid| u32::try_from(pid).is_ok_and(&alive)) {
+        for (id, sender, claimed_at) in sending {
+            let claimed = claimed_at.as_deref().and_then(crate::when::parse_utc);
+            let why = if claimed.is_none_or(|at| now - at > STUCK_SECS) {
+                "still sending 10 minutes after it was claimed"
+            } else if sender.is_some_and(|pid| u32::try_from(pid).is_ok_and(&alive)) {
                 continue;
-            }
+            } else {
+                "its sender stopped while sending"
+            };
             lost += self.conn.execute(
-                "UPDATE handoffs SET state = 'lost', sender = NULL, reason = 'its sender stopped while sending' WHERE id = ?1 AND state = 'sending'",
-                [&id],
+                "UPDATE handoffs SET state = 'lost', sender = NULL, reason = ?2 WHERE id = ?1 AND state = 'sending'",
+                params![id, why],
             )?;
         }
         Ok(lost)
@@ -257,7 +273,7 @@ pub fn deliver(home: &Path, store: &Store, hc: &HcBots, bot: &str) -> Result<Vec
     let mut done = Vec::new();
     for h in waiting {
         if let (None, Some(address)) = (&why, &address) {
-            if !store.claim_handoff(&h.id, std::process::id())? {
+            if !store.claim_handoff(&h.id, std::process::id(), crate::when::now())? {
                 why = Some("another handoff to it is being sent".into());
             } else {
                 let sent = hc.send_once(address, &envelope_of(&h)).map(|()| address.clone());
@@ -289,7 +305,7 @@ pub fn deliver(home: &Path, store: &Store, hc: &HcBots, bot: &str) -> Result<Vec
 /// with handoffs waiting gets them if it is free. Lines to log.
 pub fn deliver_all(home: &Path, store: &Store, hc: &HcBots, stop: &std::sync::atomic::AtomicBool) -> Result<Vec<String>> {
     let mut lines = Vec::new();
-    let lost = store.lose_orphaned_handoffs(alive)?;
+    let lost = store.lose_orphaned_handoffs(alive, crate::when::now())?;
     if lost > 0 {
         lines.push(format!("{lost} handoffs were being sent when their sender stopped; not sending them again"));
     }
@@ -352,29 +368,44 @@ mod tests {
         assert_eq!(s.waiting_handoffs("ops").unwrap().iter().map(|h| h.id.as_str()).collect::<Vec<_>>(), ["H-0001", "H-0002"]);
 
         // Taken once only; refused before typing: waiting again.
-        assert!(s.claim_handoff("H-0001", 7).unwrap());
-        assert!(!s.claim_handoff("H-0001", 8).unwrap());
+        assert!(s.claim_handoff("H-0001", 7, 5).unwrap());
+        assert!(!s.claim_handoff("H-0001", 8, 5).unwrap());
         assert!(s.settle_handoff("H-0001", &Err(SendError::NotSent("not_found".into())), 3).unwrap());
         assert_eq!(s.handoff("H-0001").unwrap().unwrap().state, "waiting");
         // Delivered, and never again.
-        assert!(s.claim_handoff("H-0001", 7).unwrap());
+        assert!(s.claim_handoff("H-0001", 7, 5).unwrap());
         assert!(s.settle_handoff("H-0001", &Ok("t70".into()), 4).unwrap());
         assert!(!s.settle_handoff("H-0001", &Err(SendError::Unknown("x".into())), 5).unwrap());
-        assert!(!s.claim_handoff("H-0001", 7).unwrap());
+        assert!(!s.claim_handoff("H-0001", 7, 5).unwrap());
         let h = s.handoff("H-0001").unwrap().unwrap();
         assert_eq!((h.state.as_str(), h.address.as_deref(), h.delivered_at.as_deref()), ("delivered", Some("t70"), Some("1970-01-01T00:00:04Z")));
         // Maybe arrived: lost.
-        assert!(s.claim_handoff("H-0002", 7).unwrap());
+        assert!(s.claim_handoff("H-0002", 7, 5).unwrap());
         assert!(s.settle_handoff("H-0002", &Err(SendError::Unknown("timeout".into())), 5).unwrap());
         assert_eq!(s.handoff("H-0002").unwrap().unwrap().state, "lost");
-        assert!(!s.claim_handoff("H-0002", 7).unwrap());
+        assert!(!s.claim_handoff("H-0002", 7, 5).unwrap());
 
         // A sender that is gone mid-send: lost; one that runs: left.
-        assert!(s.claim_handoff("H-0003", 41).unwrap());
-        assert_eq!(s.lose_orphaned_handoffs(|pid| pid == 41).unwrap(), 0);
-        assert_eq!(s.lose_orphaned_handoffs(|_| false).unwrap(), 1);
+        assert!(s.claim_handoff("H-0003", 41, 5).unwrap());
+        assert_eq!(s.lose_orphaned_handoffs(|pid| pid == 41, 6).unwrap(), 0);
+        assert_eq!(s.lose_orphaned_handoffs(|_| false, 6).unwrap(), 1);
         assert_eq!(s.handoff("H-0003").unwrap().unwrap().state, "lost");
         assert!(alive(std::process::id()));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_send_stuck_too_long_is_lost() {
+        let (mut s, dir) = store("handoff-stuck");
+        s.add_handoff("ops", "one", "command", 0).unwrap();
+        // Its sender looks alive (its pid may be another process's now).
+        assert!(s.claim_handoff("H-0001", 41, 100).unwrap());
+        assert_eq!(s.lose_orphaned_handoffs(|_| true, 100 + STUCK_SECS).unwrap(), 0);
+        assert_eq!(s.handoff("H-0001").unwrap().unwrap().state, "sending");
+        assert_eq!(s.lose_orphaned_handoffs(|_| true, 101 + STUCK_SECS).unwrap(), 1);
+        let h = s.handoff("H-0001").unwrap().unwrap();
+        assert_eq!((h.state.as_str(), h.reason.as_deref()), ("lost", Some("still sending 10 minutes after it was claimed")));
+        assert!(!s.claim_handoff("H-0001", 41, 1000).unwrap());
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -383,7 +414,7 @@ mod tests {
         let (mut s, dir) = store("handoff-forget");
         s.add_handoff("ops", "one", "command", 0).unwrap();
         s.add_handoff("ops", "two", "command", 0).unwrap();
-        assert!(s.claim_handoff("H-0001", 7).unwrap());
+        assert!(s.claim_handoff("H-0001", 7, 5).unwrap());
         assert!(s.settle_handoff("H-0001", &Ok("t70".into()), 1).unwrap());
         s.forget_bot("ops").unwrap();
         let states: Vec<_> = s.handoffs(Some("ops")).unwrap().into_iter().map(|h| h.state).collect();

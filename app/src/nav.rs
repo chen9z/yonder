@@ -36,6 +36,10 @@ pub enum Route {
     KeyBar,
     /// Every terminal on every machine, found by typing.
     Search,
+    /// The bots Yonder runs on the computer.
+    Bots,
+    /// One of them, by name.
+    Bot(String),
 }
 
 impl Route {

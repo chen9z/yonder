@@ -45,6 +45,8 @@ pub fn settings_page(live: Live) -> nsh_core::element::Screen {
                         .child(view().w(px(8.0)).h(px(8.0)).mr(px(4.0)).rounded(px(4.0)).bg(move || theme::now(state.get()))),
                     action("plug", t!("Edit connection"), Act::Go, || nav::push(Route::EditConnection)),
                     action("server", t!("Add a machine…"), Act::Go, || nav::push(Route::AddMachine)),
+                    // The bots Yonder runs on this computer (its own yonder).
+                    action("bot", t!("Bots"), Act::Go, || nav::push(Route::Bots)),
                 ]))
                 .child(ui::card_heading(t!("TERMINAL")))
                 .child(ui::card(vec![

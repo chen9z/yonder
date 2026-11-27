@@ -210,11 +210,12 @@ waiting --认领（记下 pid）--> sending --hc send 成功--> delivered
                                |--hc 在打字前拒绝（kind 在 REFUSED_BEFORE_TYPING 里）--> waiting
                                \--其他任何失败、超时（可能送到了）--> lost
 sending，发它的进程已经不在了（发到一半退出）--> lost
+sending，认领超过 10 分钟仍没结果（pid 可能已被别的进程复用）--> lost
 waiting，bot 被 bot rm 删了 --> lost（reason 写明，不会投给以后同名的 bot）
 ```
 
 - 规则照 2.3 的投递：最多送一次，可能送到过的不重发。每次转换都是 `UPDATE handoffs … WHERE id = ? AND state = <来源>`，所以 `yonder handoff` 和 yonderd 同时投也只有一个认领得到。`delivered`、`lost` 是终态，`bot reset` 之后也不重投。
-- 遗留的 `sending`：yonderd 每一轮查一遍，`sender` 那个 pid 已经不在了（`kill(pid, 0)`）就记 `lost`（2.3 是重启时；这里 `yonder handoff` 也会发，所以按发送进程在不在算）。
+- 遗留的 `sending`：yonderd 每一轮查一遍，`sender` 那个 pid 已经不在了（`kill(pid, 0)`）就记 `lost`（2.3 是重启时；这里 `yonder handoff` 也会发，所以按发送进程在不在算）。另外认领时记下 `claimed_at`（迁移第 7 步，`store.rs` 里内联的 `ALTER TABLE`），认领超过 10 分钟（`handoff::STUCK_SECS`）仍是 `sending` 的不管 pid 在不在都记 `lost`，原因 `still sending 10 minutes after it was claimed`（B4）；第 7 步之前认领、没有 `claimed_at` 的也算超时。
 
 **`yonder handoff <名字> [--via command|paste]`**：正文从 stdin 读，最多读 200 KiB + 1 字节。
 
@@ -386,9 +387,18 @@ scripts/check.sh    # clippy 和全部测试
 - 桌面没做：行尾悬停图标、⌘K、⌘1..9、⌘+ / ⌘−、关窗后留在 Dock。NSH 0.4 的 macOS 后端没有托盘、系统通知、登录自启、防睡眠，默认 runner 也不暴露关窗不退出。
 - 桌面连电脑和手机一样走 SSH 到 herdr-core，不做本机免 SSH 直连。
 
+**bot 页**（已实现，B4，`app/src/bots.rs`；样子见 `docs/DESIGN.md` 的「Bots 页」）：
+
+- 入口：设置 → 电脑卡片 →「Bots」。
+- 数据：app 不读台账，经已连上那台电脑的 core 跑 `machine.exec`（`on = None`，只在 core 自己的机器上）：`yonder bot ls --json` 和 `yonder bot status --json`，按名字合成一张列表（`yonder_model::bots::bot_rows`；status 里没有的算 `stopped`）。动作是 `yonder bot start|stop|pause|resume <名字>`。`yonder` 经登录 shell 找：`/bin/sh -c 'exec "${SHELL:-/bin/sh}" -lic '\''exec "$@"'\'' yonder-app "$@"' yonder-app yonder <参数…>`，每个参数独立传。JSON 的类型在 `yonder-model`（`bots.rs`，serde），照 CLI 现有输出写，CLI 不改；JSON 前面有登录 shell 打的字时从第一行 `[` 起读。
+- 列表每行：名字、description、状态、机器、harness。状态 `stopped` 没在运行、`starting` 启动中、`ready` 就绪、`failed` 失败、`gone` 已结束、`paused` 已暂停（中性色）、hc 不通时 `unknown` 不确定。坏定义的照样列出，标「定义有误」和第一条 error，没有动作。
+- 详情：上面这些 + 终端地址、会话 id、上次原因（`reason`，没有时用 `hc_error`）。按钮：没在运行 / 失败 / 已结束 →「启动」；就绪 →「叫停这一轮」「暂停」；已暂停 →「恢复」；有地址且 core 的终端列表里它没结束 →「看终端」。启动中没有按钮。
+- 没有 reset 和 rm（不能撤销，留给命令行）。启动、叫停、暂停、恢复都不确认。动作进行中按钮显示进行中、一次只跑一个；结束后重读列表。失败时原地显示 yonder 在 stderr 的第一行（跳过登录 shell 自己的行），不弹窗。
+- 找不到 `yonder`（登录 shell 退出 127）：写「这台电脑上没有 yonder」和怎么装（`cargo install --path crates/yonder-cli`），不显示内部错误。
+- 刷新：进页面、动作之后、下拉、页面开着时每 10 秒，离开页面就停。上次的列表按电脑存在 app 的 storage 里，电脑没连上时显示它并标「不是最新的」。
+
 计划：
 
-- B4：bot 页：列表、状态、起停。
 - 暂停：台账页（手机单列、桌面分栏）、桌面管理页（IM 接入、凭据只写、后台状态）。
 
 ## 7. 记忆
@@ -414,7 +424,7 @@ scripts/check.sh    # clippy 和全部测试
 | B3a | `bot start/status/stop/session/env set`、`bot check --live`、`bot exec`、`bot_runs` 状态机 | 已完成 |
 | B3b | `bot pause/resume/reset/rm/diagnostics`、`yonder log`、`bots.log`、暂停标记（迁移第 5 步） | 已完成（监视和自动拉起没做，未排期） |
 | B5 | `yonder handoff`、`handoff ls`、`handoff prompt`、yonderd 投交接（迁移第 6 步） | 已完成 |
-| B4 | App 里的 bot 页 | 计划 |
+| B4 | App 里的 bot 页（列表、状态、启动、叫停、暂停、恢复）；交接卡在 `sending` 超过 10 分钟记 `lost`（迁移第 7 步） | 已完成 |
 
 之后暂停：台账页、桌面管理页、IM。
 
@@ -452,6 +462,11 @@ scripts/check.sh    # clippy 和全部测试
 - env 注入：值从 stdin 进钥匙串（`.test` service）、未声明和保留名拒绝、带换行拒绝、`bot exec` 缺值不起、起起来的进程拿到值和 `NMEM_AGENT_ID`、假 hc 日志里没有值、run 行走 `bot exec`：`env_values_go_from_the_keychain_to_the_bot_only`、`keychain::tests::keeps_and_gives_back_values`（用完删掉条目），B3a 验收第 2–3 条。
 - 真实 hc（0.1.22）上 B3a 时实测（只起自己的 `sh -c 'sleep …'` 临时终端，用完 `hc kill` 加 `hc rm`；没起 codex、pi、claude，没给别的终端发消息）：`run --bg --json` 打印 `{"address","agent","cwd","name","state","turn"}`；`get --json` 的 `status` 对 sh 是 null，`screen` 字段是 `"exact"`（保存方式，不是文字），屏幕文字要 `read --json` 的 `text`；`status.state` 的取值按 `hc schema` 是 idle、working、done、blocked、error；终端结束后 `get` 是 `"state":"finished"`，带 `exit_code`、`reason`；`interrupt --json` 对活着的终端打印 `{"key":"ctrl+c","outcome":"unknown"}` 退出 0（sh 里的 trap 确实收到了 INT），对结束了的报 `finished` 退出 11；`ls --json --label` 只列带这个 label 的；`rm` 打印 `{"removed":…}`；`exec` 不带 `--json` 时退出码就是程序的，带 `--json` 时退出 0、码在 `code` 里、输出 base64。在一台真实远端机器上起过 `sh -c 'pwd; sleep 4'`：`--cwd .`、`--cwd ..` 从那台机器的家目录算起；`--cwd '~'` 和不存在的目录都让 `run` 报 `spawn_failed`。
 - 钥匙串在 hc 终端里能读到：在本机真实 hc 起的 sh 终端里跑 `security find-generic-password -s dev.yonder.bots.test … -w`，拿到了值（条目由 `security` 自己建，用完删掉）；同时看到终端的环境变量名来自 hc core（有 `HOME PATH USER`、`HC_TERMINAL_ID` 等，没有调用者的 `YONDER_HOME`）。
+- 交接卡在 `sending`：发送进程看起来还在时，认领正好 10 分钟还不动，超过就记 `lost`、不能再认领：`handoff::tests::a_send_stuck_too_long_is_lost`。
+- bot 页的数据类型和 CLI 的实际输出一致（几个 bot、坏定义、ready 带地址和会话、paused）：`crates/yonder-cli/tests/cli.rs` 的 `the_app_reads_what_bot_ls_and_status_print`；合并和跳过登录 shell 前缀：`yonder-model` 的 `bots::tests`。
+- 登录 shell 包装的参数原样到达：`app/src/bots.rs` 的 `yonder_runs_in_the_login_shell_with_its_arguments_whole`；失败时取 yonder 的行不取 shell 的：`a_failure_says_yonder_s_first_line_not_the_shell_s`。
+- bot 页（headless，隔离 core + 测试 SSH 电脑，登录 shell 的 `.profile` 把假 `yonder` 放上 PATH，假 yonder 记下收到的 argv）：各状态和坏定义的显示、详情里的地址和会话、坏定义没有按钮：`bots_are_listed_with_their_state`；四个动作各跑对的 argv、之后重读列表、没有别的调用：`bots_start_stop_pause_resume_run_yonder`；失败时只显示 stderr 里 yonder 的第一行：`bots_say_what_yonder_said_when_it_fails`；PATH 上没有 yonder 时的提示、不露 127 和 not found：`bots_say_when_yonder_is_not_there`；中文界面、列表和详情里没有 reset / rm（及重置、删除、移除）、没有任何对话框：`bots_have_no_reset_or_rm`。
+- 没有 yonder 时 `/bin/sh -lic` 的实际表现（本机手工跑）：stderr 先打 `sh: no job control in this shell`，再打 `yonder-app: exec: yonder: not found`，退出 127。
 - Android 没坏：D1 验收第 6 条（`app/apk.sh --debug` 退出 0）和 `app/tests/app.rs` 的 headless 测试。
 
 ### 9.2 待验证
@@ -467,6 +482,8 @@ scripts/check.sh    # clippy 和全部测试
 - 桌面菜单（⌘, ⌘W ⌘Q）和 Agents 右键菜单：没有实际点过，headless 测试里 NSH 的菜单 API 什么都不做。
 - 真实钥匙串条目 `dev.yonder.app.vault` 的创建和桌面版真连一台电脑：没做（要输真实的 SSH 密码）。
 - 打包后的路径残留：NSH 的 `asset!()` 把每个资源的源文件绝对路径写进二进制，`--remap-path-prefix` 管不到。`app/macos.sh` 现在把二进制里的家目录等长改写后重新签名，这个做法是临时的，待换成正经修法；Android 的 `libnsh.so` 里也有同样的残留，`app/apk.sh` 还没处理。
+- bot 页的画面：NSH 0.4 headless 不能截图；`--target macos` 试过，停在 Loading bots… 没出图，原因未查；bot 页的界面由 owner 手测。
+- bot 页对真实 `yonder` 和真实电脑：只用假 yonder 测过；动作的超时（启动、恢复 240 秒，叫停、暂停 120 秒）是按 `bot start` 默认等 90 秒就绪定的，没在真实 bot 上量过。
 - 真实 harness 的就绪：只对 `pi` 实测过（见 9.1 的 B3a.1 冒烟），codex、claude 没起过。就绪靠 hc 的 `status.state` 是 idle 或 done；不报 status 的 harness（如 sh）永远等不到就绪，只能超时。已知对话框的文字（`Hooks need review`、`open in another app`）照任务给的写，没在真实 harness 上见过。
 - 远端的登录 shell：包装和 `check --live` 在远端都用那边的 `$SHELL -lic`，没在真实远端上起过 harness；`hc exec --on` 和 hc 终端里的 `$SHELL` 是不是同一个没核对过。
 - 登录交互 shell 没有终端（`hc exec`）时，有的 rc 会报错或等输入：只在本机 zsh 上试过（cindy 的 `hc exec -- zsh -lic 'command -v pi'`，以及 B3a.1 冒烟）。

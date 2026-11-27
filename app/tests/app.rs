@@ -1141,3 +1141,227 @@ fn a_pi_main_agent_is_talked_to_as_a_conversation() {
     app.wait_for_within("id:asked", SLOW).unwrap();
     app.wait_until("the note gone", SLOW, |s| s.count("label:Pi needs you, home / 1") == Ok(0)).unwrap();
 }
+
+/// A computer for the bots page: its login shell finds a fake `yonder`
+/// (when `there`; else none at all) that prints `$HOME/fake/ls.json` and
+/// `$HOME/fake/status.json`, writes each argv as a line of
+/// `$HOME/yonder.argv`, and fails an action while `$HOME/fake/fail` is
+/// there. The app opens straight on it, in `language`.
+struct Bots {
+    app: Headless,
+    session: Session,
+    _runtime: tokio::runtime::Runtime,
+}
+
+const FAKE_YONDER: &str = r#"#!/bin/sh
+printf '%s\n' "$*" >> "$HOME/yonder.argv"
+case "$1 $2" in
+"bot ls") cat "$HOME/fake/ls.json" ;;
+"bot status") cat "$HOME/fake/status.json" ;;
+*)
+  if [ -f "$HOME/fake/fail" ]; then
+    echo "bot_invalid: $3 has a broken bot.toml; yonder bot check $3" >&2
+    echo "a second line not to show" >&2
+    exit 1
+  fi
+  echo "done" ;;
+esac
+"#;
+
+const BOTS_LS: &str = r#"[
+ {"name":"broken","valid":false,"dir":"/tmp/example/bots/broken","files":{},"problems":[{"level":"error","message":"no bot.toml"}]},
+ {"name":"flaky","valid":true,"description":"nightly checks","kind":"persistent","machine":"local","harness":"pi","problems":[]},
+ {"name":"idle","valid":true,"description":"waits for work","kind":"persistent","machine":"local","harness":"pi","problems":[]},
+ {"name":"old","valid":true,"description":"last week's","kind":"persistent","machine":"homelab","harness":"claude","problems":[]},
+ {"name":"ops","valid":true,"description":"homelab ops","kind":"persistent","machine":"local","harness":"pi","problems":[]},
+ {"name":"trainer","valid":true,"description":"gpu training","kind":"persistent","machine":"gpu-box","harness":"codex","problems":[]},
+ {"name":"warm","valid":true,"description":"coming up","kind":"persistent","machine":"local","harness":"pi","problems":[]}
+]"#;
+
+const BOTS_STATUS: &str = r#"[
+ {"name":"flaky","state":"failed","paused":false,"address":null,"session":null,"reason":"not ready in 90s","hc_error":null},
+ {"name":"idle","state":"stopped","paused":false,"address":null,"session":null,"reason":null,"hc_error":null},
+ {"name":"old","state":"gone","paused":false,"address":"t9","session":null,"reason":"its terminal ended","hc_error":null},
+ {"name":"ops","state":"ready","paused":false,"address":"t70","session":"s-1","reason":null,"hc_error":null},
+ {"name":"trainer","state":"paused","paused":true,"address":null,"session":null,"reason":null,"hc_error":null},
+ {"name":"warm","state":"starting","paused":false,"address":"t71","session":null,"reason":null,"hc_error":null}
+]"#;
+
+impl Bots {
+    fn open(there: bool, language: &str) -> Bots {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let session = Session::new();
+        let served = runtime.block_on(computer::serve(&session, Options::default())).unwrap();
+        let fake = session.path("fake");
+        std::fs::create_dir_all(&fake).unwrap();
+        std::fs::write(fake.join("ls.json"), BOTS_LS).unwrap();
+        std::fs::write(fake.join("status.json"), BOTS_STATUS).unwrap();
+        // The login shell's PATH: the fake's folder, or only the system's
+        // (so no `yonder` installed for the person running the tests).
+        let path = if there { "$HOME/fake/bin:/usr/bin:/bin" } else { "/usr/bin:/bin" };
+        std::fs::write(session.path(".profile"), format!("PATH=\"{path}\"\nexport PATH\n")).unwrap();
+        if there {
+            std::fs::create_dir_all(fake.join("bin")).unwrap();
+            let yonder = fake.join("bin/yonder");
+            std::fs::write(&yonder, FAKE_YONDER).unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&yonder, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let computer = serde_json::json!({
+            "name": "127.0.0.1", "host": "127.0.0.1", "port": served.port, "user": "me",
+            "fingerprint": served.fingerprint, "password": "open sesame",
+        });
+        let mut config = EngineConfig::new(Root::of::<herdc_app::App>());
+        config.storage = Some(MemoryStorage::new(vec![
+            ("computers".to_owned(), serde_json::json!([computer]).to_string()),
+            ("open".to_owned(), format!("me@127.0.0.1:{}", served.port)),
+            ("prefs".to_owned(), format!(r#"{{"language":"{language}"}}"#)),
+        ]));
+        let mut app = Headless::start(config).unwrap();
+        // Nothing on the bots page asks first.
+        app.on_dialog(|d| panic!("a dialog on the bots page: {:?} {:?}", d.title, d.message));
+        let settings = if language == "Chinese" { "label:设置" } else { "label:Settings" };
+        let bots = if language == "Chinese" { "label:Bot" } else { "label:Bots" };
+        app.wait_for_within(settings, SLOW).unwrap();
+        app.press(settings).unwrap();
+        app.wait_for_within(bots, SLOW).unwrap();
+        app.press(bots).unwrap();
+        Bots { app, session, _runtime: runtime }
+    }
+
+    /// The argv lines the fake was run with, so far.
+    fn ran(&self) -> Vec<String> {
+        std::fs::read_to_string(self.session.path("yonder.argv")).unwrap_or_default().lines().map(str::to_owned).collect()
+    }
+
+    /// Presses `button` on bot `name`'s page and waits for yonder to run
+    /// `bot <verb> <name>`, then for the list to be read again.
+    fn act(&mut self, name: &str, button: &str, verb: &str) {
+        let row = format!("id:bot:{name}");
+        self.app.wait_for_within(&row, SLOW).unwrap();
+        self.app.press(&row).unwrap();
+        let id = format!("id:{button}");
+        self.app.wait_for_within(&id, SLOW).unwrap();
+        self.app.press(&id).unwrap();
+        let wanted = format!("bot {verb} {name}");
+        let ran = || std::fs::read_to_string(self.session.path("yonder.argv")).unwrap_or_default();
+        self.app
+            .wait_until(&format!("yonder {wanted}, then the list again"), SLOW, |_| {
+                let all: Vec<String> = ran().lines().map(str::to_owned).collect();
+                all.iter().position(|l| *l == wanted).is_some_and(|at| all[at + 1..].iter().any(|l| l == "bot status --json"))
+            })
+            .unwrap();
+        self.app.back().unwrap();
+    }
+}
+
+#[test]
+fn bots_are_listed_with_their_state() {
+    let mut b = Bots::open(true, "English");
+    b.app.wait_for_within("id:bot:ops", SLOW).unwrap();
+    // The two commands, with their arguments whole, before anything else.
+    assert_eq!(b.ran()[..2], ["bot ls --json", "bot status --json"]);
+    let screen = b.app.screen();
+    for state in ["ready", "paused", "stopped", "failed", "gone", "starting", "invalid"] {
+        assert_eq!(screen.count(&format!("id:state-{state}")), Ok(1), "one bot {state}: {:?}", screen.texts());
+    }
+    for shown in ["ops", "homelab ops", "local · pi", "gpu-box · codex", "homelab · claude", "Ready", "Paused", "Not running", "Failed", "Gone", "Starting", "Definition has errors", "no bot.toml"] {
+        assert!(screen.shows(shown), "{shown:?} in {:?}", screen.texts());
+    }
+    // A bot whose definition is wrong: why, and nothing to do to it.
+    b.app.press("id:bot:broken").unwrap();
+    b.app.wait_for_within("text:Problem", SLOW).unwrap();
+    assert!(b.app.shows("no bot.toml"));
+    for button in ["start", "stop", "pause", "resume"] {
+        assert_eq!(b.app.screen().count(&format!("id:bot-{button}")), Ok(0), "{button} on a broken bot");
+    }
+    b.app.back().unwrap();
+    // One that runs: its terminal, session and the buttons for ready.
+    b.app.press("id:bot:ops").unwrap();
+    b.app.wait_for_within("id:bot-stop", SLOW).unwrap();
+    let screen = b.app.screen();
+    for shown in ["t70", "s-1", "homelab ops", "Stop this turn", "Pause"] {
+        assert!(screen.shows(shown), "{shown:?} in {:?}", screen.texts());
+    }
+    assert_eq!(screen.count("id:bot-start"), Ok(0));
+    // Its terminal is not one the core has: nothing to show.
+    assert_eq!(screen.count("id:bot-terminal"), Ok(0));
+    b.app.back().unwrap();
+    // A failed one says why, and can be started.
+    b.app.press("id:bot:flaky").unwrap();
+    b.app.wait_for_within("id:bot-start", SLOW).unwrap();
+    assert!(b.app.shows("not ready in 90s"));
+}
+
+#[test]
+fn bots_start_stop_pause_resume_run_yonder() {
+    let mut b = Bots::open(true, "English");
+    b.act("ops", "bot-stop", "stop");
+    b.act("ops", "bot-pause", "pause");
+    b.act("trainer", "bot-resume", "resume");
+    b.act("idle", "bot-start", "start");
+    b.act("flaky", "bot-start", "start");
+    b.act("old", "bot-start", "start");
+    // Nothing else was asked of it: only reading and those.
+    let asked: Vec<String> = b.ran().into_iter().filter(|l| !l.ends_with("--json")).collect();
+    assert_eq!(asked, ["bot stop ops", "bot pause ops", "bot resume trainer", "bot start idle", "bot start flaky", "bot start old"]);
+}
+
+#[test]
+fn bots_say_what_yonder_said_when_it_fails() {
+    let mut b = Bots::open(true, "English");
+    std::fs::write(b.session.path("fake/fail"), "").unwrap();
+    b.app.wait_for_within("id:bot:idle", SLOW).unwrap();
+    b.app.press("id:bot:idle").unwrap();
+    b.app.wait_for_within("id:bot-start", SLOW).unwrap();
+    b.app.press("id:bot-start").unwrap();
+    b.app.wait_for_within("id:bot-error", SLOW).unwrap();
+    let screen = b.app.screen();
+    // yonder's line, first; not the second, nor the login shell's.
+    assert!(screen.shows("bot_invalid: idle has a broken bot.toml; yonder bot check idle"), "{:?}", screen.texts());
+    assert!(!screen.texts().iter().any(|t| t.contains("second line") || t.contains("job control")), "{:?}", screen.texts());
+    assert!(b.ran().contains(&"bot start idle".to_owned()));
+}
+
+#[test]
+fn bots_say_when_yonder_is_not_there() {
+    let mut b = Bots::open(false, "English");
+    b.app.wait_for_within("id:bots-missing", SLOW).unwrap();
+    let screen = b.app.screen();
+    assert!(screen.shows("There is no yonder on this computer."), "{:?}", screen.texts());
+    assert!(screen.texts().iter().any(|t| t.contains("cargo install --path crates/yonder-cli")), "{:?}", screen.texts());
+    // Not what went wrong inside.
+    assert!(!screen.texts().iter().any(|t| t.contains("127") || t.contains("not found") || t.contains("exec")), "{:?}", screen.texts());
+    assert!(b.ran().is_empty());
+}
+
+#[test]
+fn bots_have_no_reset_or_rm() {
+    let mut b = Bots::open(true, "Chinese");
+    b.app.wait_for_within("id:bot:ops", SLOW).unwrap();
+    for shown in ["就绪", "已暂停", "没在运行", "失败", "已结束", "启动中", "定义有误"] {
+        assert!(b.app.shows(shown), "{shown:?} in {:?}", b.app.screen().texts());
+    }
+    let no_undo = |b: &Bots| {
+        let texts = b.app.screen().texts().join("\n");
+        let words: Vec<String> = texts.split(|c: char| !c.is_ascii_alphanumeric()).map(str::to_lowercase).collect();
+        for word in ["reset", "rm", "remove", "delete"] {
+            assert!(!words.iter().any(|w| w == word), "{word:?} in {texts}");
+        }
+        for word in ["重置", "删除", "移除"] {
+            assert!(!texts.contains(word), "{word:?} in {texts}");
+        }
+        for id in ["id:bot-reset", "id:bot-rm"] {
+            assert_eq!(b.app.screen().count(id), Ok(0));
+        }
+    };
+    no_undo(&b);
+    for (name, button) in [("ops", "id:bot-stop"), ("trainer", "id:bot-resume"), ("idle", "id:bot-start"), ("warm", "text:t71")] {
+        b.app.press(&format!("id:bot:{name}")).unwrap();
+        b.app.wait_for_within(button, SLOW).unwrap();
+        no_undo(&b);
+        b.app.back().unwrap();
+        b.app.wait_for_within("id:bot:ops", SLOW).unwrap();
+    }
+    assert!(b.ran().iter().all(|l| l.ends_with("--json")), "{:?}", b.ran());
+}

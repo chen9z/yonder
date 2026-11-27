@@ -942,6 +942,36 @@ fn handoffs_go_once_when_the_bot_is_free() {
     assert!(log.contains(" ops handoff address=t70 reason=H-0001:delivered\n") && log.contains("reason=H-0004:lost\n"), "{log}");
 }
 
+/// The app reads `bot ls --json` and `bot status --json` with
+/// yonder-model's types: what they print fills them.
+#[test]
+fn the_app_reads_what_bot_ls_and_status_print() {
+    use yonder_model::bots::{BotListed, BotStatus, bot_rows, json_array};
+    let l = Ledger::new("the_app_reads_what_bot_ls_and_status_print");
+    let work = l.0.join("ops-work");
+    std::fs::create_dir(&work).unwrap();
+    bot(&l, "ops", &format!("name = \"ops\"\ndescription = \"homelab ops\"\nkind = \"persistent\"\ncwd = \"{}\"\nharness = \"/bin/sh\"\n", work.display()), None);
+    bot(&l, "trainer", "name = \"trainer\"\ndescription = \"gpu training\"\nkind = \"persistent\"\nmachine = \"gpu-box\"\ncwd = \"~/bots/trainer\"\nharness = \"codex\"\n", None);
+    std::fs::create_dir_all(l.0.join("bots/broken")).unwrap();
+    l.ok(&["bot", "start", "ops"]);
+    l.ok(&["bot", "session", "ops", "s-1"]);
+    l.ok(&["bot", "pause", "trainer"]);
+    let listed: Vec<BotListed> = json_array(&l.ok(&["bot", "ls", "--json"])).unwrap();
+    let statuses: Vec<BotStatus> = json_array(&l.ok(&["bot", "status", "--json"])).unwrap();
+    let rows = bot_rows(&listed, &statuses);
+    let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
+    assert_eq!(names, ["broken", "ops", "trainer"]);
+    assert_eq!((rows[0].valid, rows[0].problem.as_deref()), (false, Some("no bot.toml")));
+    let ops = &rows[1];
+    assert_eq!(
+        (ops.valid, ops.description.as_str(), ops.machine.as_str(), ops.harness.as_str(), ops.kind.as_str()),
+        (true, "homelab ops", "local", "/bin/sh", "persistent")
+    );
+    assert_eq!((ops.state.as_str(), ops.address.as_deref(), ops.session.as_deref()), ("ready", Some("t70"), Some("s-1")));
+    let trainer = &rows[2];
+    assert_eq!((trainer.state.as_str(), trainer.machine.as_str()), ("paused", "gpu-box"));
+}
+
 #[test]
 fn bots_elsewhere_resume_their_session() {
     let l = Ledger::new("bots_elsewhere_resume_their_session");

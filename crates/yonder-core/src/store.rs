@@ -14,7 +14,12 @@ use crate::when::{Rule, format_utc};
 
 /// The schema, one step per ledger version; `PRAGMA user_version` says how
 /// many are applied. Only ever append.
-const MIGRATIONS: &[&str] = &[include_str!("schema.sql"), include_str!("schema2.sql"), include_str!("schema3.sql"), include_str!("schema4.sql"), include_str!("schema5.sql"), include_str!("schema6.sql")];
+const MIGRATIONS: &[&str] = &[include_str!("schema.sql"), include_str!("schema2.sql"), include_str!("schema3.sql"), include_str!("schema4.sql"), include_str!("schema5.sql"), include_str!("schema6.sql"), SCHEMA7];
+
+/// Version 7: when a handoff was claimed for sending, so one stuck in
+/// `sending` (its sender's pid reused by another process) ends `lost`.
+/// Here, not in a file of its own.
+const SCHEMA7: &str = "ALTER TABLE handoffs ADD COLUMN claimed_at TEXT;";
 
 const TASK_COLS: &str = "id, title, state, source, created_at, updated_at";
 pub(crate) const REMINDER_COLS: &str = "id, content, state, next_fire_at, every_spec, snooze_until, check_cmd, check_hash, \

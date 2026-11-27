@@ -1356,6 +1356,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "yonder-model",
 ]
 
 [[package]]
@@ -4465,6 +4466,14 @@ dependencies = [
  "quote",
  "syn 3.0.9",
  "synstructure",
+]
+
+[[package]]
+name = "yonder-model"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

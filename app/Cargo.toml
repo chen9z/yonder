@@ -17,6 +17,8 @@ herdc-model = { path = "../crates/herdc-model" }
 herdc-ssh = { path = "../crates/herdc-ssh" }
 herdc-term = { path = "../crates/herdc-term" }
 herdc-wire = { path = "../crates/herdc-wire" }
+# The bots' JSON from the computer's yonder (spec 5.2: the only Yonder crate here).
+yonder-model = { path = "../crates/yonder-model" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time", "macros", "net"] }

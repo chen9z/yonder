@@ -7,6 +7,7 @@
 mod i18n;
 mod keybar;
 mod agents;
+mod bots;
 mod changes;
 mod chat;
 mod connect;
@@ -176,5 +177,7 @@ fn page(live: Live, route: Route) -> Screen {
         Route::AddMachine => machines::add_machine_page(live),
         Route::Text(text) => terminal::text_page(live, text),
         Route::Step(call) => chat::step_page(live, call),
+        Route::Bots => bots::bots_page(live),
+        Route::Bot(name) => bots::bot_page(live, name),
     }
 }

@@ -4,6 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod bots;
 pub mod envelope;
 
 /// An enum stored as a snake_case word: `as_str` gives it, `parse` takes it back.
