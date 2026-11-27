@@ -7,14 +7,14 @@ use std::time::Duration;
 
 use rusqlite::types::Type;
 use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
-use yonder_model::{Reminder, ReminderState, Task, TaskState};
+use yonder_model::{BotRun, BotRunState, Reminder, ReminderState, Task, TaskState};
 
 use crate::redact::redact;
 use crate::when::{Rule, format_utc};
 
 /// The schema, one step per ledger version; `PRAGMA user_version` says how
 /// many are applied. Only ever append.
-const MIGRATIONS: &[&str] = &[include_str!("schema.sql"), include_str!("schema2.sql"), include_str!("schema3.sql")];
+const MIGRATIONS: &[&str] = &[include_str!("schema.sql"), include_str!("schema2.sql"), include_str!("schema3.sql"), include_str!("schema4.sql")];
 
 const TASK_COLS: &str = "id, title, state, source, created_at, updated_at";
 pub(crate) const REMINDER_COLS: &str = "id, content, state, next_fire_at, every_spec, snooze_until, check_cmd, check_hash, \
@@ -147,6 +147,59 @@ impl Store {
              ON CONFLICT (bot, target) DO UPDATE SET agents_sha256 = excluded.agents_sha256, pushed_at = excluded.pushed_at",
             params![bot, target, hash, format_utc(now)],
         )?;
+        Ok(())
+    }
+
+    /// `bot`'s current run, if it ever had one.
+    pub fn bot_run(&self, bot: &str) -> Result<Option<BotRun>> {
+        Ok(self.conn.query_row(&format!("SELECT {RUN_COLS} FROM bot_runs WHERE bot = ?1"), [bot], run_row).optional()?)
+    }
+
+    /// A new run of `bot` at `address`, `starting`: only over none, or one
+    /// that is final. False if a run that is not final is there.
+    pub fn begin_run(&self, bot: &str, address: &str, session: Option<&str>, now: i64) -> Result<bool> {
+        let changed = self.conn.execute(
+            "INSERT INTO bot_runs (bot, address, state, session, started_at, updated_at, reason)
+             VALUES (?1, ?2, 'starting', ?3, ?4, ?4, NULL)
+             ON CONFLICT (bot) DO UPDATE SET address = excluded.address, state = 'starting', session = excluded.session,
+                 started_at = excluded.started_at, updated_at = excluded.updated_at, reason = NULL
+             WHERE bot_runs.state IN ('failed', 'gone')",
+            params![bot, address, session, format_utc(now)],
+        )?;
+        Ok(changed == 1)
+    }
+
+    /// Moves `bot`'s run at `address` from `from` to `to`, only if it is
+    /// still there and in `from`: a late word about an older run, or one
+    /// already moved, changes nothing (false). Only `starting` to `ready`
+    /// or `failed`, and `ready` to `gone`.
+    pub fn move_run(&self, bot: &str, address: &str, from: BotRunState, to: BotRunState, reason: Option<&str>, now: i64) -> Result<bool> {
+        use BotRunState::*;
+        if !matches!((from, to), (Starting, Ready) | (Starting, Failed) | (Ready, Gone)) {
+            return Err(StoreError::WrongState { id: bot.into(), state: from.to_string(), want: "starting, or ready to go" });
+        }
+        let changed = self.conn.execute(
+            "UPDATE bot_runs SET state = ?4, reason = ?5, updated_at = ?6 WHERE bot = ?1 AND address = ?2 AND state = ?3",
+            params![bot, address, from.as_str(), to.as_str(), reason, format_utc(now)],
+        )?;
+        Ok(changed == 1)
+    }
+
+    /// The session `bot` resumes, if one is kept.
+    pub fn session(&self, bot: &str) -> Result<Option<String>> {
+        Ok(self.conn.query_row("SELECT session FROM bot_sessions WHERE bot = ?1", [bot], |r| r.get(0)).optional()?)
+    }
+
+    /// Keeps `session` for `bot`, or forgets it (None).
+    pub fn set_session(&self, bot: &str, session: Option<&str>, now: i64) -> Result<()> {
+        match session {
+            Some(id) => self.conn.execute(
+                "INSERT INTO bot_sessions (bot, session, updated_at) VALUES (?1, ?2, ?3)
+                 ON CONFLICT (bot) DO UPDATE SET session = excluded.session, updated_at = excluded.updated_at",
+                params![bot, id, format_utc(now)],
+            )?,
+            None => self.conn.execute("DELETE FROM bot_sessions WHERE bot = ?1", [bot])?,
+        };
         Ok(())
     }
 
@@ -342,6 +395,20 @@ fn word<T>(row: &Row, i: usize, parse: fn(&str) -> Option<T>) -> rusqlite::Resul
     parse(&s).ok_or_else(|| rusqlite::Error::FromSqlConversionFailure(i, Type::Text, format!("unknown state {s:?}").into()))
 }
 
+const RUN_COLS: &str = "bot, address, state, session, started_at, updated_at, reason";
+
+fn run_row(r: &Row) -> rusqlite::Result<BotRun> {
+    Ok(BotRun {
+        bot: r.get(0)?,
+        address: r.get(1)?,
+        state: word(r, 2, BotRunState::parse)?,
+        session: r.get(3)?,
+        started_at: r.get(4)?,
+        updated_at: r.get(5)?,
+        reason: r.get(6)?,
+    })
+}
+
 fn task_row(r: &Row) -> rusqlite::Result<Task> {
     Ok(Task {
         id: r.get(0)?,
@@ -444,6 +511,47 @@ mod tests {
         assert_eq!(r.pushed("ops", "gpu-box:~/ops").unwrap(), None);
         assert_eq!(r.version().unwrap(), 2);
         drop(r);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn runs_move_only_from_where_they_are() {
+        use BotRunState::*;
+        let (s, dir) = store("store-runs");
+        assert_eq!(s.bot_run("ops").unwrap(), None);
+        assert!(s.begin_run("ops", "t70", Some("s-1"), 0).unwrap());
+        // Not over a run that is not final.
+        assert!(!s.begin_run("ops", "t71", None, 1).unwrap());
+        let run = s.bot_run("ops").unwrap().unwrap();
+        assert_eq!((run.address.as_str(), run.state, run.session.as_deref()), ("t70", Starting, Some("s-1")));
+        // A late word about another terminal, or from the wrong state: nothing.
+        assert!(!s.move_run("ops", "t71", Starting, Failed, Some("start_timeout"), 2).unwrap());
+        assert!(!s.move_run("ops", "t70", Ready, Gone, None, 2).unwrap());
+        assert!(s.move_run("ops", "t70", Starting, Ready, None, 2).unwrap());
+        // Once ready, a late timeout cannot fail it.
+        assert!(!s.move_run("ops", "t70", Starting, Failed, Some("start_timeout"), 3).unwrap());
+        assert!(matches!(s.move_run("ops", "t70", Ready, Starting, None, 3), Err(StoreError::WrongState { .. })));
+        assert!(matches!(s.move_run("ops", "t70", Gone, Ready, None, 3), Err(StoreError::WrongState { .. })));
+        assert!(s.move_run("ops", "t70", Ready, Gone, Some("finished"), 4).unwrap());
+        assert_eq!(s.bot_run("ops").unwrap().unwrap().reason.as_deref(), Some("finished"));
+        // Final: a new start replaces it.
+        assert!(s.begin_run("ops", "t72", None, 5).unwrap());
+        let run = s.bot_run("ops").unwrap().unwrap();
+        assert_eq!((run.address.as_str(), run.state, run.reason, run.started_at.as_str()), ("t72", Starting, None, "1970-01-01T00:00:05Z"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn keeps_sessions_apart_from_runs() {
+        let (s, dir) = store("store-sessions");
+        assert_eq!(s.session("trainer").unwrap(), None);
+        s.set_session("trainer", Some("s-1"), 0).unwrap();
+        s.set_session("trainer", Some("s-2"), 1).unwrap();
+        assert!(s.begin_run("trainer", "gpu-box/t71", Some("s-2"), 1).unwrap());
+        assert!(s.move_run("trainer", "gpu-box/t71", BotRunState::Starting, BotRunState::Failed, None, 2).unwrap());
+        assert_eq!(s.session("trainer").unwrap().as_deref(), Some("s-2"));
+        s.set_session("trainer", None, 3).unwrap();
+        assert_eq!(s.session("trainer").unwrap(), None);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

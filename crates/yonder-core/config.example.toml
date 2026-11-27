@@ -57,3 +57,6 @@ tick_secs = 30                          # default 15
 
 [service]
 label = "dev.yonder.daemon"             # the launchd label
+
+[bot]
+start_timeout_secs = 120                # default 90: how long bot start waits for ready

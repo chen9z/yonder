@@ -1,5 +1,5 @@
 //! The ledger's records as every Yonder program sees them: tasks,
-//! reminders and bot definitions, and the words their states are stored
+//! reminders, bot definitions and bot runs, and the words their states are stored
 //! and shown as. Times are UTC, `YYYY-MM-DDTHH:MM:SSZ`, so they sort as text.
 
 use serde::{Deserialize, Serialize};
@@ -48,6 +48,37 @@ words! {
     /// `persistent`: runs on, in its own working directory, and keeps a
     /// `MEMORY.md`. `oneoff`: started for one task, which says where.
     BotKind { Persistent = "persistent", Oneoff = "oneoff" }
+}
+
+words! {
+    /// Where a bot's current run is. `starting`: its terminal is up, not
+    /// yet ready; then `ready`, or `failed` (did not get ready: ended, a
+    /// dialog in the way, or out of time). `gone`: a ready one's terminal
+    /// ended or went away. `failed` and `gone` are final; a new start
+    /// replaces them.
+    BotRunState { Starting = "starting", Ready = "ready", Failed = "failed", Gone = "gone" }
+}
+
+impl BotRunState {
+    /// Nothing more happens to a run in this state.
+    pub fn is_final(self) -> bool {
+        matches!(self, BotRunState::Failed | BotRunState::Gone)
+    }
+}
+
+/// A bot's current run: one a bot, in the ledger's `bot_runs`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct BotRun {
+    pub bot: String,
+    /// Its terminal: `t7`, or `machine/t7` elsewhere.
+    pub address: String,
+    pub state: BotRunState,
+    /// The session it was started to resume, if any.
+    pub session: Option<String>,
+    pub started_at: String,
+    pub updated_at: String,
+    /// Why it failed or went: `start_timeout`, `needs_attention: ...`, ...
+    pub reason: Option<String>,
 }
 
 /// A bot as its `bot.toml` defines it, in `<home>/bots/<name>/`.

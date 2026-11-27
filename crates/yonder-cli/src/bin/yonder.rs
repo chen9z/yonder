@@ -10,12 +10,14 @@ use std::sync::atomic::AtomicBool;
 use clap::{Args, Parser, Subcommand};
 use yonder_core::config::Config;
 use yonder_core::firing::ECHO_CHARS;
-use yonder_core::hc::Hc;
+use yonder_core::botrun::{self, BotFail, StartWith};
+use yonder_core::hc::{Hc, HcBots};
+use yonder_core::keychain::{self, Keychain, KeychainError};
 use yonder_core::redact::excerpt;
 use yonder_core::when::{self, Rule};
 use yonder_core::bot::{self, Bot, BotError, Level};
 use yonder_core::{NewReminder, Store, StoreError, check_exec, daemon, home, service, store, sync};
-use yonder_model::{BotKind, Reminder, Task, TaskState};
+use yonder_model::{BotDef, BotKind, Reminder, Task, TaskState};
 
 /// What agents are told about Yonder: `yonder manual`, and the end of the
 /// AGENTS.md that `yonder bot sync` pushes.
@@ -76,7 +78,49 @@ enum BotCmd {
         json: bool,
     },
     /// Check the definitions, one bot's or all; exits 1 on any error.
-    Check { name: Option<String> },
+    Check {
+        name: Option<String>,
+        /// Also what starting it needs: its machine reached, its cwd there,
+        /// its harness runnable there.
+        #[arg(long)]
+        live: bool,
+    },
+    /// Start a bot in an hc terminal, wait until it is ready, and send it
+    /// its template (and task).
+    Start {
+        name: String,
+        /// What to do: after the template, in the first message. A oneoff
+        /// bot needs one.
+        #[arg(long)]
+        task: Option<String>,
+        /// Where a oneoff bot works.
+        #[arg(long)]
+        cwd: Option<String>,
+    },
+    /// Each bot's run: stopped, starting, ready, failed or gone (unknown
+    /// when hc does not answer), its terminal, session and last reason.
+    Status {
+        name: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Stop what a ready bot is doing now (its stop key); its terminal and
+    /// session stay.
+    Stop { name: String },
+    /// The session a bot resumes when started: show it, set it, or --clear it.
+    Session {
+        name: String,
+        #[arg(conflicts_with = "clear")]
+        id: Option<String>,
+        #[arg(long)]
+        clear: bool,
+    },
+    /// A bot's environment values, kept in the login keychain.
+    #[command(subcommand)]
+    Env(EnvCmd),
+    /// Internal: what a bot's terminal runs. Takes its env from the
+    /// keychain and becomes its harness. Not for typing yourself.
+    Exec { name: String },
     /// Push each persistent bot's AGENTS.md (with the manual) to its cwd,
     /// and pull its MEMORY.md back; all bots if none are named. Exits 1 if
     /// any drifted, failed or is invalid.
@@ -89,6 +133,13 @@ enum BotCmd {
         #[arg(long)]
         dry_run: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum EnvCmd {
+    /// Keep the value of one of a bot's env variables, read from stdin (one
+    /// trailing newline dropped), in the login keychain. It is never shown.
+    Set { name: String, var: String },
 }
 
 #[derive(Subcommand)]
@@ -245,7 +296,11 @@ fn main() -> ExitCode {
     match run(cli.cmd) {
         Ok(()) => ExitCode::SUCCESS,
         Err(f) => {
-            eprintln!("{}: {}; {}", f.code, one_line(&f.msg), f.hint);
+            if f.hint.is_empty() {
+                eprintln!("{}: {}", f.code, one_line(&f.msg));
+            } else {
+                eprintln!("{}: {}; {}", f.code, one_line(&f.msg), f.hint);
+            }
             ExitCode::FAILURE
         }
     }
@@ -512,7 +567,7 @@ fn bot_cmd(cmd: BotCmd) -> Result<(), Fail> {
             }
             print_problems(&b, "  ");
         }
-        BotCmd::Check { name } => {
+        BotCmd::Check { name, live } => {
             let all = match name {
                 Some(name) => vec![bot::find(&bots, &name)?],
                 None => bot::list(&bots)?,
@@ -520,19 +575,272 @@ fn bot_cmd(cmd: BotCmd) -> Result<(), Fail> {
             if all.is_empty() {
                 println!("no bots in {}", bots.display());
             }
+            let (hc, mut live_wrong) = (live.then(hc_bots).transpose()?, false);
             for b in &all {
-                if b.problems.is_empty() {
+                let wrong = match (&hc, &b.def) {
+                    (Some(hc), Some(def)) => live_check(hc, def),
+                    _ => Vec::new(),
+                };
+                if b.problems.is_empty() && wrong.is_empty() {
                     println!("{}: ok", b.name);
                 }
                 print_problems(b, "");
+                for w in &wrong {
+                    println!("error: {}: {w}", b.name);
+                }
+                live_wrong |= !wrong.is_empty();
             }
             if all.iter().any(|b| b.problems.iter().any(|p| p.level == Level::Error)) {
                 return Err(Fail { code: "bot_invalid", msg: "a bot's definition has errors".into(), hint: "fix what the error lines say" });
             }
+            if live_wrong {
+                return Err(Fail { code: "start_check", msg: "what a bot needs to start is missing".into(), hint: "fix what the error lines say" });
+            }
         }
         BotCmd::Sync { names, force, dry_run } => bot_sync(&home, &bots, names, sync::Options { force, dry_run })?,
+        BotCmd::Start { name, task, cwd } => {
+            let b = bot::find(&bots, &name)?;
+            let def = valid(&b)?;
+            let template = b.files.iter().find(|(f, _)| *f == "template.md").map(|(_, p)| std::fs::read_to_string(p)).transpose().map_err(|e| Fail {
+                code: "home",
+                msg: format!("reading {name}'s template.md: {e}"),
+                hint: "check its permissions",
+            })?;
+            let store = Store::open(&home)?;
+            let config = config()?;
+            let with = StartWith {
+                task: task.as_deref(),
+                cwd: cwd.as_deref(),
+                yonder: std::env::current_exe().and_then(|p| p.canonicalize()).map_err(|e| Fail {
+                    code: "no_program",
+                    msg: format!("where yonder runs from: {e}"),
+                    hint: "run yonder by its path",
+                })?,
+                home: home.clone(),
+                service: std::env::var("YONDER_KEYCHAIN_SERVICE").ok().filter(|s| !s.is_empty()),
+                user_home: std::env::var_os("HOME"),
+                path: std::env::var_os("PATH"),
+                here: std::env::current_dir().unwrap_or_default(),
+                timeout: std::time::Duration::from_secs(config.bot.start_timeout_secs),
+                poll: std::time::Duration::from_secs(1),
+            };
+            let started = botrun::start(&store, &hc_bots()?, def, template.as_deref().unwrap_or(""), &with).map_err(bot_fail)?;
+            for w in &started.warnings {
+                eprintln!("warning: {name}: {w}");
+            }
+            println!("{name}: ready at {}", started.address);
+        }
+        BotCmd::Status { name, json } => bot_status(&home, &bots, name, json)?,
+        BotCmd::Stop { name } => {
+            bot::find(&bots, &name)?;
+            let store = Store::open(&home)?;
+            let (address, outcome) = botrun::stop(&store, &hc_bots()?, &name, config()?.bot.start_timeout_secs).map_err(bot_fail)?;
+            println!("{name}: interrupted at {address} (hc says: {outcome})");
+        }
+        BotCmd::Session { name, id, clear } => {
+            bot::find(&bots, &name)?;
+            let store = Store::open(&home)?;
+            match (id, clear) {
+                (Some(id), _) => {
+                    if id.is_empty() || id.len() > 256 || id.starts_with('-') || id.chars().any(|c| c.is_whitespace() || c.is_control()) {
+                        return Err(Fail {
+                            code: "bad_input",
+                            msg: format!("{id:?} is not a session id"),
+                            hint: "give it as the harness printed it: no spaces, not starting with -",
+                        });
+                    }
+                    store.set_session(&name, Some(&id), when::now())?;
+                    println!("{name}: session {id}");
+                }
+                (None, true) => {
+                    store.set_session(&name, None, when::now())?;
+                    println!("{name}: no session");
+                }
+                (None, false) => println!("{}", store.session(&name)?.unwrap_or_else(|| "none".into())),
+            }
+        }
+        BotCmd::Env(EnvCmd::Set { name, var }) => env_set(&bots, &name, &var)?,
+        BotCmd::Exec { name } => return bot_exec(&home, &bots, &name),
     }
     Ok(())
+}
+
+fn config() -> Result<Config, Fail> {
+    Config::load_default().map_err(|e| Fail { code: "config", msg: e.to_string(), hint: "fix the config file" })
+}
+
+fn hc_bots() -> Result<HcBots, Fail> {
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_default();
+    Ok(HcBots { bin: Hc::bin(&config()?.hc.bin, &home), stop: &NEVER })
+}
+
+/// What `bot_fail` prints has no hint of its own: the message says it.
+fn bot_fail(e: BotFail) -> Fail {
+    Fail { code: e.code, msg: e.msg, hint: "" }
+}
+
+/// The definition of a valid bot.
+fn valid(b: &Bot) -> Result<&BotDef, Fail> {
+    b.def.as_ref().ok_or_else(|| Fail {
+        code: "bot_invalid",
+        msg: format!("{}: {}", b.name, first_error(b)),
+        hint: "see yonder bot check",
+    })
+}
+
+/// The startup check of `def`, beyond its definition: what is wrong.
+fn live_check(hc: &HcBots, def: &BotDef) -> Vec<String> {
+    // A oneoff bot's cwd comes with each start: not looked at here.
+    match botrun::hc_cwd(def, None, std::env::var_os("HOME").as_ref(), &std::env::current_dir().unwrap_or_default()) {
+        Ok(cwd) => botrun::check_live(def, cwd.as_deref(), hc, std::env::var_os("PATH").as_ref()),
+        Err(e) => vec![e.msg],
+    }
+}
+
+/// One line a bot: name, state, terminal, session, last reason.
+fn bot_status(home: &std::path::Path, bots: &std::path::Path, name: Option<String>, json: bool) -> Result<(), Fail> {
+    let all = match name {
+        Some(name) => vec![bot::find(bots, &name)?],
+        None => bot::list(bots)?,
+    };
+    let store = Store::open(home)?;
+    let (hc, timeout) = (hc_bots()?, config()?.bot.start_timeout_secs);
+    let mut items = Vec::new();
+    for b in &all {
+        let seen = botrun::observe(&store, &hc, &b.name, timeout, when::now()).map_err(bot_fail)?;
+        let session = store.session(&b.name)?;
+        let recorded = seen.run.as_ref().map(|r| r.state.as_str());
+        let state = if seen.unknown.is_some() { "unknown" } else { recorded.unwrap_or("stopped") };
+        let run = seen.run.as_ref();
+        if json {
+            items.push(serde_json::json!({
+                "name": b.name,
+                "state": state,
+                "recorded_state": recorded,
+                "address": run.map(|r| &r.address),
+                "session": session,
+                "reason": run.and_then(|r| r.reason.as_ref()),
+                "started_at": run.map(|r| &r.started_at),
+                "updated_at": run.map(|r| &r.updated_at),
+                "hc_error": seen.unknown,
+            }));
+            continue;
+        }
+        let address = run.map_or("-", |r| r.address.as_str());
+        let mut line = format!("{:<16}  {state:<9}  {address:<14}  session {}", b.name, session.as_deref().unwrap_or("-"));
+        if let Some(reason) = run.and_then(|r| r.reason.as_ref()) {
+            line += &format!("  ({reason})");
+        }
+        if let (Some(why), Some(recorded)) = (&seen.unknown, recorded) {
+            line += &format!("  [recorded {recorded}; hc: {why}]");
+        }
+        println!("{line}");
+    }
+    if json {
+        println!("{}", serde_json::to_string_pretty(&items).expect("plain data"));
+    } else if all.is_empty() {
+        println!("no bots in {}", bots.display());
+    }
+    Ok(())
+}
+
+impl From<KeychainError> for Fail {
+    fn from(e: KeychainError) -> Fail {
+        let hint = match &e {
+            KeychainError::BadValue(_) => "give it as printable ASCII on one line",
+            KeychainError::BadName(_) => "use a keychain service name without spaces or quotes",
+            KeychainError::Failed(_) => "check that the login keychain is unlocked",
+        };
+        Fail { code: e.code(), msg: e.to_string(), hint }
+    }
+}
+
+/// Keeps a value, read from stdin and never shown, in the keychain.
+fn env_set(bots: &std::path::Path, name: &str, var: &str) -> Result<(), Fail> {
+    let b = bot::find(bots, name)?;
+    let def = valid(&b)?;
+    if let Some(problem) = bot::env_problem(var) {
+        return Err(Fail { code: "bad_env", msg: problem, hint: "use one of the names in the bot's env" });
+    }
+    if !def.env.iter().any(|v| v == var) {
+        return Err(Fail {
+            code: "env_not_declared",
+            msg: format!("{name} has no {var} in its env"),
+            hint: "add it to env in its bot.toml first",
+        });
+    }
+    let value = read_secret(&format!("{var} for {name} (not shown): "))
+        .map_err(|e| Fail { code: "bad_input", msg: format!("reading the value: {e}"), hint: "pipe it in on stdin" })?;
+    let keychain = Keychain::from_env();
+    keychain.set(&keychain::account(name, var), &value)?;
+    println!("{name}: {var} kept in the keychain ({})", keychain.service);
+    Ok(())
+}
+
+/// All of stdin less one trailing newline; from a terminal, one line,
+/// asked for on stderr and not echoed.
+fn read_secret(prompt: &str) -> std::io::Result<String> {
+    use std::io::{BufRead, Read};
+    // SAFETY: asks about fd 0.
+    if unsafe { libc::isatty(0) } == 0 {
+        let mut text = String::new();
+        std::io::stdin().read_to_string(&mut text)?;
+        return Ok(text.strip_suffix('\n').map(String::from).unwrap_or(text));
+    }
+    eprint!("{prompt}");
+    // SAFETY: a termios we own, read and set on fd 0, put back below.
+    let mut term: libc::termios = unsafe { std::mem::zeroed() };
+    if unsafe { libc::tcgetattr(0, &mut term) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut quiet = term;
+    quiet.c_lflag &= !libc::ECHO;
+    unsafe { libc::tcsetattr(0, libc::TCSANOW, &quiet) };
+    let mut line = String::new();
+    let read = std::io::stdin().lock().read_line(&mut line);
+    unsafe { libc::tcsetattr(0, libc::TCSANOW, &term) };
+    eprintln!();
+    read?;
+    Ok(line.strip_suffix('\n').map(String::from).unwrap_or(line))
+}
+
+/// Becomes the bot's harness, with its env from the keychain. Returns only
+/// on failure.
+fn bot_exec(home: &std::path::Path, bots: &std::path::Path, name: &str) -> Result<(), Fail> {
+    use std::os::unix::process::CommandExt;
+    let b = bot::find(bots, name)?;
+    let def = valid(&b)?;
+    let session = match Store::open_read_only(home)? {
+        Some(store) => store.session(name)?,
+        None => None,
+    };
+    let keychain = Keychain::from_env();
+    let mut values = Vec::new();
+    for var in &def.env {
+        match keychain.get(&keychain::account(name, var))? {
+            Some(value) => values.push((var.as_str(), value)),
+            None => {
+                return Err(Fail { code: "env_missing", msg: var.clone(), hint: "keep it first: yonder bot env set <bot> <variable> < value-file" });
+            }
+        }
+    }
+    let (argv, warning) = botrun::harness_argv(def, session.as_deref());
+    if let Some(w) = warning {
+        eprintln!("warning: {name}: {w}");
+    }
+    let mut command = std::process::Command::new(&argv[0]);
+    command.args(&argv[1..]).envs(values);
+    if let Some(id) = &def.memory_id {
+        command.env("NMEM_AGENT_ID", id);
+    }
+    if def.kind == BotKind::Persistent {
+        let cwd = botrun::hc_cwd(def, None, std::env::var_os("HOME").as_ref(), std::path::Path::new("/")).map_err(bot_fail)?;
+        if let Some(cwd) = cwd {
+            command.current_dir(cwd);
+        }
+    }
+    let e = command.exec();
+    Err(Fail { code: "exec_failed", msg: format!("{}: {e}", def.harness), hint: "check the harness with yonder bot check --live" })
 }
 
 /// One line a bot; one bot's trouble never stops the others. A dry run

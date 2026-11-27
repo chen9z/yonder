@@ -1,0 +1,546 @@
+//! Running bots in hc terminals: `yonder bot start`, `status`, `stop`,
+//! `check --live`, and what `yonder bot exec` runs.
+//!
+//! A bot's current run is a row in the ledger's `bot_runs` (`Store::bot_run`)
+//! and moves only as `Store::move_run` allows, each step checked against
+//! the state it comes from:
+//!
+//! ```text
+//!   (none, failed, gone) --start--> starting --ready--> ready --terminal ends--> gone
+//!                                       \--ended / dialog / out of time--> failed
+//! ```
+//!
+//! `start` waits for `starting` to end; if it is cut short, the next
+//! `status` or `start` ends it: `failed` (`start_timeout`) once past the
+//! start time limit and a grace, or when its terminal is gone. A ready
+//! run whose terminal finished or went is `gone` once seen. Terminals are
+//! never killed: one that failed stays for a person to look at.
+
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+use serde_json::Value;
+use yonder_model::{BotDef, BotKind, BotRun, BotRunState};
+
+use crate::hc::{HcBots, HcFail, ThereFail};
+use crate::store::{Store, StoreError};
+use crate::when;
+
+/// Text on a screen that means a person has to answer before the bot can
+/// go on. A start that sees one fails at once; no key is pressed.
+pub const DIALOGS: &[&str] = &["Hooks need review", "open in another app"];
+
+/// How long past the start time limit a `starting` run is left to the
+/// `start` that waits for it, before another command fails it.
+const GRACE_SECS: i64 = 10;
+
+/// The label on every bot's terminal: `yonder.bot=<name>`.
+pub fn label(bot: &str) -> String {
+    format!("yonder.bot={bot}")
+}
+
+/// Why a bot command did not do what it was asked: a code and what to say.
+#[derive(Debug, PartialEq, Eq)]
+pub struct BotFail {
+    pub code: &'static str,
+    pub msg: String,
+}
+
+fn fail(code: &'static str, msg: impl Into<String>) -> BotFail {
+    BotFail { code, msg: msg.into() }
+}
+
+impl From<StoreError> for BotFail {
+    fn from(e: StoreError) -> BotFail {
+        BotFail { code: e.code(), msg: e.to_string() }
+    }
+}
+
+impl From<HcFail> for BotFail {
+    fn from(e: HcFail) -> BotFail {
+        fail("hc", e.to_string())
+    }
+}
+
+/// A template's text without a `---` ... `---` frontmatter at its top,
+/// trimmed.
+pub fn template_body(text: &str) -> &str {
+    let rest = text.strip_prefix("---\n").or_else(|| text.strip_prefix("---\r\n"));
+    let body = rest
+        .and_then(|rest| {
+            let mut at = 0;
+            for line in rest.split_inclusive('\n') {
+                at += line.len();
+                if line.trim_end() == "---" {
+                    return Some(&rest[at..]);
+                }
+            }
+            None
+        })
+        .unwrap_or(text);
+    body.trim()
+}
+
+/// The first message to a started bot: its template's body, then a blank
+/// line and the task. None when both are empty.
+pub fn first_message(template: &str, task: Option<&str>) -> Option<String> {
+    let body = template_body(template);
+    let task = task.map(str::trim).filter(|t| !t.is_empty());
+    match (body.is_empty(), task) {
+        (true, None) => None,
+        (true, Some(task)) => Some(task.into()),
+        (false, None) => Some(body.into()),
+        (false, Some(task)) => Some(format!("{body}\n\n{task}")),
+    }
+}
+
+/// The arguments that make `harness` resume `session`: `codex resume <id>`,
+/// `pi --session <id>`, `claude --resume <id>`. For another harness, none
+/// and a warning to give.
+pub fn session_args(harness: &str, session: Option<&str>) -> (Vec<String>, Option<String>) {
+    let Some(id) = session else {
+        return (Vec::new(), None);
+    };
+    let program = Path::new(harness).file_name().and_then(|n| n.to_str()).unwrap_or(harness);
+    let flag = match program {
+        "codex" => "resume",
+        "pi" => "--session",
+        "claude" => "--resume",
+        _ => return (Vec::new(), Some(format!("harness {harness} is not known to resume a session; session {id} is not passed"))),
+    };
+    (vec![flag.into(), id.into()], None)
+}
+
+/// What `yonder bot exec` runs: the harness, its session arguments, then
+/// the bot's own `args`.
+pub fn harness_argv(def: &BotDef, session: Option<&str>) -> (Vec<String>, Option<String>) {
+    let (mut argv, warning) = session_args(&def.harness, session);
+    argv.insert(0, def.harness.clone());
+    argv.extend(def.args.iter().cloned());
+    (argv, warning)
+}
+
+/// What a bot's terminal runs. A bot with `env` goes through
+/// `yonder bot exec`, which takes the values from the keychain inside the
+/// terminal, so they are in no argv and no log; the terminal's environment
+/// is hc's core's, so Yonder's home (and keychain service, if set) go on
+/// its command line. One without goes straight to its harness.
+pub fn terminal_argv(def: &BotDef, session: Option<&str>, yonder: &Path, home: &Path, service: Option<&str>) -> Vec<String> {
+    let mut argv = vec!["env".to_string()];
+    if def.env.is_empty() {
+        if let Some(id) = &def.memory_id {
+            argv.push(format!("NMEM_AGENT_ID={id}"));
+        }
+        argv.extend(harness_argv(def, session).0);
+    } else {
+        argv.push(format!("YONDER_HOME={}", home.display()));
+        if let Some(service) = service {
+            argv.push(format!("YONDER_KEYCHAIN_SERVICE={service}"));
+        }
+        argv.extend([yonder.display().to_string(), "bot".into(), "exec".into(), def.name.clone()]);
+    }
+    argv
+}
+
+/// Where a bot works, as hc's `--cwd` takes it: here an absolute path
+/// (`~/` from `home`, a relative `--cwd` from `here`); elsewhere `~/`
+/// dropped, as hc starts a relative path from that machine's home.
+/// `given` is the start's `--cwd`, for a oneoff bot; None if it has none.
+pub fn hc_cwd(def: &BotDef, given: Option<&str>, home: Option<&OsString>, here: &Path) -> Result<Option<String>, BotFail> {
+    let Some(cwd) = given.or(def.cwd.as_deref()) else {
+        return Ok(None);
+    };
+    if def.machine != "local" {
+        if !cwd.starts_with('/') && !cwd.starts_with("~/") {
+            return Err(fail("bad_input", format!("cwd {cwd:?} for {} is neither absolute nor under ~/", def.machine)));
+        }
+        let rel = cwd.strip_prefix("~/").unwrap_or(cwd).trim_end_matches('/');
+        return Ok(Some(if rel.is_empty() { ".".into() } else { rel.into() }));
+    }
+    let path = match cwd.strip_prefix("~/") {
+        Some(rest) => {
+            let home = home.filter(|h| !h.is_empty()).ok_or_else(|| fail("bad_input", "cwd is under ~/, and HOME is not set"))?;
+            Path::new(home).join(rest)
+        }
+        None => here.join(cwd),
+    };
+    Ok(Some(path.display().to_string()))
+}
+
+/// What a terminal's `hc get` (and the text on its screen) says about a
+/// starting bot.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Readiness {
+    Ready,
+    Waiting,
+    /// Its terminal finished: why.
+    Ended(String),
+    /// Something on it needs a person: what.
+    Attention(String),
+}
+
+/// Ready when its status is `idle` or `done`. A dialog on screen (or a
+/// `blocked` status) needs a person, even if the status says idle.
+pub fn readiness(get: &Value, screen: Option<&str>) -> Readiness {
+    if get["state"].as_str() == Some("finished") {
+        return Readiness::Ended(ended(get));
+    }
+    let shown = [get["screen"].as_str(), screen];
+    if let Some(dialog) = DIALOGS.iter().find(|d| shown.iter().flatten().any(|s| s.contains(*d))) {
+        return Readiness::Attention((*dialog).into());
+    }
+    let status = &get["status"];
+    match status["state"].as_str() {
+        Some("blocked") => {
+            let kind = status["kind"].as_str().unwrap_or("blocked");
+            let msg = status["msg"].as_str().unwrap_or("");
+            Readiness::Attention(format!("blocked ({kind}) {msg}").trim_end().into())
+        }
+        Some("idle" | "done") => Readiness::Ready,
+        _ => Readiness::Waiting,
+    }
+}
+
+/// How a finished terminal ended, from its `hc get`.
+fn ended(get: &Value) -> String {
+    match (get["exit_code"].as_i64(), get["signal"].as_i64()) {
+        (Some(code), _) => format!("exited: code {code}"),
+        (None, Some(sig)) => format!("exited: signal {sig}"),
+        _ => format!("exited: {}", get["reason"].as_str().unwrap_or("finished")),
+    }
+}
+
+/// Whether `program` is one `PATH` (`path`) finds, or, with a `/` in it,
+/// an executable file there.
+fn runnable(program: &str, path: Option<&OsString>) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    let executable = |p: &Path| std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0);
+    if program.contains('/') {
+        return Path::new(program).is_absolute() && executable(Path::new(program));
+    }
+    path.is_some_and(|path| std::env::split_paths(path).any(|dir| executable(&dir.join(program))))
+}
+
+/// The startup check, after the definition's own: the machine is reached,
+/// the cwd is there (`cwd`, as `hc_cwd` gives it), and the harness can be
+/// run there. Here directly, with this process's PATH; elsewhere in one
+/// `hc exec`. What is wrong, one a line.
+pub fn check_live(def: &BotDef, cwd: Option<&str>, hc: &HcBots, path: Option<&OsString>) -> Vec<String> {
+    let mut wrong = Vec::new();
+    if def.machine == "local" {
+        if let Some(cwd) = cwd.filter(|c| !Path::new(c).is_dir()) {
+            wrong.push(format!("cwd {cwd} is not a directory here"));
+        }
+        if !runnable(&def.harness, path) {
+            wrong.push(format!("harness {} is not found here (in PATH, or an executable absolute path)", def.harness));
+        }
+        return wrong;
+    }
+    if def.harness.starts_with('-') {
+        return vec![format!("harness {:?} cannot start with -", def.harness)];
+    }
+    match hc.check_there(&def.machine, cwd, &def.harness) {
+        Ok(()) => {}
+        Err(ThereFail::Machine(why)) => wrong.push(format!("machine {} is not reached: {why}", def.machine)),
+        Err(ThereFail::Cwd) => wrong.push(format!("cwd {} is not a directory on {}", cwd.unwrap_or("."), def.machine)),
+        Err(ThereFail::Harness) => wrong.push(format!("harness {} is not found on {} (in PATH there)", def.harness, def.machine)),
+        Err(ThereFail::Other(why)) => wrong.push(format!("the check on {} failed: {why}", def.machine)),
+    }
+    wrong
+}
+
+/// A bot's run as last seen: from the ledger, after any step what hc says
+/// called for, or `unknown` (with why) if hc could not say.
+#[derive(Debug, PartialEq)]
+pub struct Seen {
+    pub run: Option<BotRun>,
+    pub unknown: Option<String>,
+}
+
+/// Brings `bot`'s run up to date with its terminal: a `starting` one past
+/// the time limit (and a grace) is `failed`, `start_timeout`; one whose
+/// terminal ended is `failed`; a `ready` one whose terminal ended or went
+/// is `gone`. hc not answering changes nothing.
+pub fn observe(store: &Store, hc: &HcBots, bot: &str, timeout_secs: u64, now: i64) -> Result<Seen, BotFail> {
+    let Some(run) = store.bot_run(bot)? else {
+        return Ok(Seen { run: None, unknown: None });
+    };
+    let mut unknown = None;
+    match run.state {
+        BotRunState::Starting => {
+            let started = when::parse_utc(&run.started_at).unwrap_or(0);
+            if now - started > timeout_secs as i64 + GRACE_SECS {
+                store.move_run(bot, &run.address, BotRunState::Starting, BotRunState::Failed, Some("start_timeout"), now)?;
+            } else {
+                match hc.get(&run.address) {
+                    Ok(None) => {
+                        store.move_run(bot, &run.address, BotRunState::Starting, BotRunState::Failed, Some("its terminal is gone"), now)?;
+                    }
+                    Ok(Some(get)) if get["state"].as_str() == Some("finished") => {
+                        store.move_run(bot, &run.address, BotRunState::Starting, BotRunState::Failed, Some(&ended(&get)), now)?;
+                    }
+                    Ok(Some(_)) => {}
+                    Err(e) => unknown = Some(e.to_string()),
+                }
+            }
+        }
+        BotRunState::Ready => match hc.get(&run.address) {
+            Ok(None) => {
+                store.move_run(bot, &run.address, BotRunState::Ready, BotRunState::Gone, Some("its terminal is gone"), now)?;
+            }
+            Ok(Some(get)) if get["state"].as_str() == Some("finished") => {
+                store.move_run(bot, &run.address, BotRunState::Ready, BotRunState::Gone, Some(&ended(&get)), now)?;
+            }
+            Ok(Some(_)) => {}
+            Err(e) => unknown = Some(e.to_string()),
+        },
+        BotRunState::Failed | BotRunState::Gone => {}
+    }
+    Ok(Seen { run: store.bot_run(bot)?, unknown })
+}
+
+/// What `start` needs besides the bot.
+pub struct StartWith<'a> {
+    pub task: Option<&'a str>,
+    /// `--cwd`, for a oneoff bot.
+    pub cwd: Option<&'a str>,
+    /// This program, for `yonder bot exec`.
+    pub yonder: PathBuf,
+    /// Yonder's home, absolute.
+    pub home: PathBuf,
+    /// `YONDER_KEYCHAIN_SERVICE`, if set.
+    pub service: Option<String>,
+    /// The user's `HOME` and `PATH`, and where this runs.
+    pub user_home: Option<OsString>,
+    pub path: Option<OsString>,
+    pub here: PathBuf,
+    pub timeout: Duration,
+    /// Between looks at a starting terminal.
+    pub poll: Duration,
+}
+
+/// A bot that started: where, and warnings to show.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Started {
+    pub address: String,
+    pub warnings: Vec<String>,
+}
+
+/// Starts `def` in a new terminal and waits until it is ready, then sends
+/// the first message (`template`, and the task). Never kills a terminal:
+/// one that fails is left for a person to look at.
+pub fn start(store: &Store, hc: &HcBots, def: &BotDef, template: &str, with: &StartWith) -> Result<Started, BotFail> {
+    let name = def.name.as_str();
+    match def.kind {
+        BotKind::Oneoff if with.cwd.is_none() => return Err(fail("bad_input", format!("{name} is oneoff: say where it works with --cwd"))),
+        BotKind::Oneoff if with.task.is_none_or(|t| t.trim().is_empty()) => {
+            return Err(fail("bad_input", format!("{name} is oneoff: give it its task with --task")));
+        }
+        BotKind::Persistent if with.cwd.is_some() => {
+            return Err(fail("bad_input", format!("{name} is persistent: it works in its cwd; --cwd is for oneoff bots")));
+        }
+        _ => {}
+    }
+    if !def.env.is_empty() && def.machine != "local" {
+        return Err(fail("env_remote_unsupported", format!("{name} runs on {} and has env; keychain values reach only bots here", def.machine)));
+    }
+    let cwd = hc_cwd(def, with.cwd, with.user_home.as_ref(), &with.here)?;
+    let wrong = check_live(def, cwd.as_deref(), hc, with.path.as_ref());
+    if !wrong.is_empty() {
+        return Err(fail("start_check", format!("{name}: {}", wrong.join("; "))));
+    }
+    let now = when::now();
+    observe(store, hc, name, with.timeout.as_secs(), now)?;
+    if let Some(address) = hc.live_labelled(&label(name))? {
+        return Err(fail("already_running", format!("{name} runs at {address}")));
+    }
+    if let Some(run) = store.bot_run(name)?.filter(|r| !r.state.is_final()) {
+        return Err(fail("already_running", format!("{name} is {} at {}", run.state, run.address)));
+    }
+    let session = store.session(name)?;
+    let (_, warning) = session_args(&def.harness, session.as_deref());
+    let argv = terminal_argv(def, session.as_deref(), &with.yonder, &with.home, with.service.as_deref());
+    let machine = (def.machine != "local").then_some(def.machine.as_str());
+    let address = hc.run(name, &label(name), machine, cwd.as_deref().unwrap_or("."), &argv)?;
+    if !store.begin_run(name, &address, session.as_deref(), when::now())? {
+        return Err(fail("already_running", format!("{name} was started by someone else just now; this one is at {address}")));
+    }
+    wait_ready(store, hc, name, &address, with)?;
+    if let Some(text) = first_message(template, with.task) {
+        hc.send(&address, &text).map_err(|e| fail("send_failed", format!("{name} is ready at {address}, but the first message: {e}")))?;
+    }
+    Ok(Started { address, warnings: warning.into_iter().collect() })
+}
+
+/// Looks at a starting terminal until it is ready, needs a person, ends,
+/// or time is up; records which.
+fn wait_ready(store: &Store, hc: &HcBots, name: &str, address: &str, with: &StartWith) -> Result<(), BotFail> {
+    let deadline = Instant::now() + with.timeout;
+    let mut last_error = None;
+    let outcome = loop {
+        match hc.get(address) {
+            Ok(None) => break Readiness::Ended("its terminal is gone".into()),
+            Ok(Some(get)) => match readiness(&get, hc.screen(address).as_deref()) {
+                Readiness::Waiting => {}
+                done => break done,
+            },
+            Err(e) => last_error = Some(e.to_string()),
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            break Readiness::Waiting;
+        }
+        std::thread::sleep(left.min(with.poll));
+    };
+    let to = |state, reason: &str| store.move_run(name, address, BotRunState::Starting, state, Some(reason).filter(|r| !r.is_empty()), when::now());
+    let moved = match &outcome {
+        Readiness::Ready => to(BotRunState::Ready, "")?,
+        Readiness::Ended(why) => to(BotRunState::Failed, why)?,
+        Readiness::Attention(what) => to(BotRunState::Failed, &format!("needs_attention: {what}"))?,
+        Readiness::Waiting => to(BotRunState::Failed, "start_timeout")?,
+    };
+    if !moved {
+        let now = store.bot_run(name)?.map_or("gone from the ledger".into(), |r| format!("{} ({})", r.state, r.reason.unwrap_or_default()));
+        return Err(fail("start_failed", format!("{name} at {address} was moved on by another command: now {now}")));
+    }
+    match outcome {
+        Readiness::Ready => Ok(()),
+        Readiness::Ended(why) => Err(fail("start_failed", format!("{name} at {address} {why}; see hc read {address}"))),
+        Readiness::Attention(what) => Err(fail("needs_attention", format!("{what}; attach with hc attach {address}"))),
+        Readiness::Waiting => {
+            let why = last_error.map(|e| format!(" (hc: {e})")).unwrap_or_default();
+            Err(fail("start_timeout", format!("{name} at {address} was not ready in {}s{why}; attach with hc attach {address}", with.timeout.as_secs())))
+        }
+    }
+}
+
+/// Stops what `bot` is doing now: its stop key, once. Its terminal and
+/// session stay. The interrupt's outcome as hc saw it.
+pub fn stop(store: &Store, hc: &HcBots, bot: &str, timeout_secs: u64) -> Result<(String, String), BotFail> {
+    let seen = observe(store, hc, bot, timeout_secs, when::now())?;
+    if let Some(why) = seen.unknown {
+        return Err(fail("hc", why));
+    }
+    let Some(run) = seen.run.filter(|r| r.state == BotRunState::Ready) else {
+        return Err(fail("not_running", format!("{bot} has no ready terminal")));
+    };
+    match hc.interrupt(&run.address)? {
+        Some(outcome) => Ok((run.address, outcome)),
+        None => {
+            store.move_run(bot, &run.address, BotRunState::Ready, BotRunState::Gone, Some("its terminal is gone"), when::now())?;
+            Err(fail("not_running", format!("{bot}'s terminal {} has ended", run.address)))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn def(machine: &str, harness: &str, env: &[&str]) -> BotDef {
+        BotDef {
+            name: "ops".into(),
+            description: "x".into(),
+            kind: BotKind::Persistent,
+            machine: machine.into(),
+            cwd: Some("~/bots/ops".into()),
+            harness: harness.into(),
+            model: None,
+            args: vec!["--no-daemon".into()],
+            memory_id: Some("ops-mem".into()),
+            env: env.iter().map(|e| e.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn first_messages_are_the_template_then_the_task() {
+        assert_eq!(template_body("---\ntitle: x\n---\n\nhello ops\n"), "hello ops");
+        assert_eq!(template_body("hello\n---\nnot front\n"), "hello\n---\nnot front");
+        assert_eq!(template_body("---\nno end\n"), "---\nno end");
+        assert_eq!(first_message("you are nova\n", Some("do x")).as_deref(), Some("you are nova\n\ndo x"));
+        assert_eq!(first_message("hello ops\n", None).as_deref(), Some("hello ops"));
+        assert_eq!(first_message("---\na: b\n---\n", Some(" do x ")).as_deref(), Some("do x"));
+        assert_eq!(first_message("  \n", Some("")), None);
+    }
+
+    #[test]
+    fn sessions_are_resumed_the_harness_way() {
+        let s = Some("s-1");
+        assert_eq!(session_args("codex", s).0, ["resume", "s-1"]);
+        assert_eq!(session_args("/opt/bin/pi", s).0, ["--session", "s-1"]);
+        assert_eq!(session_args("claude", s).0, ["--resume", "s-1"]);
+        let (args, warning) = session_args("/bin/sh", s);
+        assert!(args.is_empty() && warning.unwrap().contains("s-1"));
+        assert_eq!(session_args("codex", None), (vec![], None));
+    }
+
+    #[test]
+    fn terminals_run_the_harness_or_bot_exec() {
+        let (yonder, home) = (Path::new("/tmp/example/bin/yonder"), Path::new("/tmp/example/home"));
+        let plain = terminal_argv(&def("gpu-box", "codex", &[]), Some("s-1"), yonder, home, None);
+        assert_eq!(plain, ["env", "NMEM_AGENT_ID=ops-mem", "codex", "resume", "s-1", "--no-daemon"]);
+        let keyed = terminal_argv(&def("local", "/bin/sh", &["EXAMPLE_API_KEY"]), None, yonder, home, Some("dev.yonder.bots.test"));
+        assert_eq!(
+            keyed,
+            ["env", "YONDER_HOME=/tmp/example/home", "YONDER_KEYCHAIN_SERVICE=dev.yonder.bots.test", "/tmp/example/bin/yonder", "bot", "exec", "ops"]
+        );
+        let mut bare = def("local", "pi", &[]);
+        bare.memory_id = None;
+        assert_eq!(terminal_argv(&bare, None, yonder, home, None), ["env", "pi", "--no-daemon"]);
+    }
+
+    #[test]
+    fn cwds_as_hc_takes_them() {
+        let home = OsString::from("/tmp/example");
+        let here = Path::new("/tmp/example/here");
+        let local = def("local", "pi", &[]);
+        assert_eq!(hc_cwd(&local, None, Some(&home), here).unwrap().as_deref(), Some("/tmp/example/bots/ops"));
+        assert_eq!(hc_cwd(&local, Some("work"), Some(&home), here).unwrap().as_deref(), Some("/tmp/example/here/work"));
+        assert_eq!(hc_cwd(&local, None, None, here).unwrap_err().code, "bad_input");
+        let remote = def("gpu-box", "pi", &[]);
+        assert_eq!(hc_cwd(&remote, None, None, here).unwrap().as_deref(), Some("bots/ops"));
+        assert_eq!(hc_cwd(&remote, Some("/srv/x"), None, here).unwrap().as_deref(), Some("/srv/x"));
+        assert_eq!(hc_cwd(&remote, Some("~/"), None, here).unwrap().as_deref(), Some("."));
+        assert_eq!(hc_cwd(&remote, Some("work"), None, here).unwrap_err().code, "bad_input");
+        let mut none = def("local", "pi", &[]);
+        none.cwd = None;
+        assert_eq!(hc_cwd(&none, None, None, here).unwrap(), None);
+    }
+
+    #[test]
+    fn ready_when_idle_unless_a_person_is_needed() {
+        let get = |status: Value, screen: &str| json!({"state": "live", "status": status, "screen": screen});
+        let idle = json!({"app": "codex", "state": "idle"});
+        assert_eq!(readiness(&get(idle.clone(), "exact"), None), Readiness::Ready);
+        assert_eq!(readiness(&get(json!({"state": "done"}), "exact"), Some("")), Readiness::Ready);
+        assert_eq!(readiness(&get(json!({"state": "working"}), "exact"), None), Readiness::Waiting);
+        // hc gives no status for a plain program: never ready by itself.
+        assert_eq!(readiness(&get(Value::Null, "exact"), Some("$ ")), Readiness::Waiting);
+        // A dialog wins over idle, on the screen text or in get's screen.
+        assert_eq!(readiness(&get(idle.clone(), "exact"), Some("x\nHooks need review\n")), Readiness::Attention("Hooks need review".into()));
+        assert_eq!(readiness(&get(idle, "Do you want to open in another app?"), None), Readiness::Attention("open in another app".into()));
+        let blocked = json!({"state": "blocked", "kind": "permission", "msg": "run rm?"});
+        assert_eq!(readiness(&get(blocked, "exact"), None), Readiness::Attention("blocked (permission) run rm?".into()));
+        let done = json!({"state": "finished", "exit_code": 127, "status": null});
+        assert_eq!(readiness(&done, Some("Hooks need review")), Readiness::Ended("exited: code 127".into()));
+        assert_eq!(readiness(&json!({"state": "finished", "exit_code": null, "signal": 9}), None), Readiness::Ended("exited: signal 9".into()));
+    }
+
+    #[test]
+    fn harnesses_are_found_like_a_shell_would() {
+        let dir = crate::test_dir("botrun-runnable");
+        let bin = dir.join("harness-x");
+        std::fs::write(&bin, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        std::fs::write(dir.join("plain"), "").unwrap();
+        let path = Some(std::env::join_paths([Path::new("/nonexistent"), &dir]).unwrap());
+        assert!(runnable("harness-x", path.as_ref()));
+        assert!(!runnable("plain", path.as_ref()));
+        assert!(!runnable("no-such-harness-xyz", path.as_ref()));
+        assert!(runnable(&bin.display().to_string(), None));
+        assert!(!runnable("./harness-x", path.as_ref()));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}

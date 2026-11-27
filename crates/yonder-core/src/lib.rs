@@ -1,17 +1,21 @@
 //! What the `yonder` programs share: Yonder's home directory (`home`), bot
-//! definitions (`bot`) and their sync to where they work (`sync`), the ledger (`store`, and `firing` for
+//! definitions (`bot`), their sync to where they work (`sync`), running
+//! them in hc terminals (`botrun`) with values from the keychain
+//! (`keychain`), the ledger (`store`, and `firing` for
 //! what yonderd does to it), times and repeat rules (`when`), running
 //! reminder checks (`check_exec`), the lead agent's terminal (`hc`),
 //! yonderd's rounds (`daemon`) and its launchd plist (`service`), masking secrets (`redact`) and the config
 //! file (`config`).
 
 pub mod bot;
+pub mod botrun;
 pub mod check_exec;
 pub mod config;
 pub mod daemon;
 pub mod firing;
 pub mod hc;
 pub mod home;
+pub mod keychain;
 pub mod redact;
 pub mod service;
 pub mod store;

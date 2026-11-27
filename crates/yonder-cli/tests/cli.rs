@@ -702,3 +702,235 @@ fn a_dry_run_makes_no_ledger() {
     assert_eq!((code, out.trim_end().ends_with("bots")), (Some(0), true), "{out}");
     assert!(!l.0.join("ledger.db").exists());
 }
+
+/// A bot `name` in `l`'s home, its bot.toml `toml` and template `template`.
+fn bot(l: &Ledger, name: &str, toml: &str, template: Option<&str>) {
+    let dir = l.0.join("bots").join(name);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("bot.toml"), toml).unwrap();
+    if let Some(t) = template {
+        std::fs::write(dir.join("template.md"), t).unwrap();
+    }
+}
+
+/// Runs `args` with `env` set; its exit code, stdout and stderr.
+fn with_env(l: &Ledger, args: &[&str], env: &[(&str, &str)]) -> (Option<i32>, String, String) {
+    let out = l.cmd(args).envs(env.iter().copied()).output().unwrap();
+    (out.status.code(), String::from_utf8_lossy(&out.stdout).into_owned(), stderr(&out))
+}
+
+fn runs(l: &Ledger) -> Vec<String> {
+    l.sent().lines().filter(|line| line.starts_with(">>> run ")).map(String::from).collect()
+}
+
+#[test]
+fn bots_start_get_ready_and_stop() {
+    let l = Ledger::new("bots_start_get_ready_and_stop");
+    let work = l.0.join("ops-work");
+    std::fs::create_dir(&work).unwrap();
+    let ops = format!("name = \"ops\"\ndescription = \"x\"\nkind = \"persistent\"\ncwd = \"{}\"\nharness = \"/bin/sh\"\nargs = [\"-c\", \"sleep 1\"]\nmemory_id = \"ops-mem\"\n", work.display());
+    bot(&l, "ops", &ops, Some("---\ntitle: ops\n---\nhello ops\n"));
+    let (code, out, err) = with_env(&l, &["bot", "start", "ops"], &[]);
+    assert_eq!((code, out.as_str()), (Some(0), "ops: ready at t70\n"), "{err}");
+    let run = format!(
+        ">>> run --bg --json --name ops --label yonder.bot=ops --outlive-parent --keep --cwd {} -- env NMEM_AGENT_ID=ops-mem /bin/sh -c sleep 1",
+        work.display()
+    );
+    assert_eq!(runs(&l), [run]);
+    assert!(l.sent().contains(">>> send to t70\nhello ops\n"), "{}", l.sent());
+    assert!(l.ok(&["bot", "status", "ops"]).starts_with("ops               ready      t70"));
+    let status: Vec<serde_json::Value> = l.json(&["bot", "status", "--json"]);
+    assert_eq!((status[0]["state"].as_str(), status[0]["address"].as_str()), (Some("ready"), Some("t70")));
+
+    let (code, _, err) = with_env(&l, &["bot", "start", "ops"], &[]);
+    assert_eq!(code, Some(1));
+    assert_eq!(err, "already_running: ops runs at t70\n");
+    assert_eq!(runs(&l).len(), 1);
+
+    assert_eq!(l.ok(&["bot", "stop", "ops"]), "ops: interrupted at t70 (hc says: unknown)\n");
+    assert!(l.sent().contains(">>> interrupt t70\n"));
+    let kill = Command::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fake-hc.sh"))
+        .args(["kill", "t70"])
+        .env("FAKE_HC_ROOT", l.0.join("hc"))
+        .env("FAKE_HC_LOG", l.0.join("hc.log"))
+        .output()
+        .unwrap();
+    assert!(kill.status.success());
+    assert!(l.ok(&["bot", "status", "ops"]).contains(" gone "));
+    let (code, _, err) = with_env(&l, &["bot", "stop", "ops"], &[]);
+    assert_eq!((code, err.as_str()), (Some(1), "not_running: ops has no ready terminal\n"));
+    // Gone is final: it starts again.
+    assert_eq!(with_env(&l, &["bot", "start", "ops"], &[]).1, "ops: ready at t71\n");
+}
+
+#[test]
+fn bots_elsewhere_resume_their_session() {
+    let l = Ledger::new("bots_elsewhere_resume_their_session");
+    let trainer = "name = \"trainer\"\ndescription = \"x\"\nkind = \"persistent\"\nmachine = \"gpu-box\"\ncwd = \"~/bots/trainer\"\nharness = \"codex\"\nargs = [\"--no-daemon\"]\nmemory_id = \"trainer\"\n";
+    bot(&l, "trainer", trainer, None);
+    assert_eq!(l.ok(&["bot", "session", "trainer"]), "none\n");
+    l.ok(&["bot", "session", "trainer", "s-1"]);
+    assert_eq!(l.ok(&["bot", "session", "trainer"]), "s-1\n");
+    let (code, _, err) = with_env(&l, &["bot", "session", "trainer", "-x"], &[]);
+    assert!(code == Some(1) || code == Some(2), "{err}");
+    assert_eq!(with_env(&l, &["bot", "start", "trainer"], &[]).1, "trainer: ready at gpu-box/t70\n");
+    let sent = l.sent();
+    assert!(sent.contains(">>> exec --on gpu-box -- sh -c "), "the startup check runs there: {sent}");
+    assert_eq!(
+        runs(&l),
+        [">>> run --bg --json --name trainer --label yonder.bot=trainer --outlive-parent --keep --on gpu-box --cwd bots/trainer -- env NMEM_AGENT_ID=trainer codex resume s-1 --no-daemon"]
+    );
+    // No template, no task: nothing is sent.
+    assert!(!sent.contains(">>> send"));
+    l.ok(&["bot", "session", "trainer", "--clear"]);
+    assert_eq!(l.ok(&["bot", "session", "trainer"]), "none\n");
+
+    // With env, only here.
+    std::fs::write(l.0.join("bots/trainer/bot.toml"), format!("{trainer}env = [\"EXAMPLE_API_KEY\"]\n")).unwrap();
+    let (code, _, err) = with_env(&l, &["bot", "start", "trainer"], &[]);
+    assert_eq!(code, Some(1));
+    assert!(err.starts_with("env_remote_unsupported: "), "{err}");
+    assert_eq!(runs(&l).len(), 1);
+
+    // What a start needs there, checked in one hc exec.
+    std::fs::write(l.0.join("bots/trainer/bot.toml"), trainer).unwrap();
+    let (code, out, _) = with_env(&l, &["bot", "check", "--live", "trainer"], &[("FAKE_HC_EXEC_CODE", "10")]);
+    assert_eq!((code, out.as_str()), (Some(1), "error: trainer: cwd bots/trainer is not a directory on gpu-box\n"));
+    let (code, out, _) = with_env(&l, &["bot", "check", "--live", "trainer"], &[("FAKE_HC_EXEC_CODE", "11")]);
+    assert_eq!((code, out.as_str()), (Some(1), "error: trainer: harness codex is not found on gpu-box (in PATH there)\n"));
+    assert_eq!(with_env(&l, &["bot", "check", "--live", "trainer"], &[]).0, Some(0));
+}
+
+#[test]
+fn starts_that_cannot_get_ready_fail_and_say_why() {
+    let l = Ledger::new("starts_that_cannot_get_ready_fail_and_say_why");
+    let work = l.0.join("work");
+    std::fs::create_dir(&work).unwrap();
+    let stuck = format!("name = \"stuck\"\ndescription = \"x\"\nkind = \"persistent\"\ncwd = \"{}\"\nharness = \"/bin/sh\"\n", work.display());
+    bot(&l, "stuck", &stuck, Some("never sent\n"));
+    let kill = |t: &str| {
+        Command::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fake-hc.sh"))
+            .args(["kill", t])
+            .env("FAKE_HC_ROOT", l.0.join("hc"))
+            .env("FAKE_HC_LOG", l.0.join("hc.log"))
+            .output()
+            .unwrap();
+    };
+    for (env, said) in [
+        (("FAKE_HC_SCREEN", "Do you trust this?\nHooks need review\n"), "needs_attention: Hooks need review; attach with hc attach t70\n"),
+        (("FAKE_HC_SCREEN", "open in another app"), "needs_attention: open in another app; attach with hc attach t71\n"),
+        (("FAKE_HC_STATUS", "blocked"), "needs_attention: blocked (blocked); attach with hc attach t72\n"),
+    ] {
+        let (code, _, err) = with_env(&l, &["bot", "start", "stuck"], &[env]);
+        assert_eq!((code, err.as_str()), (Some(1), said));
+        assert!(l.ok(&["bot", "status", "stuck"]).contains(" failed "));
+        // The terminal is left for a person; this test kills it to go on.
+        kill(&said[said.len() - 4..said.len() - 1]);
+    }
+    assert!(!l.sent().contains(">>> send"));
+    std::fs::write(l.0.join("config.toml"), "[notify]\nlocal = false\n[bot]\nstart_timeout_secs = 1\n").unwrap();
+    let start = Instant::now();
+    let (code, _, err) = with_env(&l, &["bot", "start", "stuck"], &[("FAKE_HC_STATUS", "working")]);
+    assert_eq!(code, Some(1));
+    assert!(err.starts_with("start_timeout: stuck at t73 was not ready in 1s"), "{err}");
+    assert!(start.elapsed() < Duration::from_secs(8));
+    assert!(l.ok(&["bot", "status", "stuck"]).contains("(start_timeout)"));
+}
+
+#[test]
+fn a_start_cut_short_is_failed_later() {
+    let l = Ledger::new("a_start_cut_short_is_failed_later");
+    let work = l.0.join("work");
+    std::fs::create_dir(&work).unwrap();
+    bot(&l, "ops", &format!("name = \"ops\"\ndescription = \"x\"\nkind = \"persistent\"\ncwd = \"{}\"\nharness = \"/bin/sh\"\n", work.display()), None);
+    // As if a start died while waiting, long ago, its terminal never seen.
+    let store = yonder_core::Store::open(&l.0).unwrap();
+    assert!(store.begin_run("ops", "t99", None, when::now() - 3600).unwrap());
+    drop(store);
+    // hc unreachable: shown as unknown, and the ledger stays as it was...
+    let (code, out, _) = with_env(&l, &["bot", "status", "ops"], &[("YONDER_HC", "/nonexistent/hc")]);
+    assert_eq!(code, Some(0));
+    assert!(out.contains(" starting ") || out.contains(" failed "), "{out}");
+    // ...except for what needs no hc: long past its time, it failed.
+    assert!(out.contains("(start_timeout)"), "{out}");
+    let store = yonder_core::Store::open(&l.0).unwrap();
+    assert!(store.begin_run("ops", "t98", None, when::now()).unwrap());
+    drop(store);
+    let (_, out, _) = with_env(&l, &["bot", "status", "ops"], &[("YONDER_HC", "/nonexistent/hc")]);
+    assert!(out.starts_with("ops               unknown    t98") && out.contains("[recorded starting; hc: hc get: cannot run"), "{out}");
+    // With hc: no such terminal, so it never got ready.
+    assert!(l.ok(&["bot", "status", "ops"]).contains("failed     t98             session -  (its terminal is gone)"));
+}
+
+#[test]
+fn oneoff_bots_get_a_place_and_a_task() {
+    let l = Ledger::new("oneoff_bots_get_a_place_and_a_task");
+    let work = l.0.join("nova-work");
+    std::fs::create_dir(&work).unwrap();
+    bot(&l, "nova", "name = \"nova\"\ndescription = \"x\"\nkind = \"oneoff\"\nharness = \"/bin/sh\"\n", Some("you are nova\n"));
+    let w = work.display().to_string();
+    for args in [vec!["bot", "start", "nova", "--cwd", &w], vec!["bot", "start", "nova", "--task", "do x"]] {
+        let (code, _, err) = with_env(&l, &args, &[]);
+        assert_eq!(code, Some(1));
+        assert!(err.starts_with("bad_input: nova is oneoff"), "{err}");
+    }
+    assert_eq!(with_env(&l, &["bot", "start", "nova", "--cwd", &w, "--task", "do x"], &[]).1, "nova: ready at t70\n");
+    assert!(l.sent().contains(">>> send to t70\nyou are nova\n\ndo x\n"), "{}", l.sent());
+    assert!(runs(&l)[0].contains(&format!("--cwd {w} -- env /bin/sh")));
+}
+
+/// The person's keychain, under the test service, with this test's own
+/// bot name; deleted after.
+#[cfg(target_os = "macos")]
+#[test]
+fn env_values_go_from_the_keychain_to_the_bot_only() {
+    let l = Ledger::new("env_values_go_from_the_keychain_to_the_bot_only");
+    let name = format!("envtest-{}", std::process::id() % 100000);
+    let account = format!("{name}/EXAMPLE_API_KEY");
+    let forget = || {
+        let _ = Command::new("/usr/bin/security").args(["delete-generic-password", "-s", "dev.yonder.bots.test", "-a", &account]).output();
+    };
+    forget();
+    let work = l.0.join("work");
+    std::fs::create_dir(&work).unwrap();
+    let got = l.0.join("got");
+    let toml = format!(
+        "name = \"{name}\"\ndescription = \"x\"\nkind = \"persistent\"\ncwd = \"{}\"\nharness = \"/bin/sh\"\nargs = [\"-c\", \"printf '%s|%s|%s' \\\"$EXAMPLE_API_KEY\\\" \\\"$NMEM_AGENT_ID\\\" \\\"$PWD\\\" > {}\"]\nmemory_id = \"m-1\"\nenv = [\"EXAMPLE_API_KEY\"]\n",
+        work.display(),
+        got.display()
+    );
+    bot(&l, &name, &toml, None);
+    let service = [("YONDER_KEYCHAIN_SERVICE", "dev.yonder.bots.test")];
+    let set = |var: &str, value: &str| {
+        let mut child = l.cmd(&["bot", "env", "set", &name, var]).envs(service).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+        std::io::Write::write_all(&mut child.stdin.take().unwrap(), value.as_bytes()).unwrap();
+        let out = child.wait_with_output().unwrap();
+        (out.status.code(), stderr(&out))
+    };
+    // Missing: bot exec does not start the harness.
+    let (code, _, err) = with_env(&l, &["bot", "exec", &name], &service);
+    assert_eq!((code, err.lines().next()), (Some(1), Some("env_missing: EXAMPLE_API_KEY; keep it first: yonder bot env set <bot> <variable> < value-file")));
+    assert!(!got.exists());
+    let (code, err) = set("OTHER_KEY", "x");
+    assert!(code == Some(1) && err.starts_with("env_not_declared: "), "{err}");
+    let (code, err) = set("PATH", "x");
+    assert!(code == Some(1) && err.starts_with("bad_env: "), "{err}");
+    let (code, err) = set("EXAMPLE_API_KEY", "two\nlines\n");
+    assert!(code == Some(1) && err.starts_with("bad_value: "), "{err}");
+    assert_eq!(set("EXAMPLE_API_KEY", "synthetic \"v1\"\n").0, Some(0));
+
+    let (code, out, err) = with_env(&l, &["bot", "start", &name], &[service[0], ("FAKE_HC_RUN_EXEC", "1")]);
+    assert_eq!((code, out.as_str()), (Some(0), format!("{name}: ready at t70\n").as_str()), "{err}");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while std::fs::read_to_string(&got).unwrap_or_default().is_empty() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // The value, the memory id, and its cwd (bot exec goes there).
+    let said = std::fs::read_to_string(&got).unwrap();
+    assert!(said.starts_with("synthetic \"v1\"|m-1|/") && said.ends_with("/work"), "{said}");
+    let log = l.sent();
+    assert!(!log.contains("synthetic"), "{log}");
+    let run = &runs(&l)[0];
+    assert!(run.contains(&format!("-- env YONDER_HOME={} YONDER_KEYCHAIN_SERVICE=dev.yonder.bots.test ", l.0.display())) && run.ends_with(&format!(" bot exec {name}")), "{run}");
+    forget();
+}

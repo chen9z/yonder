@@ -20,6 +20,20 @@ pub struct Config {
     pub hc: Hc,
     pub daemon: Daemon,
     pub service: Service,
+    pub bot: Bot,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct Bot {
+    /// How long `yonder bot start` waits for a bot to be ready.
+    pub start_timeout_secs: u64,
+}
+
+impl Default for Bot {
+    fn default() -> Bot {
+        Bot { start_timeout_secs: 90 }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -223,6 +237,9 @@ impl Config {
         if !(1..=3600).contains(&config.daemon.tick_secs) {
             return Err(ConfigError::Invalid(path.into(), "daemon.tick_secs must be 1 to 3600"));
         }
+        if !(1..=3600).contains(&config.bot.start_timeout_secs) {
+            return Err(ConfigError::Invalid(path.into(), "bot.start_timeout_secs must be 1 to 3600"));
+        }
         if !config.lead.label.contains('=') {
             return Err(ConfigError::Invalid(path.into(), "lead.label must be key=value"));
         }
@@ -279,6 +296,7 @@ mod tests {
         assert_eq!(c.daemon.tick_secs, 30);
         assert!(!c.notify.local);
         assert_eq!(c.service.label, "dev.yonder.daemon");
+        assert_eq!(c.bot.start_timeout_secs, 120);
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
@@ -298,6 +316,7 @@ mod tests {
         assert_eq!(c.lead.label, "yonder.role=lead");
         assert!(c.hc.bin.is_empty());
         assert_eq!(c.daemon.tick_secs, 15);
+        assert_eq!(c.bot.start_timeout_secs, 90);
         assert!(c.notify.local);
         assert_eq!(c.service.label, "dev.yonder.daemon");
         // So does an empty file, and one with only some sections.
@@ -319,7 +338,7 @@ mod tests {
         let twice = "[[workers]]\nname = \"ops\"\n[[workers]]\nname = \"ops\"\n";
         std::fs::write(&path, twice).unwrap();
         assert!(matches!(Config::load(&path), Err(ConfigError::DuplicateWorker(_, n)) if n == "ops"));
-        for bad in ["[daemon]\ntick_secs = 0\n", "[lead]\nlabel = \"lead\"\n"] {
+        for bad in ["[daemon]\ntick_secs = 0\n", "[lead]\nlabel = \"lead\"\n", "[bot]\nstart_timeout_secs = 0\n"] {
             std::fs::write(&path, bad).unwrap();
             assert!(matches!(Config::load(&path), Err(ConfigError::Invalid(..))), "{bad}");
         }
