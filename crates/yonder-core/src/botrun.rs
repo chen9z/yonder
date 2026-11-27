@@ -112,14 +112,54 @@ pub fn session_args(harness: &str, session: Option<&str>) -> (Vec<String>, Optio
     (vec![flag.into(), id.into()], None)
 }
 
-/// What `yonder bot exec` runs: the harness, its session arguments, then
-/// the bot's own `args`.
-pub fn harness_argv(def: &BotDef, session: Option<&str>) -> (Vec<String>, Option<String>) {
-    let (mut argv, warning) = session_args(&def.harness, session);
-    argv.insert(0, def.harness.clone());
-    argv.extend(def.args.iter().cloned());
-    (argv, warning)
+/// The arguments that give `harness` its `model`: `codex -m <model>`,
+/// `pi --model <model>`, `claude --model <model>`. For another harness,
+/// none and a warning to give.
+pub fn model_args(harness: &str, model: Option<&str>) -> (Vec<String>, Option<String>) {
+    let Some(model) = model.filter(|m| !m.is_empty()) else {
+        return (Vec::new(), None);
+    };
+    let program = Path::new(harness).file_name().and_then(|n| n.to_str()).unwrap_or(harness);
+    let flag = match program {
+        "codex" => "-m",
+        "pi" | "claude" => "--model",
+        _ => return (Vec::new(), Some(format!("harness {harness} is not known to take a model; model {model} is not passed"))),
+    };
+    (vec![flag.into(), model.into()], None)
 }
+
+/// The harness, its session arguments, its model's, then the bot's own
+/// `args`; and warnings to give.
+pub fn harness_argv(def: &BotDef, session: Option<&str>) -> (Vec<String>, Vec<String>) {
+    let (session, w1) = session_args(&def.harness, session);
+    let (model, w2) = model_args(&def.harness, def.model.as_deref());
+    let mut argv = vec![def.harness.clone()];
+    argv.extend(session);
+    argv.extend(model);
+    argv.extend(def.args.iter().cloned());
+    (argv, w1.into_iter().chain(w2).collect())
+}
+
+/// Runs its arguments as a program in the login shell of the machine it
+/// runs on (`$SHELL` there, else `/bin/sh`, with `-l -i`), so the harness
+/// is found where the user's shell finds it: hc's terminals and `hc exec`
+/// have the core's short PATH. The program and each argument stay
+/// arguments of their own, never pasted into the script; the script is
+/// the same for every bot. A shell that does not take `-c '...' name
+/// args` like sh (fish) does not work.
+pub const LOGIN_EXEC: &str = r#"exec "${SHELL:-/bin/sh}" -lic 'exec "$@"' yonder-bot "$@""#;
+
+/// `argv`, run through `LOGIN_EXEC`.
+pub fn login_exec(argv: Vec<String>) -> Vec<String> {
+    let mut wrapped: Vec<String> = ["/bin/sh", "-c", LOGIN_EXEC, "yonder-bot"].map(String::from).into();
+    wrapped.extend(argv);
+    wrapped
+}
+
+/// `hc exec`'s startup check, in the same login shell as `LOGIN_EXEC`:
+/// exits 10 if its first argument is not a directory to go to, 11 if its
+/// second is not a program the login shell there finds.
+const LOGIN_CHECK: &str = r#"cd -- "$1" || exit 10; "${SHELL:-/bin/sh}" -lic 'command -v "$1" > /dev/null 2>&1' yonder-bot "$2" || exit 11"#;
 
 /// What a bot's terminal runs. A bot with `env` goes through
 /// `yonder bot exec`, which takes the values from the keychain inside the
@@ -132,7 +172,7 @@ pub fn terminal_argv(def: &BotDef, session: Option<&str>, yonder: &Path, home: &
         if let Some(id) = &def.memory_id {
             argv.push(format!("NMEM_AGENT_ID={id}"));
         }
-        argv.extend(harness_argv(def, session).0);
+        argv.extend(login_exec(harness_argv(def, session).0));
     } else {
         argv.push(format!("YONDER_HOME={}", home.display()));
         if let Some(service) = service {
@@ -211,39 +251,31 @@ fn ended(get: &Value) -> String {
     }
 }
 
-/// Whether `program` is one `PATH` (`path`) finds, or, with a `/` in it,
-/// an executable file there.
-fn runnable(program: &str, path: Option<&OsString>) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    let executable = |p: &Path| std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0);
-    if program.contains('/') {
-        return Path::new(program).is_absolute() && executable(Path::new(program));
-    }
-    path.is_some_and(|path| std::env::split_paths(path).any(|dir| executable(&dir.join(program))))
-}
-
 /// The startup check, after the definition's own: the machine is reached,
-/// the cwd is there (`cwd`, as `hc_cwd` gives it), and the harness can be
-/// run there. Here directly, with this process's PATH; elsewhere in one
-/// `hc exec`. What is wrong, one a line.
-pub fn check_live(def: &BotDef, cwd: Option<&str>, hc: &HcBots, path: Option<&OsString>) -> Vec<String> {
+/// the cwd is there (`cwd`, as `hc_cwd` gives it), and the harness is one
+/// the login shell there finds, as `LOGIN_EXEC` will run it: in one
+/// `hc exec` (`--on` the machine elsewhere). Here the cwd is looked at
+/// directly. What is wrong, one a line.
+pub fn check_live(def: &BotDef, cwd: Option<&str>, hc: &HcBots) -> Vec<String> {
     let mut wrong = Vec::new();
-    if def.machine == "local" {
-        if let Some(cwd) = cwd.filter(|c| !Path::new(c).is_dir()) {
-            wrong.push(format!("cwd {cwd} is not a directory here"));
-        }
-        if !runnable(&def.harness, path) {
-            wrong.push(format!("harness {} is not found here (in PATH, or an executable absolute path)", def.harness));
-        }
-        return wrong;
-    }
     if def.harness.starts_with('-') {
         return vec![format!("harness {:?} cannot start with -", def.harness)];
     }
-    match hc.check_there(&def.machine, cwd, &def.harness) {
+    let here = def.machine == "local";
+    if let Some(cwd) = cwd.filter(|c| here && !Path::new(c).is_dir()) {
+        wrong.push(format!("cwd {cwd} is not a directory here"));
+    }
+    let there_cwd = if here { "." } else { cwd.unwrap_or(".") };
+    let argv: Vec<String> = ["/bin/sh", "-c", LOGIN_CHECK, "yonder-bot", there_cwd, &def.harness].map(String::from).into();
+    let machine = (!here).then_some(def.machine.as_str());
+    match hc.check_there(machine, &argv) {
         Ok(()) => {}
+        Err(ThereFail::Harness) if here => {
+            wrong.push(format!("harness {} is not found here (in PATH, or an executable absolute path)", def.harness));
+        }
+        Err(ThereFail::Machine(why)) if here => wrong.push(format!("the check here failed: {why}")),
         Err(ThereFail::Machine(why)) => wrong.push(format!("machine {} is not reached: {why}", def.machine)),
-        Err(ThereFail::Cwd) => wrong.push(format!("cwd {} is not a directory on {}", cwd.unwrap_or("."), def.machine)),
+        Err(ThereFail::Cwd) => wrong.push(format!("cwd {there_cwd} is not a directory on {}", def.machine)),
         Err(ThereFail::Harness) => wrong.push(format!("harness {} is not found on {} (in PATH there)", def.harness, def.machine)),
         Err(ThereFail::Other(why)) => wrong.push(format!("the check on {} failed: {why}", def.machine)),
     }
@@ -311,9 +343,8 @@ pub struct StartWith<'a> {
     pub home: PathBuf,
     /// `YONDER_KEYCHAIN_SERVICE`, if set.
     pub service: Option<String>,
-    /// The user's `HOME` and `PATH`, and where this runs.
+    /// The user's `HOME`, and where this runs.
     pub user_home: Option<OsString>,
-    pub path: Option<OsString>,
     pub here: PathBuf,
     pub timeout: Duration,
     /// Between looks at a starting terminal.
@@ -346,7 +377,7 @@ pub fn start(store: &Store, hc: &HcBots, def: &BotDef, template: &str, with: &St
         return Err(fail("env_remote_unsupported", format!("{name} runs on {} and has env; keychain values reach only bots here", def.machine)));
     }
     let cwd = hc_cwd(def, with.cwd, with.user_home.as_ref(), &with.here)?;
-    let wrong = check_live(def, cwd.as_deref(), hc, with.path.as_ref());
+    let wrong = check_live(def, cwd.as_deref(), hc);
     if !wrong.is_empty() {
         return Err(fail("start_check", format!("{name}: {}", wrong.join("; "))));
     }
@@ -359,7 +390,7 @@ pub fn start(store: &Store, hc: &HcBots, def: &BotDef, template: &str, with: &St
         return Err(fail("already_running", format!("{name} is {} at {}", run.state, run.address)));
     }
     let session = store.session(name)?;
-    let (_, warning) = session_args(&def.harness, session.as_deref());
+    let (_, warnings) = harness_argv(def, session.as_deref());
     let argv = terminal_argv(def, session.as_deref(), &with.yonder, &with.home, with.service.as_deref());
     let machine = (def.machine != "local").then_some(def.machine.as_str());
     let address = hc.run(name, &label(name), machine, cwd.as_deref().unwrap_or("."), &argv)?;
@@ -370,7 +401,7 @@ pub fn start(store: &Store, hc: &HcBots, def: &BotDef, template: &str, with: &St
     if let Some(text) = first_message(template, with.task) {
         hc.send(&address, &text).map_err(|e| fail("send_failed", format!("{name} is ready at {address}, but the first message: {e}")))?;
     }
-    Ok(Started { address, warnings: warning.into_iter().collect() })
+    Ok(Started { address, warnings })
 }
 
 /// Looks at a starting terminal until it is ready, needs a person, ends,
@@ -480,7 +511,7 @@ mod tests {
     fn terminals_run_the_harness_or_bot_exec() {
         let (yonder, home) = (Path::new("/tmp/example/bin/yonder"), Path::new("/tmp/example/home"));
         let plain = terminal_argv(&def("gpu-box", "codex", &[]), Some("s-1"), yonder, home, None);
-        assert_eq!(plain, ["env", "NMEM_AGENT_ID=ops-mem", "codex", "resume", "s-1", "--no-daemon"]);
+        assert_eq!(plain, ["env", "NMEM_AGENT_ID=ops-mem", "/bin/sh", "-c", LOGIN_EXEC, "yonder-bot", "codex", "resume", "s-1", "--no-daemon"]);
         let keyed = terminal_argv(&def("local", "/bin/sh", &["EXAMPLE_API_KEY"]), None, yonder, home, Some("dev.yonder.bots.test"));
         assert_eq!(
             keyed,
@@ -488,7 +519,7 @@ mod tests {
         );
         let mut bare = def("local", "pi", &[]);
         bare.memory_id = None;
-        assert_eq!(terminal_argv(&bare, None, yonder, home, None), ["env", "pi", "--no-daemon"]);
+        assert_eq!(terminal_argv(&bare, None, yonder, home, None), ["env", "/bin/sh", "-c", LOGIN_EXEC, "yonder-bot", "pi", "--no-daemon"]);
     }
 
     #[test]
@@ -529,18 +560,35 @@ mod tests {
     }
 
     #[test]
-    fn harnesses_are_found_like_a_shell_would() {
-        let dir = crate::test_dir("botrun-runnable");
-        let bin = dir.join("harness-x");
-        std::fs::write(&bin, "#!/bin/sh\n").unwrap();
-        std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-        std::fs::write(dir.join("plain"), "").unwrap();
-        let path = Some(std::env::join_paths([Path::new("/nonexistent"), &dir]).unwrap());
-        assert!(runnable("harness-x", path.as_ref()));
-        assert!(!runnable("plain", path.as_ref()));
-        assert!(!runnable("no-such-harness-xyz", path.as_ref()));
-        assert!(runnable(&bin.display().to_string(), None));
-        assert!(!runnable("./harness-x", path.as_ref()));
+    fn models_go_after_the_session() {
+        let mut d = def("local", "codex", &[]);
+        d.model = Some("m-1".into());
+        assert_eq!(harness_argv(&d, Some("s-1")), (["codex", "resume", "s-1", "-m", "m-1", "--no-daemon"].map(String::from).into(), vec![]));
+        d.harness = "/opt/bin/pi".into();
+        assert_eq!(harness_argv(&d, None).0, ["/opt/bin/pi", "--model", "m-1", "--no-daemon"]);
+        d.harness = "claude".into();
+        assert_eq!(harness_argv(&d, None).0, ["claude", "--model", "m-1", "--no-daemon"]);
+        d.harness = "/bin/sh".into();
+        let (argv, warnings) = harness_argv(&d, Some("s-1"));
+        assert_eq!(argv, ["/bin/sh", "--no-daemon"]);
+        assert_eq!(warnings.len(), 2);
+        d.model = Some(String::new());
+        assert_eq!(model_args("codex", d.model.as_deref()), (vec![], None));
+    }
+
+    /// The wrapper, run for real with sh as the login shell: each argument
+    /// arrives as it was, none is read as shell.
+    #[test]
+    fn the_login_shell_gets_each_argument_whole() {
+        let dir = crate::test_dir("botrun-login");
+        let out = dir.join("out");
+        let tricky = ["a b", "$HOME", "'q'", "\"d\"", "`x`; echo no", "*"];
+        let mut argv = vec!["/bin/sh".to_string(), "-c".into(), r#"for a in "$@"; do printf '[%s]' "$a"; done > "$0""#.into(), out.display().to_string()];
+        argv.extend(tricky.map(String::from));
+        let wrapped = login_exec(argv);
+        let status = std::process::Command::new(&wrapped[0]).args(&wrapped[1..]).env("SHELL", "/bin/sh").stdin(std::process::Stdio::null()).status().unwrap();
+        assert!(status.success());
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), "[a b][$HOME]['q'][\"d\"][`x`; echo no][*]");
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

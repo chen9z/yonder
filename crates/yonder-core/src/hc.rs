@@ -50,7 +50,7 @@ const FILE_TIMEOUT: Duration = Duration::from_secs(30);
 const LOOK_TIMEOUT: Duration = Duration::from_secs(15);
 /// `hc interrupt` watches 10 seconds for an effect.
 const INTERRUPT_TIMEOUT: Duration = Duration::from_secs(25);
-/// `hc exec` of a bot's startup check elsewhere.
+/// `hc exec` of a bot's startup check (a login shell can be slow).
 const EXEC_TIMEOUT: Duration = Duration::from_secs(60);
 /// 8 MB of text, escaped in JSON, with room.
 const MAX_FILE_REPLY: usize = 24 << 20;
@@ -373,13 +373,16 @@ impl HcBots {
         self.call(&["send", address, text], None, SEND_TIMEOUT).map(drop)
     }
 
-    /// On `machine`, in one call: `cwd` (from its home if relative; None:
-    /// not looked at) is there, and `harness` is a program it can run.
-    pub fn check_there(&self, machine: &str, cwd: Option<&str>, harness: &str) -> Result<(), ThereFail> {
-        const SCRIPT: &str = r#"cd -- "$1" || exit 10; command -v "$2" > /dev/null 2>&1 || exit 11"#;
-        let args = ["exec", "--on", machine, "--", "sh", "-c", SCRIPT, "sh", cwd.unwrap_or("."), harness];
+    /// Runs a startup check, `argv`, with `hc exec` (`--on` `machine`, or
+    /// here): exit 10 means its cwd is not there, 11 its harness is not
+    /// found; hc's own error, that it was not reached.
+    pub fn check_there(&self, machine: Option<&str>, argv: &[String]) -> Result<(), ThereFail> {
         let mut command = Command::new(&self.bin);
-        command.args(args);
+        command.arg("exec");
+        if let Some(machine) = machine {
+            command.args(["--on", machine]);
+        }
+        command.arg("--").args(argv);
         let run = capture_input(command, None, EXEC_TIMEOUT, MAX_REPLY, self.stop, true);
         match run {
             Ok((status, _)) if status.success() => Ok(()),

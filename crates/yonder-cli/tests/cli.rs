@@ -39,6 +39,9 @@ impl Ledger {
             .env("YONDER_HC", concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fake-hc.sh"))
             .env("FAKE_HC_LOG", self.0.join("hc.log"))
             .env("FAKE_HC_ROOT", self.0.join("hc"))
+            // Bots' harnesses go through the login shell: sh, not the
+            // developer's own, with whatever its startup files do.
+            .env("SHELL", "/bin/sh")
             .env("FAKE_HC_LEAD", "t9");
         cmd
     }
@@ -733,8 +736,9 @@ fn bots_start_get_ready_and_stop() {
     let (code, out, err) = with_env(&l, &["bot", "start", "ops"], &[]);
     assert_eq!((code, out.as_str()), (Some(0), "ops: ready at t70\n"), "{err}");
     let run = format!(
-        ">>> run --bg --json --name ops --label yonder.bot=ops --outlive-parent --keep --cwd {} -- env NMEM_AGENT_ID=ops-mem /bin/sh -c sleep 1",
-        work.display()
+        ">>> run --bg --json --name ops --label yonder.bot=ops --outlive-parent --keep --cwd {} -- env NMEM_AGENT_ID=ops-mem /bin/sh -c {} yonder-bot /bin/sh -c sleep 1",
+        work.display(),
+        yonder_core::botrun::LOGIN_EXEC
     );
     assert_eq!(runs(&l), [run]);
     assert!(l.sent().contains(">>> send to t70\nhello ops\n"), "{}", l.sent());
@@ -775,10 +779,13 @@ fn bots_elsewhere_resume_their_session() {
     assert!(code == Some(1) || code == Some(2), "{err}");
     assert_eq!(with_env(&l, &["bot", "start", "trainer"], &[]).1, "trainer: ready at gpu-box/t70\n");
     let sent = l.sent();
-    assert!(sent.contains(">>> exec --on gpu-box -- sh -c "), "the startup check runs there: {sent}");
+    assert!(sent.contains(">>> exec --on gpu-box -- /bin/sh -c "), "the startup check runs there: {sent}");
     assert_eq!(
         runs(&l),
-        [">>> run --bg --json --name trainer --label yonder.bot=trainer --outlive-parent --keep --on gpu-box --cwd bots/trainer -- env NMEM_AGENT_ID=trainer codex resume s-1 --no-daemon"]
+        [format!(
+            ">>> run --bg --json --name trainer --label yonder.bot=trainer --outlive-parent --keep --on gpu-box --cwd bots/trainer -- env NMEM_AGENT_ID=trainer /bin/sh -c {} yonder-bot codex resume s-1 --no-daemon",
+            yonder_core::botrun::LOGIN_EXEC
+        )]
     );
     // No template, no task: nothing is sent.
     assert!(!sent.contains(">>> send"));
@@ -933,4 +940,39 @@ fn env_values_go_from_the_keychain_to_the_bot_only() {
     let run = &runs(&l)[0];
     assert!(run.contains(&format!("-- env YONDER_HOME={} YONDER_KEYCHAIN_SERVICE=dev.yonder.bots.test ", l.0.display())) && run.ends_with(&format!(" bot exec {name}")), "{run}");
     forget();
+}
+
+#[test]
+fn harnesses_are_found_and_run_by_the_login_shell() {
+    let l = Ledger::new("harnesses_are_found_and_run_by_the_login_shell");
+    let work = l.0.join("work");
+    std::fs::create_dir(&work).unwrap();
+    // A harness only the login shell finds: on the PATH its profile sets.
+    let bin = l.0.join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let got = l.0.join("got");
+    std::fs::write(bin.join("harness-x"), format!("#!/bin/sh\nprintf '%s|' \"$@\" > {}\n", got.display())).unwrap();
+    std::fs::set_permissions(bin.join("harness-x"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let profile = l.0.join("profile");
+    std::fs::write(&profile, format!("PATH={}:$PATH; export PATH\n", bin.display())).unwrap();
+    let toml = format!("name = \"ops\"\ndescription = \"x\"\nkind = \"persistent\"\ncwd = \"{}\"\nharness = \"harness-x\"\nmodel = \"m-1\"\nargs = [\"a b\", \"$HOME\"]\n", work.display());
+    bot(&l, "ops", &toml, None);
+    // sh as a login shell reads $ENV when interactive.
+    let env = [("ENV", profile.to_str().unwrap()), ("FAKE_HC_RUN_EXEC", "1")];
+    let (code, out, err) = with_env(&l, &["bot", "check", "--live", "ops"], &env[..1]);
+    assert_eq!((code, out.as_str()), (Some(0), "ops: ok\n"), "{err}");
+    assert!(l.sent().contains(">>> exec --on local -- /bin/sh -c "));
+    // Not found where the login shell looks: an error.
+    let (code, out, _) = with_env(&l, &["bot", "check", "--live", "ops"], &[]);
+    assert_eq!((code, out.as_str()), (Some(1), "error: ops: harness harness-x is not found here (in PATH, or an executable absolute path)\n"));
+    // Started for real: found, and its arguments arrive whole. Its model
+    // is for codex, pi and claude only: a warning, not an argument.
+    let (code, out, err) = with_env(&l, &["bot", "start", "ops"], &env);
+    assert_eq!((code, out.as_str()), (Some(0), "ops: ready at t70\n"), "{err}");
+    assert_eq!(err, "warning: ops: harness harness-x is not known to take a model; model m-1 is not passed\n");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !got.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(std::fs::read_to_string(&got).unwrap_or_default(), "a b|$HOME|");
 }

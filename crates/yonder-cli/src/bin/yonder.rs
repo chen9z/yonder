@@ -619,7 +619,6 @@ fn bot_cmd(cmd: BotCmd) -> Result<(), Fail> {
                 home: home.clone(),
                 service: std::env::var("YONDER_KEYCHAIN_SERVICE").ok().filter(|s| !s.is_empty()),
                 user_home: std::env::var_os("HOME"),
-                path: std::env::var_os("PATH"),
                 here: std::env::current_dir().unwrap_or_default(),
                 timeout: std::time::Duration::from_secs(config.bot.start_timeout_secs),
                 poll: std::time::Duration::from_secs(1),
@@ -692,7 +691,7 @@ fn valid(b: &Bot) -> Result<&BotDef, Fail> {
 fn live_check(hc: &HcBots, def: &BotDef) -> Vec<String> {
     // A oneoff bot's cwd comes with each start: not looked at here.
     match botrun::hc_cwd(def, None, std::env::var_os("HOME").as_ref(), &std::env::current_dir().unwrap_or_default()) {
-        Ok(cwd) => botrun::check_live(def, cwd.as_deref(), hc, std::env::var_os("PATH").as_ref()),
+        Ok(cwd) => botrun::check_live(def, cwd.as_deref(), hc),
         Err(e) => vec![e.msg],
     }
 }
@@ -824,10 +823,12 @@ fn bot_exec(home: &std::path::Path, bots: &std::path::Path, name: &str) -> Resul
             }
         }
     }
-    let (argv, warning) = botrun::harness_argv(def, session.as_deref());
-    if let Some(w) = warning {
+    let (argv, warnings) = botrun::harness_argv(def, session.as_deref());
+    for w in warnings {
         eprintln!("warning: {name}: {w}");
     }
+    // In the login shell, as a terminal without env runs its harness.
+    let argv = botrun::login_exec(argv);
     let mut command = std::process::Command::new(&argv[0]);
     command.args(&argv[1..]).envs(values);
     if let Some(id) = &def.memory_id {

@@ -140,10 +140,11 @@ ready --终端结束或不在了（status、start、stop 看到时）--> gone
 3. 先按 hc 的实际情况推进旧记录；`hc ls --json --label yonder.bot=<名字>` 有活着的终端，或记录还是 `starting` / `ready`，报 `already_running`，不起。hc 的 `--name` 在活着的终端里唯一，两个 start 同时跑时第二个的 `hc run` 会失败。
 4. `hc run --bg --json --name <名字> --label yonder.bot=<名字> --outlive-parent --keep [--on <machine>] --cwd <cwd> -- <argv>`，记 `starting`。cwd：本机是绝对路径（`~/` 按 `$HOME` 展开，oneoff 的相对 `--cwd` 从当前目录算）；远端去掉 `~/` 传相对路径（hc 带 `--on` 时从那台机器的家目录算起，实测过；hc 不展开 `~`，目录不存在时 `hc run` 直接报 `spawn_failed`），绝对路径原样传，其他相对写法报 `bad_input`。
 5. argv：
-   - `env` 为空：`env [NMEM_AGENT_ID=<memory_id>] <harness> <会话参数> <args>`，本机远端一样。
+   - harness 一律经目标机器的登录 shell 起（B3a.1）：`/bin/sh -c 'exec "${SHELL:-/bin/sh}" -lic '\''exec "$@"'\'' yonder-bot "$@"' yonder-bot <harness> <会话参数> <model 参数> <args>`（`botrun::LOGIN_EXEC` / `login_exec`，两条路径共用）。原因：hc 终端和 `hc exec` 的环境来自 hc core，PATH 只有系统目录，找不到 nvm、`~/.local/bin` 这类用户装的 harness（B3a 时真实冒烟起 `pi` 报 `env: pi: No such file or directory`，退出 127）；登录交互 shell 会读用户的 profile 和 rc。`$SHELL` 是终端那边的（远端就是远端的），没有就 `/bin/sh`；`-l -i` 都带。脚本对所有 bot 都一样，harness 和每个参数都是独立的 argv，不拼进脚本。`$SHELL` 是 fish 这类不接受 `-c '...' 名字 参数` 写法的 shell 时不能用。登录 shell 的 rc 里有什么（启动 tmux、打印东西、改环境）都会跟着发生。
+   - `env` 为空：`env [NMEM_AGENT_ID=<memory_id>] <上面的包装> <harness> …`，本机远端一样。
    - `env` 非空（只限本机）：`env YONDER_HOME=<绝对路径> [YONDER_KEYCHAIN_SERVICE=<值>，只在设了时] <yonder 的绝对路径> bot exec <名字>`。hc 终端的环境来自 hc core，不是调用者（实测：终端里没有 `YONDER_HOME`），所以 home 要显式带上。
    - 会话参数：记了 session 时，`codex` → `resume <id>`，`pi` → `--session <id>`，`claude` → `--resume <id>`（按 harness 的文件名认）；其他 harness 在 stderr 打一行 `warning:`，不加。
-   - `bot.toml` 的 `model` 现在不传给 harness。
+   - model 参数（B3a.1）：`bot.toml` 的 `model` 非空时，`codex` → `-m <model>`，`pi` → `--model <model>`，`claude` → `--model <model>`，放在会话参数之后、`args` 之前；其他 harness 打一行 `warning:`，不传。
 6. 等就绪：每秒一次 `hc get --json <地址>`，加 `hc read --json <地址>` 取屏幕文字；时限默认 90 秒，`config.toml` 的 `[bot] start_timeout_secs` 可改（1–3600）。按顺序判断：
    - 终端 `finished` → `failed`（reason 带 exit code 或 signal），报 `start_failed`；`hc get` 说没有这个终端也算结束。
    - 屏幕文字（或 `hc get` 的 `screen` 字段）里有已知对话框文字 → 立即 `failed`，报 `needs_attention: <命中的文字>; attach with hc attach <地址>`，不按任何键。列表在 `botrun::DIALOGS`：`Hooks need review`、`open in another app`。`status.state` 是 `blocked`（hc 的权限、提问、登录）也一样处理。对话框优先于 idle。
@@ -158,13 +159,13 @@ ready --终端结束或不在了（status、start、stop 看到时）--> gone
 - 写法：`security -i` 的 stdin 上一行 `add-generic-password -U -s <service> -a <account> -X <值的 hex> "<登录钥匙串路径>"`。值用 hex（`-X`）编码，所以不会断行、不会跳出引号；值不进任何进程的 argv、不进日志、不回显，`security` 失败时的输出也不转述（可能回显那一行）。service、account、钥匙串路径不能含空白、引号、反斜杠、控制字符。
 - 值只能是可打印 ASCII（空格到 `~`），不能为空，否则 `bad_value`：实测 `find-generic-password -w` 在值全是可打印 ASCII 时原样打印，否则打印 hex，限定之后读回来没有歧义。
 - 只写不读：没有打印值的命令。
-- `yonder bot exec <名字>`（内部，`--help` 里标明）：读定义，按 `env` 逐个从钥匙串取值（`find-generic-password -w`，值在 stdout，不在 argv），缺一个就报 `env_missing: <变量>` 退出 1、不起 harness；加上 `NMEM_AGENT_ID=<memory_id>`（有的话），persistent 切到 `cwd`（oneoff 留在 hc 给的目录），然后 `exec` harness（argv = harness + 会话参数 + args，会话从台账只读取）。值不打印、不写日志。
+- `yonder bot exec <名字>`（内部，`--help` 里标明）：读定义，按 `env` 逐个从钥匙串取值（`find-generic-password -w`，值在 stdout，不在 argv），缺一个就报 `env_missing: <变量>` 退出 1、不起 harness；加上 `NMEM_AGENT_ID=<memory_id>`（有的话），persistent 切到 `cwd`（oneoff 留在 hc 给的目录），然后经同一个登录 shell 包装 `exec` harness（argv = 包装 + harness + 会话参数 + model 参数 + args，会话从台账只读取）。env 值和 `NMEM_AGENT_ID` 在包装之前就设进环境。值不打印、不写日志。
 
 **`yonder bot status [<名字>] [--json]`**：每个 bot 一行：名字、state（没有记录是 `stopped`）、地址、会话、上次原因；顺手按 hc 的实际情况推进记录。hc 调不通时这一行显示 `unknown` 和台账里记的状态，不改台账。`--json` 每个 bot 一个对象：`name`、`state`、`recorded_state`、`address`、`session`、`reason`、`started_at`、`updated_at`、`hc_error`。
 
 **`yonder bot stop <名字>`**：只叫停当前这一轮：`hc interrupt <地址>`（按一次 ctrl+c），不关终端、不改会话，输出 hc 看到的结果（实测多半是 `unknown`）。没有 `ready` 的记录、或终端已经结束，报 `not_running`（顺便记 `gone`）。
 
-**`yonder bot check --live [<名字>]`**：B1 的校验之后再查：机器连得上、`cwd` 存在（oneoff 的 cwd 每次 start 才给，这里不查）、harness 在 PATH 里（或是存在的可执行绝对路径）。本机直接查，用的是运行 `yonder` 的进程的 PATH；远端一次 `hc exec --on <machine> -- sh -c 'cd -- "$1" || exit 10; command -v "$2" > /dev/null 2>&1 || exit 11' sh <cwd> <harness>`（路径和 harness 作为参数传，不拼进脚本），按退出码和 hc 的错误把原因归到机器、cwd 或 harness。harness 登录了没有不查。只有这类问题时报 `start_check`，定义本身有错仍报 `bot_invalid`。
+**`yonder bot check --live [<名字>]`**：B1 的校验之后再查：机器连得上、`cwd` 存在（oneoff 的 cwd 每次 start 才给，这里不查）、harness 是终端那边的登录 shell 找得到的程序。本机远端都是一次 `hc exec [--on <machine>] -- /bin/sh -c 'cd -- "$1" || exit 10; "${SHELL:-/bin/sh}" -lic '\''command -v "$1" > /dev/null 2>&1'\'' yonder-bot "$2" || exit 11' yonder-bot <cwd> <harness>`（B3a.1 起；路径和 harness 作为参数传，不拼进脚本），环境和 `bot start` 起 harness 时一样；本机的 cwd 仍直接查（传给 hc exec 的是 `.`）。按退出码和 hc 的错误把原因归到机器、cwd 或 harness。B3a 时本机用的是 `yonder` 进程自己的 PATH，查得到而终端里找不到，这个漏洞 B3a.1 修了。harness 登录了没有不查。只有这类问题时报 `start_check`，定义本身有错仍报 `bot_invalid`。
 
 ## 3. 命令
 
@@ -358,6 +359,7 @@ scripts/check.sh    # clippy 和全部测试
 - `yonder manual` 的行数和必须有的内容：`the_manual_is_for_agents`，B2 验收第 2 条。`cwd` 不合法时 `bot check` 报 error：B2 验收第 10 条，`bot::tests` 里的断言。
 - 真实 hc（0.1.22）的 `hc file` 输出，B2 时只读实测（写只写在自己建的 `/tmp` 临时目录，用完删掉）：`read --json` 在 stdout 打一行 `{"first","last","lines","text"}`；错误在 stderr 打 `{"error":{"kind","message","hint"}}`：文件不存在 `not_found` 退出 3（父目录不存在也是），机器不认识 `machine_unknown` 退出 4，路径是目录 `invalid_params` 退出 6，不是 UTF-8 `not_text` 退出 1；超过 8 MB 只给前面一段、仍退出 0，`last` 小于 `lines`；`write` 读 stdin、建缺的目录，打 `{"bytes","path"}`。在一台真实的远端机器上只读过不存在的路径：带 `--on` 的相对路径确实从那台机器的家目录算起，报 `not_found`。`yonder bot sync --dry-run` 用真实 hc 跑过一个远端 bot（`cwd` 不存在、没有 `AGENTS.md` 要推）：输出 `MEMORY.md missing`；机器名不对时 `failed`，原因里没有 hc 的 hint。
 - bot 起停：本机和远端的 run 参数、`--label yonder.bot=`、会话参数、就绪后发第一条、`already_running`、`stop` 发 `interrupt`、终端没了记 `gone` 和 `not_running`、远端有 env 拒绝、已知对话框和 `blocked` 立即失败不发消息、超时失败、oneoff 要 `--cwd` 和 `--task`、`starting` 卡住后被 `status` 记成 `failed`、hc 调不通时显示 `unknown` 不改台账、远端启动检查归因：`crates/yonder-cli/tests/cli.rs` 的 `bots_start_get_ready_and_stop`、`bots_elsewhere_resume_their_session`、`starts_that_cannot_get_ready_fail_and_say_why`、`a_start_cut_short_is_failed_later`、`oneoff_bots_get_a_place_and_a_task`，`botrun::tests`，`store::tests::runs_move_only_from_where_they_are`、`keeps_sessions_apart_from_runs`，以及 B3a 验收第 3–11 条。这些都用假 hc（`tests/fake-hc.sh`）。
+- 登录 shell 包装：每个参数原样到达（含空格、`$`、引号、反引号、`*`）：`botrun::tests::the_login_shell_gets_each_argument_whole`；只有登录 shell 的 profile 里才在 PATH 上的 harness，`check --live` 找得到（没有那个 profile 时报找不到），`bot start` 起得来、参数原样：`harnesses_are_found_and_run_by_the_login_shell`（测试里 `SHELL=/bin/sh`，profile 经 `$ENV` 读）；model 映射：`botrun::tests::models_go_after_the_session`，B3a.1 验收第 3 条。
 - env 注入：值从 stdin 进钥匙串（`.test` service）、未声明和保留名拒绝、带换行拒绝、`bot exec` 缺值不起、起起来的进程拿到值和 `NMEM_AGENT_ID`、假 hc 日志里没有值、run 行走 `bot exec`：`env_values_go_from_the_keychain_to_the_bot_only`、`keychain::tests::keeps_and_gives_back_values`（用完删掉条目），B3a 验收第 2–3 条。
 - 真实 hc（0.1.22）上 B3a 时实测（只起自己的 `sh -c 'sleep …'` 临时终端，用完 `hc kill` 加 `hc rm`；没起 codex、pi、claude，没给别的终端发消息）：`run --bg --json` 打印 `{"address","agent","cwd","name","state","turn"}`；`get --json` 的 `status` 对 sh 是 null，`screen` 字段是 `"exact"`（保存方式，不是文字），屏幕文字要 `read --json` 的 `text`；`status.state` 的取值按 `hc schema` 是 idle、working、done、blocked、error；终端结束后 `get` 是 `"state":"finished"`，带 `exit_code`、`reason`；`interrupt --json` 对活着的终端打印 `{"key":"ctrl+c","outcome":"unknown"}` 退出 0（sh 里的 trap 确实收到了 INT），对结束了的报 `finished` 退出 11；`ls --json --label` 只列带这个 label 的；`rm` 打印 `{"removed":…}`；`exec` 不带 `--json` 时退出码就是程序的，带 `--json` 时退出 0、码在 `code` 里、输出 base64。在一台真实远端机器上起过 `sh -c 'pwd; sleep 4'`：`--cwd .`、`--cwd ..` 从那台机器的家目录算起；`--cwd '~'` 和不存在的目录都让 `run` 报 `spawn_failed`。
 - 钥匙串在 hc 终端里能读到：在本机真实 hc 起的 sh 终端里跑 `security find-generic-password -s dev.yonder.bots.test … -w`，拿到了值（条目由 `security` 自己建，用完删掉）；同时看到终端的环境变量名来自 hc core（有 `HOME PATH USER`、`HC_TERMINAL_ID` 等，没有调用者的 `YONDER_HOME`）。
@@ -376,8 +378,9 @@ scripts/check.sh    # clippy 和全部测试
 - 桌面菜单（⌘, ⌘W ⌘Q）和 Agents 右键菜单：没有实际点过，headless 测试里 NSH 的菜单 API 什么都不做。
 - 真实钥匙串条目 `dev.yonder.app.vault` 的创建和桌面版真连一台电脑：没做（要输真实的 SSH 密码）。
 - 打包后的路径残留：NSH 的 `asset!()` 把每个资源的源文件绝对路径写进二进制，`--remap-path-prefix` 管不到。`app/macos.sh` 现在把二进制里的家目录等长改写后重新签名，这个做法是临时的，待换成正经修法；Android 的 `libnsh.so` 里也有同样的残留，`app/apk.sh` 还没处理。
-- 真实 harness 的就绪：没实测（不许起 codex、pi、claude）。就绪靠 hc 的 `status.state` 是 idle 或 done；codex、pi、claude 在 hc 里是不是真的报这个状态、什么时候报，没看过。不报 status 的 harness（如 sh）永远等不到就绪，只能超时。已知对话框的文字（`Hooks need review`、`open in another app`）照任务给的写，没在真实 harness 上见过。
-- 远端的 PATH：`bot check --live` 和 `bot start` 的远端检查用 `hc exec --on` 时的 PATH，没在真实远端上跑过；它和那边 hc 终端里 harness 看到的 PATH 是不是同一个没核对过。本机检查用的是运行 `yonder` 的进程的 PATH，而 hc 终端的 PATH 来自 hc core，两者可能不同。
+- 真实 harness 的就绪：只对 `pi` 实测过（见 9.1 的 B3a.1 冒烟），codex、claude 没起过。就绪靠 hc 的 `status.state` 是 idle 或 done；不报 status 的 harness（如 sh）永远等不到就绪，只能超时。已知对话框的文字（`Hooks need review`、`open in another app`）照任务给的写，没在真实 harness 上见过。
+- 远端的登录 shell：包装和 `check --live` 在远端都用那边的 `$SHELL -lic`，没在真实远端上起过 harness；`hc exec --on` 和 hc 终端里的 `$SHELL` 是不是同一个没核对过。
+- 登录交互 shell 没有终端（`hc exec`）时，有的 rc 会报错或等输入：只在本机 zsh 上试过（cindy 的 `hc exec -- zsh -lic 'command -v pi'`，以及 B3a.1 冒烟）。
 - harness 的登录状态：不查。
 - 钥匙串：只在本机、登录着、钥匙串解锁时试过 hc 终端里能读；锁屏或钥匙串锁着时 `bot exec` 会怎样（弹窗还是失败）没试过。条目由 `/usr/bin/security` 建，它在条目的访问列表里；别的程序读会不会弹窗没试过。
 - `hc interrupt` 对真实 harness 的效果：只对 sh 试过，结果总是 `outcome: unknown`。
