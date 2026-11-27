@@ -1,5 +1,5 @@
 //! The `yonder` and `yonderd` binaries against a ledger in a temporary
-//! state directory, with their own config (no notifications) and the fake
+//! Yonder home, with their own config (no notifications) and the fake
 //! hc in tests/fake-hc.sh, which logs what it is sent to `hc.log`.
 
 use std::path::PathBuf;
@@ -34,8 +34,7 @@ impl Ledger {
     fn program(&self, bin: &str, args: &[&str]) -> Command {
         let mut cmd = Command::new(bin);
         cmd.args(args)
-            .env("YONDER_STATE_DIR", &self.0)
-            .env("YONDER_CONFIG", self.0.join("config.toml"))
+            .env("YONDER_HOME", &self.0)
             .env("YONDER_HC", concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fake-hc.sh"))
             .env("FAKE_HC_LOG", self.0.join("hc.log"))
             .env("FAKE_HC_LEAD", "t9");
@@ -460,6 +459,8 @@ fn service_plist_is_valid() {
     let plist = l.ok(&["ctl", "service-plist"]);
     assert!(plist.contains("<string>dev.yonder.daemon</string>") && plist.contains("<key>KeepAlive</key>"), "{plist}");
     assert!(plist.contains("/yonderd</string>") && !plist.contains(".zshrc"));
+    // yonderd gets the same home.
+    assert!(plist.contains("<key>YONDER_HOME</key>") && plist.contains(&format!("<string>{}</string>", l.0.display())), "{plist}");
     let Ok(mut lint) = Command::new("plutil").args(["-lint", "-"]).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn() else {
         return; // Not macOS.
     };
@@ -499,4 +500,67 @@ fn the_last_minute_of_9999_west_of_greenwich() {
     assert!(!out.status.success());
     assert!(stderr(&out).starts_with("bad_time: "), "{}", stderr(&out));
     assert!(l.json(&["remind", "ls", "--all", "--json"]).is_empty());
+}
+
+#[test]
+fn everything_is_in_the_yonder_home() {
+    let l = Ledger::new("everything_is_in_the_yonder_home");
+    l.ok(&["remind", "set", "x", "--in", "1h"]);
+    l.round(when::now(), "t9");
+    for kept in ["ledger.db", "yonderd.lock", "logs/yonderd.log"] {
+        assert!(l.0.join(kept).exists(), "{kept}");
+    }
+    // Without YONDER_HOME: ~/.yonder, here a temporary HOME's.
+    let home = l.0.join("someone");
+    std::fs::create_dir(&home).unwrap();
+    let out = l.cmd(&["task", "add", "x"]).env_remove("YONDER_HOME").env("HOME", &home).output().unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(home.join(".yonder/ledger.db").is_file());
+    assert!(!home.join(".local").exists() && !home.join(".config").exists());
+}
+
+#[test]
+fn bots_are_made_listed_and_checked() {
+    let l = Ledger::new("bots_are_made_listed_and_checked");
+    let bots = l.0.join("bots");
+    l.ok(&["bot", "new", "trainer", "--kind", "persistent", "--harness", "codex"]);
+    for f in ["bot.toml", "template.md", "AGENTS.md"] {
+        assert!(bots.join("trainer").join(f).is_file(), "{f}");
+    }
+    let again = l.run(&["bot", "new", "trainer"]);
+    assert!(!again.status.success() && stderr(&again).starts_with("bot_exists: "), "{}", stderr(&again));
+
+    let check = l.run(&["bot", "check", "trainer"]);
+    let said = String::from_utf8_lossy(&check.stdout);
+    assert_eq!(check.status.code(), Some(1));
+    assert!(said.contains("error: trainer: a persistent bot needs cwd"), "{said}");
+    let toml = bots.join("trainer/bot.toml");
+    let text = std::fs::read_to_string(&toml).unwrap();
+    std::fs::write(&toml, format!("{text}cwd = \"/tmp/example\"\ncolour = \"red\"\n")).unwrap();
+    let said = l.ok(&["bot", "check", "trainer"]);
+    assert!(said.contains("warning: trainer: unknown field colour") && !said.contains("error:"), "{said}");
+
+    // One broken, one misnamed: listed, and the others still are.
+    std::fs::create_dir_all(bots.join("broken")).unwrap();
+    std::fs::write(bots.join("broken/bot.toml"), "name = \"broken\"\nkind = ").unwrap();
+    std::fs::create_dir_all(bots.join("ops")).unwrap();
+    std::fs::write(bots.join("ops/bot.toml"), "name = \"nova\"\ndescription = \"x\"\nkind = \"oneoff\"\nharness = \"pi\"\n").unwrap();
+    let listed = l.ok(&["bot", "ls"]);
+    assert!(listed.lines().any(|line| line.starts_with("broken ") && line.contains("invalid") && line.contains("line 2")), "{listed}");
+    assert!(listed.lines().any(|line| line.starts_with("trainer ") && line.contains("persistent") && line.contains("codex")), "{listed}");
+    let all = l.json(&["bot", "ls", "--json"]);
+    let valid: Vec<_> = all.iter().map(|b| (b["name"].as_str().unwrap(), b["valid"].as_bool().unwrap())).collect();
+    assert_eq!(valid, [("broken", false), ("ops", false), ("trainer", true)]);
+    let check = l.run(&["bot", "check"]);
+    let said = String::from_utf8_lossy(&check.stdout);
+    assert_eq!(check.status.code(), Some(1));
+    assert!(said.contains("error: ops: name \"nova\" is not its directory's name"), "{said}");
+
+    let shown: serde_json::Value = serde_json::from_str(&l.ok(&["bot", "show", "trainer", "--json"])).unwrap();
+    assert_eq!((shown["name"].as_str(), shown["kind"].as_str(), shown["cwd"].as_str()), (Some("trainer"), Some("persistent"), Some("/tmp/example")));
+    assert_eq!(shown["files"]["bot.toml"].as_str().map(std::path::PathBuf::from), Some(toml));
+    let missing = l.run(&["bot", "show", "nova"]);
+    assert!(!missing.status.success() && stderr(&missing).starts_with("not_found: "), "{}", stderr(&missing));
+    let bad = l.run(&["bot", "new", "Nova"]);
+    assert!(!bad.status.success() && stderr(&bad).starts_with("bad_name: "), "{}", stderr(&bad));
 }

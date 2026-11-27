@@ -1,4 +1,4 @@
-# An example ~/.config/yonder/config.toml. Every section and key is
+# An example ~/.yonder/config.toml ($YONDER_HOME/config.toml). Every section and key is
 # optional; what is left out takes the default shown in the comment.
 
 [lead]

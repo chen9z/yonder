@@ -1,6 +1,6 @@
-//! The ledger's records as every Yonder program sees them: tasks and
-//! reminders, and the words their states are stored and shown as. Times are
-//! UTC, `YYYY-MM-DDTHH:MM:SSZ`, so they sort as text.
+//! The ledger's records as every Yonder program sees them: tasks,
+//! reminders and bot definitions, and the words their states are stored
+//! and shown as. Times are UTC, `YYYY-MM-DDTHH:MM:SSZ`, so they sort as text.
 
 use serde::{Deserialize, Serialize};
 
@@ -42,6 +42,34 @@ words! {
     /// `fired`: a one-off reminder that went off, or a `check_once` one
     /// whose output changed. `expired`: a check past its `check_until`.
     ReminderState { Active = "active", Fired = "fired", Cancelled = "cancelled", Expired = "expired" }
+}
+
+words! {
+    /// `persistent`: runs on, in its own working directory, and keeps a
+    /// `MEMORY.md`. `oneoff`: started for one task, which says where.
+    BotKind { Persistent = "persistent", Oneoff = "oneoff" }
+}
+
+/// A bot as its `bot.toml` defines it, in `<home>/bots/<name>/`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct BotDef {
+    /// The same as its directory's name: `^[a-z][a-z0-9-]{0,31}$`.
+    pub name: String,
+    /// What it does, in one line.
+    pub description: String,
+    pub kind: BotKind,
+    /// `local`, or an hc machine name.
+    pub machine: String,
+    /// Where it works; a persistent bot has one, a oneoff one may not.
+    pub cwd: Option<String>,
+    /// The program it runs in: `codex`, `pi`, `claude` or another.
+    pub harness: String,
+    pub model: Option<String>,
+    pub args: Vec<String>,
+    /// Its Nowledge identity (`NMEM_AGENT_ID`), if any.
+    pub memory_id: Option<String>,
+    /// Names of the environment variables it gets; their values are never here.
+    pub env: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -111,6 +139,8 @@ mod tests {
             assert_eq!(ReminderState::parse(s.as_str()), Some(*s));
         }
         assert_eq!(TaskState::parse("closed"), None);
+        assert_eq!(BotKind::parse("oneoff"), Some(BotKind::Oneoff));
+        assert_eq!(BotKind::parse("daemon"), None);
     }
 
     #[test]

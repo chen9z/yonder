@@ -1,8 +1,8 @@
 //! `yonderd`: fires reminders when they are due. Every `daemon.tick_secs`
 //! it sends what is due to the lead agent's terminal (`hc send`) and shows
 //! a notification here; it runs reminder checks and tells what changed.
-//! One per state directory; SIGTERM or SIGINT stop it within two seconds.
-//! Logs to `logs/yonderd.log` in the state directory.
+//! One per Yonder home; SIGTERM or SIGINT stop it within two seconds.
+//! Logs to `logs/yonderd.log` in Yonder's home.
 
 use std::cell::RefCell;
 use std::fs::File;
@@ -67,13 +67,13 @@ fn run(cli: Cli) -> Result<(), Fail> {
         Some(s) => Some(when::parse_utc(s).ok_or(("bad_time", format!("{s:?} is not a UTC time"), "use YYYY-MM-DDTHH:MM:SSZ"))?),
     };
     let config = Config::load_default().map_err(|e| ("config", e.to_string(), "fix the config file"))?;
-    let state_err = |e: store::StoreError| (e.code(), e.to_string(), "set YONDER_STATE_DIR to a writable directory");
-    let dir = store::state_dir().map_err(state_err)?;
+    let state_err = |e: store::StoreError| (e.code(), e.to_string(), "set YONDER_HOME to a writable directory");
+    let dir = store::home_dir().map_err(state_err)?;
     let store = Store::open(&dir).map_err(state_err)?;
-    let io_err = |what: &str, e: std::io::Error| ("state_dir", format!("{what}: {e}"), "check the state directory's permissions");
+    let io_err = |what: &str, e: std::io::Error| ("home", format!("{what}: {e}"), "check the permissions of Yonder's home");
     let Some(_lock) = InstanceLock::acquire(&dir).map_err(|e| io_err("the lock", e))? else {
         let pid = running_pid(&dir).ok().flatten().map_or("another".into(), |p| format!("pid {p}"));
-        return Err(("already_running", format!("yonderd {pid} uses {}", dir.display()), "stop it first, or use another YONDER_STATE_DIR"));
+        return Err(("already_running", format!("yonderd {pid} uses {}", dir.display()), "stop it first, or use another YONDER_HOME"));
     };
     let log = Rc::new(RefCell::new(Log::open(dir.join("logs"), cli.once).map_err(|e| io_err("the log", e))?));
     for sig in [libc::SIGTERM, libc::SIGINT] {
@@ -86,7 +86,7 @@ fn run(cli: Cli) -> Result<(), Fail> {
     let notifier = LocalNotifier { enabled: config.notify.local, stop: &STOP };
     let to_log = log.clone();
     let mut daemon = Daemon::new(store, hc, notifier, &STOP, Box::new(move |line| to_log.borrow_mut().line(line)))
-        .map_err(|e| (e.code(), e.to_string(), "look at ledger.db in the state directory"))?;
+        .map_err(|e| (e.code(), e.to_string(), "look at ledger.db in Yonder's home"))?;
 
     if cli.once {
         let now = now.unwrap_or_else(when::now);

@@ -1,4 +1,4 @@
-//! `~/.config/yonder/config.toml`: who the lead is, the workers, where to
+//! `config.toml` in Yonder's home (`~/.yonder`): who the lead is, the workers, where to
 //! push. Everything personal lives there, never in this repository. A
 //! missing file, or a missing section or key, means the local default: one
 //! machine, no workers, no state file, no pushes.
@@ -196,13 +196,9 @@ pub enum ConfigError {
 }
 
 impl Config {
-    /// `$YONDER_CONFIG`, else `~/.config/yonder/config.toml`, else nothing.
+    /// `config.toml` in Yonder's home, if there is a home.
     pub fn default_path() -> Option<PathBuf> {
-        if let Some(path) = std::env::var_os("YONDER_CONFIG").filter(|p| !p.is_empty()) {
-            return Some(path.into());
-        }
-        let home = std::env::var_os("HOME").filter(|h| !h.is_empty())?;
-        Some(Path::new(&home).join(".config/yonder/config.toml"))
+        crate::home::dir().map(|home| crate::home::config_path(&home))
     }
 
     /// The config at `default_path`, or the defaults.

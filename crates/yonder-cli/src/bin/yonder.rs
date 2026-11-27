@@ -1,6 +1,6 @@
-//! `yonder`: a task list and reminders, kept in the ledger in
-//! `$YONDER_STATE_DIR` (default `~/.local/state/yonder`), and a look at
-//! yonderd, which fires the reminders. On failure it
+//! `yonder`: a task list and reminders, kept in the ledger in Yonder's
+//! home `$YONDER_HOME` (default `~/.yonder`), the bots defined there, and
+//! a look at yonderd, which fires the reminders. On failure it
 //! exits non-zero with one line on stderr: a stable code, what went wrong
 //! and what to do next, such as `check_failed: exit:3; ...`.
 
@@ -12,8 +12,9 @@ use yonder_core::firing::ECHO_CHARS;
 use yonder_core::hc::Hc;
 use yonder_core::redact::excerpt;
 use yonder_core::when::{self, Rule};
-use yonder_core::{NewReminder, Store, StoreError, check_exec, daemon, service, store};
-use yonder_model::{Reminder, Task, TaskState};
+use yonder_core::bot::{self, Bot, BotError, Level};
+use yonder_core::{NewReminder, Store, StoreError, check_exec, daemon, home, service, store};
+use yonder_model::{BotKind, Reminder, Task, TaskState};
 
 /// How long a check runs if --for does not say, and the most it may say.
 const CHECK_FOR: &str = "7d";
@@ -37,6 +38,35 @@ enum Cmd {
     /// yonderd, which fires the reminders.
     #[command(subcommand)]
     Ctl(CtlCmd),
+    /// Bots, as defined in bots/ in Yonder's home.
+    #[command(subcommand)]
+    Bot(BotCmd),
+}
+
+#[derive(Subcommand)]
+enum BotCmd {
+    /// Make a bot's directory: a commented bot.toml, empty template.md and AGENTS.md.
+    New {
+        name: String,
+        #[arg(long, default_value = "persistent", value_parser = ["persistent", "oneoff"])]
+        kind: String,
+        /// The program it runs in: codex, pi, claude or another.
+        #[arg(long)]
+        harness: Option<String>,
+    },
+    /// List the bots, broken definitions too.
+    Ls {
+        #[arg(long)]
+        json: bool,
+    },
+    /// A bot's fields and files.
+    Show {
+        name: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Check the definitions, one bot's or all; exits 1 on any error.
+    Check { name: Option<String> },
 }
 
 #[derive(Subcommand)]
@@ -153,9 +183,9 @@ impl From<StoreError> for Fail {
             StoreError::Empty(_) => "give it some text",
             StoreError::CheckNeedsEvery => "add --every",
             StoreError::TooLong(..) => "say it in fewer words; details can go in a file it names",
-            StoreError::NoStateDir | StoreError::Dir(..) => "set YONDER_STATE_DIR to a writable directory",
+            StoreError::NoHome | StoreError::Dir(..) => "set YONDER_HOME to a writable directory",
             StoreError::TooNew(_) => "use a newer yonder",
-            StoreError::Sql(_) => "try again; if it stays, look at ledger.db in the state directory",
+            StoreError::Sql(_) => "try again; if it stays, look at ledger.db in Yonder's home",
         };
         Fail { code: e.code(), msg: e.to_string(), hint }
     }
@@ -206,9 +236,11 @@ fn one_line(text: &str) -> String {
 }
 
 fn run(cmd: Cmd) -> Result<(), Fail> {
-    if let Cmd::Ctl(CtlCmd::ServicePlist) = cmd {
-        return service_plist();
-    }
+    let cmd = match cmd {
+        Cmd::Ctl(CtlCmd::ServicePlist) => return service_plist(),
+        Cmd::Bot(cmd) => return bot_cmd(cmd),
+        cmd => cmd,
+    };
     let mut store = Store::open_default()?;
     let now = when::now();
     match cmd {
@@ -230,7 +262,7 @@ fn run(cmd: Cmd) -> Result<(), Fail> {
         Cmd::Task(TaskCmd::Cancel { id }) => print_task(&store.close_task(&id, TaskState::Cancelled, now)?),
         Cmd::Remind(RemindCmd::Set(args)) => set_reminder(&mut store, args, now)?,
         Cmd::Ctl(CtlCmd::Status { json }) => status(&store, json)?,
-        Cmd::Ctl(CtlCmd::ServicePlist) => unreachable!("handled before the ledger opens"),
+        Cmd::Ctl(CtlCmd::ServicePlist) | Cmd::Bot(_) => unreachable!("handled before the ledger opens"),
         Cmd::Remind(RemindCmd::Ls { all, json }) => {
             let reminders = store.reminders(all)?;
             if json {
@@ -337,11 +369,11 @@ fn set_reminder(store: &mut Store, args: SetArgs, now: i64) -> Result<(), Fail> 
 }
 
 fn status(store: &Store, json: bool) -> Result<(), Fail> {
-    let dir = store::state_dir()?;
+    let dir = store::home_dir()?;
     let pid = daemon::running_pid(&dir).map_err(|e| Fail {
-        code: "state_dir",
+        code: "home",
         msg: format!("reading {}: {e}", daemon::lock_path(&dir).display()),
-        hint: "check the state directory's permissions",
+        hint: "check the permissions of Yonder's home",
     })?;
     let last = store.meta("last_tick_at")?;
     let (pending, lost) = (store.pending()?, store.lost()?);
@@ -365,7 +397,7 @@ fn status(store: &Store, json: bool) -> Result<(), Fail> {
 
 fn service_plist() -> Result<(), Fail> {
     let config = Config::load_default().map_err(|e| Fail { code: "config", msg: e.to_string(), hint: "fix the config file" })?;
-    let dir = store::state_dir()?;
+    let dir = store::home_dir()?;
     let exe = std::env::current_exe().and_then(|p| p.canonicalize());
     let program = exe.map(|p| p.with_file_name("yonderd")).map_err(|e| Fail {
         code: "no_program",
@@ -376,7 +408,7 @@ fn service_plist() -> Result<(), Fail> {
     let hc = Hc::bin(&config.hc.bin, &home);
     let mut env = vec![("PATH".to_string(), service::path_with(service::find_program(&hc).as_deref()))];
     env.push(("HOME".into(), home.display().to_string()));
-    for key in ["YONDER_STATE_DIR", "YONDER_CONFIG", "YONDER_HC"] {
+    for key in ["YONDER_HOME", "YONDER_HC"] {
         if let Some(v) = std::env::var_os(key).filter(|v| !v.is_empty()) {
             env.push((key.into(), v.to_string_lossy().into_owned()));
         }
@@ -384,6 +416,120 @@ fn service_plist() -> Result<(), Fail> {
     let log = dir.join("logs/yonderd.out");
     print!("{}", service::plist(&config.service.label, &program, &env, &log));
     Ok(())
+}
+
+impl From<BotError> for Fail {
+    fn from(e: BotError) -> Fail {
+        let hint = match &e {
+            BotError::BadName(_) => "use a-z, 0-9 and -, starting with a letter, at most 32",
+            BotError::Exists(..) => "pick another name, or change the one there",
+            BotError::NotFound(_) => "see yonder bot ls",
+            BotError::Io(..) => "check the permissions of Yonder's home",
+        };
+        Fail { code: e.code(), msg: e.to_string(), hint }
+    }
+}
+
+fn bot_cmd(cmd: BotCmd) -> Result<(), Fail> {
+    let bots = home::bots_dir(&store::home_dir()?);
+    match cmd {
+        BotCmd::New { name, kind, harness } => {
+            let kind = BotKind::parse(&kind).expect("clap allows only the kinds");
+            let dir = bot::create(&bots, &name, kind, harness.as_deref())?;
+            println!("{name} made: {}", dir.display());
+            println!("next: fill in {}, then yonder bot check {name}", dir.join("bot.toml").display());
+        }
+        BotCmd::Ls { json } => {
+            let all = bot::list(&bots)?;
+            if json {
+                let items: Vec<_> = all.iter().map(bot_json).collect();
+                println!("{}", serde_json::to_string_pretty(&items).expect("plain data"));
+            } else if all.is_empty() {
+                println!("no bots in {}", bots.display());
+            }
+            for b in all.iter().filter(|_| !json) {
+                let files = b.files.iter().map(|(f, _)| *f).collect::<Vec<_>>().join(" ");
+                match &b.def {
+                    Some(d) => println!("{:<16}  {:<10}  {:<10}  {:<8}  {files}", b.name, d.kind, d.machine, d.harness),
+                    None => println!("{:<16}  invalid     {}", b.name, first_error(b)),
+                }
+            }
+        }
+        BotCmd::Show { name, json } => {
+            let b = bot::find(&bots, &name)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&bot_json(&b)).expect("plain data"));
+                return Ok(());
+            }
+            println!("{}  {}", b.name, b.dir.display());
+            if let Some(d) = &b.def {
+                let none = || "-".to_owned();
+                for (key, value) in [
+                    ("description", d.description.clone()),
+                    ("kind", d.kind.to_string()),
+                    ("machine", d.machine.clone()),
+                    ("cwd", d.cwd.clone().unwrap_or_else(none)),
+                    ("harness", d.harness.clone()),
+                    ("model", d.model.clone().unwrap_or_else(none)),
+                    ("args", format!("{:?}", d.args)),
+                    ("memory_id", d.memory_id.clone().unwrap_or_else(none)),
+                    ("env", format!("{:?}", d.env)),
+                ] {
+                    println!("  {key:<12} {value}");
+                }
+            }
+            for (file, path) in &b.files {
+                println!("  {file:<12} {}", path.display());
+            }
+            print_problems(&b, "  ");
+        }
+        BotCmd::Check { name } => {
+            let all = match name {
+                Some(name) => vec![bot::find(&bots, &name)?],
+                None => bot::list(&bots)?,
+            };
+            if all.is_empty() {
+                println!("no bots in {}", bots.display());
+            }
+            for b in &all {
+                if b.problems.is_empty() {
+                    println!("{}: ok", b.name);
+                }
+                print_problems(b, "");
+            }
+            if all.iter().any(|b| b.problems.iter().any(|p| p.level == Level::Error)) {
+                return Err(Fail { code: "bot_invalid", msg: "a bot's definition has errors".into(), hint: "fix what the error lines say" });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn first_error(b: &Bot) -> &str {
+    b.problems.iter().find(|p| p.level == Level::Error).map_or("", |p| p.message.as_str())
+}
+
+/// `error: <bot>: <what>` or `warning: ...`, one a line.
+fn print_problems(b: &Bot, indent: &str) {
+    for p in &b.problems {
+        println!("{indent}{}: {}: {}", p.level.as_str(), b.name, p.message);
+    }
+}
+
+/// A bot for --json: its fields at the top (none when invalid), its
+/// directory, its files by name, and its problems.
+fn bot_json(b: &Bot) -> serde_json::Value {
+    let mut v = match &b.def {
+        Some(d) => serde_json::to_value(d).expect("plain data"),
+        None => serde_json::json!({ "name": b.name }),
+    };
+    let files: serde_json::Map<_, _> = b.files.iter().map(|(f, p)| ((*f).to_owned(), p.display().to_string().into())).collect();
+    let problems: Vec<_> = b.problems.iter().map(|p| serde_json::json!({ "level": p.level.as_str(), "message": p.message })).collect();
+    v["valid"] = b.def.is_some().into();
+    v["dir"] = b.dir.display().to_string().into();
+    v["files"] = files.into();
+    v["problems"] = problems.into();
+    v
 }
 
 /// A ledger time as local `YYYY-MM-DD HH:MM`.

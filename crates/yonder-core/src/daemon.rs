@@ -259,8 +259,8 @@ impl<L: Lead, N: Notifier> Daemon<L, N> {
 }
 
 /// The lock file that makes yonderd one of a kind; it holds its pid.
-pub fn lock_path(state_dir: &Path) -> PathBuf {
-    state_dir.join("yonderd.lock")
+pub fn lock_path(home: &Path) -> PathBuf {
+    home.join("yonderd.lock")
 }
 
 /// Held for as long as this yonderd runs.
@@ -268,8 +268,8 @@ pub struct InstanceLock(#[allow(dead_code)] File);
 
 impl InstanceLock {
     /// The lock, or None if another yonderd holds it.
-    pub fn acquire(state_dir: &Path) -> std::io::Result<Option<InstanceLock>> {
-        let mut file = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(lock_path(state_dir))?;
+    pub fn acquire(home: &Path) -> std::io::Result<Option<InstanceLock>> {
+        let mut file = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(lock_path(home))?;
         if !flock(&file, libc::LOCK_EX)? {
             return Ok(None);
         }
@@ -281,8 +281,8 @@ impl InstanceLock {
 }
 
 /// The pid of the running yonderd, if one runs.
-pub fn running_pid(state_dir: &Path) -> std::io::Result<Option<u32>> {
-    let mut file = match File::open(lock_path(state_dir)) {
+pub fn running_pid(home: &Path) -> std::io::Result<Option<u32>> {
+    let mut file = match File::open(lock_path(home)) {
         Ok(file) => file,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e),

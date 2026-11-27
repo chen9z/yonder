@@ -16,7 +16,7 @@ Yonder 是跑在自己电脑上的个人 agent 底座和客户端。agent 本身
 | `yonderd` | 常驻后台：提醒到点、跑带检查的提醒、把结果投递给主 agent 的终端 | 已实现 |
 | 存储 | SQLite `ledger.db`（WAL） | 已实现 |
 | App | 同一个 NSH app：Android 版和 macOS 版（`Yonder.app`） | 已实现（连电脑、看 agents 和终端） |
-| 自定义 bot | 用户自己定义常驻或一次性的 bot，由 Yonder 起停、同步、交接 | 计划（B1–B5、B4） |
+| 自定义 bot | 用户自己定义常驻或一次性的 bot，由 Yonder 起停、同步、交接 | 定义和查看已实现（B1）；其余计划（B2–B5、B4） |
 
 不做：
 
@@ -74,7 +74,7 @@ b
 
 外部内容（检查输出）一律放进 `<payload untrusted="true">`；正文里行首的 `[yonder` 转义成 `\[yonder`，`</payload>` 转义成 `<\/payload>`，头里的值把空白和方括号换成 `_`，外部内容伪造不了信封头。
 
-### 2.5 bot（计划（B1））
+### 2.5 bot（定义已实现，B1）
 
 bot 定义放在 `<home>/bots/<名字>/`，名字限 `^[a-z][a-z0-9-]{0,31}$`，必须和目录名一致。`bot.toml`：
 
@@ -91,8 +91,11 @@ memory_id   = "trainer"           # 可空，见「记忆」一节
 env         = ["EXAMPLE_API_KEY"] # 可空，只写变量名
 ```
 
-- `env` 的名字限 `^[A-Z_][A-Z0-9_]*$`，拒绝 `YONDER_*`、`PATH`、`HOME`、`SHELL` 等系统变量。值只存在钥匙串里，B3 起 bot 时注入；不进 `bot.toml`、不进提示词、不进日志。
+- `env` 的名字限 `^[A-Z_][A-Z0-9_]*$`，拒绝系统变量和 Yonder 自己的：`PATH HOME SHELL USER LOGNAME PWD TMPDIR TERM LANG TZ`，以及 `YONDER_`、`LC_`、`DYLD_`、`LD_` 开头的。同名写两次是警告。值只存在钥匙串里，B3 起 bot 时注入；不进 `bot.toml`、不进提示词、不进日志。
 - 未知字段：`bot check` 报警告，不失败（以后加字段时旧版本还能读）。
+- 校验（`crates/yonder-core/src/bot.rs`）：error 是 toml 语法错（带行号）、没有 `bot.toml`、必填字段缺了或为空、字段类型不对、名字格式不对、`name` 和目录名不一致、`kind` 不是 `persistent` / `oneoff`、persistent 没有 `cwd`、`env` 名字不合法；有 error 的定义算 `invalid`，不能用。warning 是未知字段、`env` 重复、`description` 还是 `bot new` 写的占位（`TODO: ` 开头）。
+- 读定义永远不会整体失败：一个坏定义只让它自己 `invalid`，不挡别的。`bots/` 下不是目录的、`.` 开头的都不算 bot。
+- `bot new` 只生成文件，之后 Yonder 不改 bot 目录里的任何东西。生成的 `bot.toml` 字段都在顶层，没有表，所以在文件末尾追加一行（如 `cwd = ...`）就是加一个字段；`cwd` 等可选字段以注释给出。不带 `--harness` 时 `harness` 为空，`bot check` 会报 error。
 - 同目录可选文件：`template.md`（第一条消息的正文）、`AGENTS.md`（bot 的角色和规则）、`MEMORY.md`（从 bot 工作目录拉回来的记忆）。
 - bot 运行状态（会话 id、是否在跑、上次停在哪）记进台账（B3）；每个非终态都要有出路，迟到的结果不覆盖新状态。
 
@@ -113,10 +116,10 @@ env         = ["EXAMPLE_API_KEY"] # 可空，只写变量名
 | `yonder remind due` | 已实现 | 列出现在到点的提醒，不改任何东西 |
 | `yonder ctl status` | 已实现 | yonderd 是否在跑、上一轮时间、pending 和 lost 投递数 |
 | `yonder ctl service-plist` | 已实现 | 打印跑 yonderd 的 launchd plist（`KeepAlive`，固定短 PATH，不读 shell 配置）；安装由用户自己做 |
-| `yonder bot new` | 计划（B1） | 生成 bot 目录、带注释的 `bot.toml`、空的 `template.md` 和 `AGENTS.md`；已存在报 `bot_exists` |
-| `yonder bot ls` | 计划（B1） | 每个 bot 一行；坏定义也列出来，标 `invalid` 和原因 |
-| `yonder bot show` | 计划（B1） | 完整字段和文件路径，`--json` |
-| `yonder bot check` | 计划（B1） | 校验定义，逐条 `error:` / `warning:`；有 error 退出 1。B3 加 `--live`：harness 装了没、登录没、cwd 在不在、机器连得上吗 |
+| `yonder bot new` | 已实现 | `--kind persistent` 或 `oneoff`（默认 persistent）、`--harness`；生成 bot 目录、带注释的 `bot.toml`、空的 `template.md` 和 `AGENTS.md`；已存在报 `bot_exists`，名字不合法报 `bad_name` |
+| `yonder bot ls` | 已实现 | 每个 bot 一行：名字、kind、machine、harness、有哪些文件；坏定义也列出来，标 `invalid` 和第一个 error；`--json` |
+| `yonder bot show` | 已实现 | 完整字段、目录、文件路径和问题；`--json` 时字段在顶层，另有 `valid`、`dir`、`files`、`problems`；没有这个 bot 报 `not_found` |
+| `yonder bot check` | 已实现 | 校验一个或全部定义，逐条一行 `error: <名字>: …` / `warning: <名字>: …`；有 error 退出 1。B3 加 `--live`：harness 装了没、登录没、cwd 在不在、机器连得上吗 |
 | `yonder bot sync` | 计划（B2） | 把 `AGENTS.md`（末尾拼上 `yonder manual`）推到 bot 工作目录，把 `MEMORY.md` 拉回 bot 定义目录 |
 | `yonder manual` | 计划（B2） | 给 agent 看的 Yonder 用法，`bot sync` 拼进 `AGENTS.md` 用的就是它 |
 | `yonder bot env set` | 计划（B3） | 把一个 env 的值写进钥匙串，从 stdin 读，只写不读 |
@@ -159,17 +162,19 @@ env         = ["EXAMPLE_API_KEY"] # 可空，只写变量名
 
 ## 5. 目录
 
-### 5.1 现在（代码）
+### 5.1 Yonder 的 home
 
-| 内容 | 位置 | 覆盖 |
-|---|---|---|
-| 配置 | `~/.config/yonder/config.toml`，没有就全用默认值；示例见 `crates/yonder-core/config.example.toml` | `YONDER_CONFIG` |
-| 状态目录 | `~/.local/state/yonder/`：`ledger.db`、`yonderd.lock`、`logs/yonderd.log` | `YONDER_STATE_DIR` |
-| hc | 配置的 `hc.bin`，没有就从 PATH 找 | `YONDER_HC` 优先 |
+所有东西在一个 home 下：默认 `~/.yonder`，`YONDER_HOME` 覆盖（`crates/yonder-core/src/home.rs`）。没有旧位置，也不读旧的环境变量。
 
-### 5.2 B1 之后
+| 内容 | 位置 |
+|---|---|
+| 配置 | `<home>/config.toml`，没有就全用默认值；示例见 `crates/yonder-core/config.example.toml` |
+| 台账 | `<home>/ledger.db` |
+| yonderd 的锁和日志 | `<home>/yonderd.lock`、`<home>/logs/yonderd.log` |
+| bot 定义 | `<home>/bots/<名字>/` |
+| hc | 配置的 `hc.bin`，没有就从 PATH 找；`YONDER_HC` 优先 |
 
-统一成一个 home：默认 `~/.yonder`，`YONDER_HOME` 覆盖。`config.toml`、`ledger.db`、锁文件、`logs/`、`bots/` 都在 home 下。去掉 `YONDER_STATE_DIR`、`YONDER_CONFIG` 和上面两个默认位置，不做兼容（还没有真实数据）。
+`yonder ctl service-plist` 生成的 plist 把 `HOME`，以及设了的 `YONDER_HOME`、`YONDER_HC` 原样带给 yonderd，所以 yonderd 和打印它的 `yonder` 用同一个 home。
 
 ```text
 ~/.yonder/
@@ -187,7 +192,7 @@ env         = ["EXAMPLE_API_KEY"] # 可空，只写变量名
 
 bot 的工作目录是 `bot.toml` 里的 `cwd`（可以在别的机器上）：Yonder 只往里推 `AGENTS.md`，只从里面拉 `MEMORY.md`，不写别的。
 
-### 5.3 仓库
+### 5.2 仓库
 
 ```text
 Cargo.toml          # 根 workspace，members = crates/*，不含 app/
@@ -246,8 +251,8 @@ scripts/check.sh    # clippy 和全部测试
 | M1a | `yonder task`、`yonder remind`（含带检查的提醒）、`ledger.db` | 已完成 |
 | M1b | `yonderd`：到点投递、检查、投递状态机、`ctl status`、`ctl service-plist` | 已完成 |
 | D1 | 桌面版：`Yonder.app`、钥匙串存密钥、本地时区、桌面默认值和菜单、右键菜单 | 已完成 |
-| S0 | 本文和仓库根 `AGENTS.md` | 进行中 |
-| B1 | bot 定义格式、`bot new/ls/show/check`、`~/.yonder` 目录 | 计划 |
+| S0 | 本文和仓库根 `AGENTS.md` | 已完成 |
+| B1 | bot 定义格式、`bot new/ls/show/check`、`~/.yonder` 目录 | 已完成 |
 | B2 | `bot sync`、`yonder manual` | 计划 |
 | B3 | bot 生命周期、`yonder log`、env 从钥匙串注入、启动检查 | 计划 |
 | B5 | `yonder handoff` 和提示词 | 计划 |
@@ -266,17 +271,20 @@ scripts/check.sh    # clippy 和全部测试
 - hc 打字后报错的不重发、记 `lost`；打字前拒绝的会重发：`hc_errors_after_typing_are_never_sent_again`、`hc_refusals_are_sent_again`。
 - `REFUSED_BEFORE_TYPING` 里的 `not_found`、`machine_unknown`、`status_mismatch`：在隔离的 hc core（0.1.22）上手工复现过，`status_mismatch` 的提示写着没有打字。
 - 单实例、SIGTERM 后 2 秒内退出（包括 `--once` 正在等检查时）：`yonderd_runs_alone_and_stops_on_sigterm`、`yonderd_stops_in_time_with_a_check_running`、`yonderd_once_stops_in_time_with_a_check_running`。
-- plist 合法、含 `KeepAlive` 和 `dev.yonder.daemon`、不读 shell 配置：`service_plist_is_valid`，以及 M1b 验收第 8 条（`plutil -lint`）。
+- plist 合法、含 `KeepAlive` 和 `dev.yonder.daemon`、不读 shell 配置、带上 `YONDER_HOME`：`service_plist_is_valid`，以及 M1b 验收第 8 条（`plutil -lint`）。
+- 台账、锁、日志都在 `YONDER_HOME` 下，没设时在 `~/.yonder`，不再碰旧位置：`everything_is_in_the_yonder_home`，`home::tests::finds_the_home`。
+- bot 定义的生成、不覆盖、列出（坏定义不挡别的）、校验（行号、名字和目录不一致、persistent 缺 cwd、未知字段只警告）、`show --json`：`bots_are_made_listed_and_checked`，`crates/yonder-core/src/bot.rs` 的单元测试，以及 B1 验收第 2–6 条。
 - yonderd 用真实 hc 投递：M1b 验收时手工冒烟过一次。
 - 钥匙串存取、不产出明文、test-vault 下也加密、钥匙串路径校验：`app/src/vault.rs` 的 `keychain_round_trip`、`never_seals_to_plaintext`、`test_vault_seals_too`、`keychain_path_is_one_line_of_its_own`（测试只用 `.test` 结尾的 service，跑完删掉）。
 - 时区跟随本机：`app/src/chat.rs` 的 `utc_offset_follows_local_zone`（上海、纽约冬夏、UTC 各跑一次）。
-- `Yonder.app` 能打包、签名能过 `codesign --verify --deep --strict`、二进制里没有 `/User` 开头的家目录路径、能启动并出窗口：D1 验收第 2–4 条（截图交 owner 在桌面看，D1 已通过验收）。
+- `Yonder.app` 能打包、签名能过 `codesign --verify --deep --strict`、二进制里没有 `/User` 开头的家目录路径：D1 验收第 2–3 条。D1 验收第 4 条只验证到进程起来（`pgrep` 找到）、让它退出后进程没了；没有截图。
 - Android 没坏：D1 验收第 6 条（`app/apk.sh --debug` 退出 0）和 `app/tests/app.rs` 的 headless 测试。
 
 ### 9.2 待验证
 
 - 材料写的是 `yonder remind add`，代码里是 `yonder remind set`；本文按代码写。
-- 设计稿说两轮间隔超过 75 秒算睡醒、错过的只补一次；代码没有单独的睡眠检测，靠「下次时间从现在往后算」得到同样结果，真实睡眠唤醒没有手工验证过。
+- 睡眠唤醒：两轮间隔超过 5 个 `tick_secs`（默认 15 秒，即 75 秒）时 yonderd 记一行 `woke after Ns`；错过多次的周期提醒只触发一次，靠的是「下次时间从现在往后算」（`yonderd_moves_repeats_on`）。真实睡眠唤醒没有手工验证过。（S0 版本误写成代码没有睡眠检测，已改正。）
+- 窗口出现过一次（D1 时用 CGWindowList 看到过一个 1200×832 的 Yonder 窗口），但不在验收里，也没有截图；桌面版的画面待人看。
 - 检查的环境白名单：设计稿含 `LOGNAME`、`LC_*`，代码只有 `PATH HOME USER SHELL LANG TZ TMPDIR`。
 - hc 的 `blocked`、`finished` 等错误是不是一定发生在打字之前：没有依据，现在按可能送到处理（记 `lost`）；主 agent 卡在权限对话框时那批提醒会丢。
 - launchd 实际安装和崩溃后拉起：只验证了 plist 合法，没装过。

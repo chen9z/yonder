@@ -1,4 +1,4 @@
-//! The ledger: `ledger.db` in the state directory, SQLite in WAL mode so
+//! The ledger: `ledger.db` in Yonder's home, SQLite in WAL mode so
 //! the CLI and the daemon can use it at once. Changes run in immediate
 //! transactions: a state is read and changed under one write lock.
 
@@ -32,9 +32,9 @@ pub enum StoreError {
     CheckNeedsEvery,
     #[error("{0} is {1} bytes, more than {MAX_CONTENT}")]
     TooLong(&'static str, usize),
-    #[error("no state directory: set YONDER_STATE_DIR or HOME")]
-    NoStateDir,
-    #[error("state directory {0}: {1}")]
+    #[error("no Yonder home: set YONDER_HOME or HOME")]
+    NoHome,
+    #[error("Yonder home {0}: {1}")]
     Dir(PathBuf, std::io::Error),
     #[error("the ledger is version {0}, newer than this yonder knows")]
     TooNew(i64),
@@ -51,7 +51,7 @@ impl StoreError {
             StoreError::Empty(_) => "empty",
             StoreError::CheckNeedsEvery => "check_needs_every",
             StoreError::TooLong(..) => "bad_input",
-            StoreError::NoStateDir | StoreError::Dir(..) => "state_dir",
+            StoreError::NoHome | StoreError::Dir(..) => "home",
             StoreError::TooNew(_) => "ledger_too_new",
             StoreError::Sql(_) => "ledger",
         }
@@ -63,17 +63,9 @@ pub(crate) type Result<T> = std::result::Result<T, StoreError>;
 /// The longest reminder, in bytes: its envelope must fit one message.
 pub const MAX_CONTENT: usize = 4096;
 
-/// `$YONDER_STATE_DIR`, else `~/.local/state/yonder`.
-pub fn state_dir() -> Result<PathBuf> {
-    state_dir_from(std::env::var_os("YONDER_STATE_DIR"), std::env::var_os("HOME")).ok_or(StoreError::NoStateDir)
-}
-
-pub fn state_dir_from(dir: Option<std::ffi::OsString>, home: Option<std::ffi::OsString>) -> Option<PathBuf> {
-    match (dir.filter(|d| !d.is_empty()), home.filter(|h| !h.is_empty())) {
-        (Some(dir), _) => Some(dir.into()),
-        (None, Some(home)) => Some(Path::new(&home).join(".local/state/yonder")),
-        (None, None) => None,
-    }
+/// Yonder's home (`home::dir`), or why there is none.
+pub fn home_dir() -> Result<PathBuf> {
+    crate::home::dir().ok_or(StoreError::NoHome)
 }
 
 /// A reminder to add; times are Unix seconds.
@@ -96,9 +88,9 @@ pub struct Store {
 }
 
 impl Store {
-    /// The ledger in the default state directory.
+    /// The ledger in Yonder's home.
     pub fn open_default() -> Result<Store> {
-        Store::open(&state_dir()?)
+        Store::open(&home_dir()?)
     }
 
     /// The ledger in `dir`, made (only its owner can read it) if need be.
@@ -528,13 +520,5 @@ mod tests {
         let order: Vec<_> = s.reminders(false).unwrap().into_iter().map(|r| r.id).collect();
         assert_eq!(order, ["R-0002", "R-0001"]);
         std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn finds_the_state_dir() {
-        let some = |s: &str| Some(std::ffi::OsString::from(s));
-        assert_eq!(state_dir_from(some("/tmp/example/s"), some("/tmp/example")), Some("/tmp/example/s".into()));
-        assert_eq!(state_dir_from(some(""), some("/tmp/example")), Some("/tmp/example/.local/state/yonder".into()));
-        assert_eq!(state_dir_from(None, None), None);
     }
 }
