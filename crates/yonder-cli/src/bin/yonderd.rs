@@ -16,7 +16,8 @@ use std::time::{Duration, Instant};
 use clap::Parser;
 use yonder_core::config::Config;
 use yonder_core::daemon::{Daemon, InstanceLock, LocalNotifier, running_pid};
-use yonder_core::hc::Hc;
+use yonder_core::handoff;
+use yonder_core::hc::{Hc, HcBots};
 use yonder_core::when::{self, format_utc};
 use yonder_core::{Store, store};
 
@@ -86,6 +87,17 @@ fn run(cli: Cli) -> Result<(), Fail> {
 
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
     let hc = Hc { bin: Hc::bin(&config.hc.bin, &home), label: config.lead.label.clone(), stop: &STOP };
+    let bots = HcBots { bin: hc.bin.clone(), stop: &STOP };
+    // Each round, after the lead's: handoffs to the bots free for them.
+    let handoffs = |store: &Store, log: &Rc<RefCell<Log>>| {
+        if STOP.load(Ordering::Relaxed) {
+            return;
+        }
+        match handoff::deliver_all(&dir, store, &bots, &STOP) {
+            Ok(lines) => lines.iter().for_each(|l| log.borrow_mut().line(l)),
+            Err(e) => log.borrow_mut().line(&format!("handoffs: {e}")),
+        }
+    };
     let notifier = LocalNotifier { enabled: config.notify.local, stop: &STOP };
     let to_log = log.clone();
     let mut daemon = Daemon::new(store, hc, notifier, &STOP, Box::new(move |line| to_log.borrow_mut().line(line)))
@@ -94,6 +106,7 @@ fn run(cli: Cli) -> Result<(), Fail> {
     if cli.once {
         let now = now.unwrap_or_else(when::now);
         let ticked = daemon.tick(now, true);
+        handoffs(&daemon.store, &log);
         // Stopped mid-round: the checks still running end now, not orphaned.
         daemon.finish();
         return ticked.map_err(|e| (e.code(), e.to_string(), "try again; the log says more"));
@@ -112,6 +125,7 @@ fn run(cli: Cli) -> Result<(), Fail> {
         if let Err(e) = daemon.tick(now, false) {
             log.borrow_mut().line(&format!("round failed: {e}"));
         }
+        handoffs(&daemon.store, &log);
         while !STOP.load(Ordering::Relaxed) && started.elapsed() < tick {
             std::thread::sleep(Duration::from_millis(100));
         }

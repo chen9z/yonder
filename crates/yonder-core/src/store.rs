@@ -14,7 +14,7 @@ use crate::when::{Rule, format_utc};
 
 /// The schema, one step per ledger version; `PRAGMA user_version` says how
 /// many are applied. Only ever append.
-const MIGRATIONS: &[&str] = &[include_str!("schema.sql"), include_str!("schema2.sql"), include_str!("schema3.sql"), include_str!("schema4.sql"), include_str!("schema5.sql")];
+const MIGRATIONS: &[&str] = &[include_str!("schema.sql"), include_str!("schema2.sql"), include_str!("schema3.sql"), include_str!("schema4.sql"), include_str!("schema5.sql"), include_str!("schema6.sql")];
 
 const TASK_COLS: &str = "id, title, state, source, created_at, updated_at";
 pub(crate) const REMINDER_COLS: &str = "id, content, state, next_fire_at, every_spec, snooze_until, check_cmd, check_hash, \
@@ -226,12 +226,14 @@ impl Store {
     }
 
     /// Forgets all the ledger keeps of `bot`: its run, session, pause and
-    /// pushes, in one transaction.
+    /// pushes, in one transaction. Its handoffs stay, as a record; those
+    /// still waiting are `lost` (never sent to another bot of its name).
     pub fn forget_bot(&mut self, bot: &str) -> Result<()> {
         let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         for table in ["bot_runs", "bot_sessions", "bot_pauses", "bot_pushes"] {
             tx.execute(&format!("DELETE FROM {table} WHERE bot = ?1"), [bot])?;
         }
+        tx.execute("UPDATE handoffs SET state = 'lost', reason = 'the bot was removed before it was delivered' WHERE bot = ?1 AND state = 'waiting'", [bot])?;
         tx.commit()?;
         Ok(())
     }
@@ -402,7 +404,7 @@ fn migrate(conn: &mut Connection) -> Result<()> {
 }
 
 /// The next `T-0001`-style id of `table`.
-fn next_id(conn: &Connection, table: &str, prefix: &str) -> Result<String> {
+pub(crate) fn next_id(conn: &Connection, table: &str, prefix: &str) -> Result<String> {
     let last: i64 = conn.query_row(
         &format!("SELECT coalesce(max(CAST(substr(id, 3) AS INTEGER)), 0) FROM {table}"),
         [],

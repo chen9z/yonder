@@ -847,6 +847,101 @@ fn bots_pause_resume_reset_and_go_to_the_trash() {
     assert!(all.ends_with(" trainer-2 pause\n"), "{all}");
 }
 
+/// `yonder handoff <bot>` with `stdin`, and `env`: its exit code, stdout, stderr.
+fn hand(l: &Ledger, args: &[&str], stdin: &[u8], env: &[(&str, &str)]) -> (Option<i32>, String, String) {
+    use std::io::Write;
+    let mut child = l.cmd(args).envs(env.iter().copied()).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let _ = input.write_all(stdin);
+    drop(input);
+    let out = child.wait_with_output().unwrap();
+    (out.status.code(), String::from_utf8_lossy(&out.stdout).into_owned(), stderr(&out))
+}
+
+#[test]
+fn handoffs_go_once_when_the_bot_is_free() {
+    let l = Ledger::new("handoffs_go_once_when_the_bot_is_free");
+    let work = l.0.join("ops-work");
+    std::fs::create_dir(&work).unwrap();
+    bot(&l, "ops", &format!("name = \"ops\"\ndescription = \"homelab ops\"\nkind = \"persistent\"\ncwd = \"{}\"\nharness = \"/bin/sh\"\n", work.display()), Some("hello ops\n"));
+    bot(&l, "nova", "name = \"nova\"\ndescription = \"x\"\nkind = \"oneoff\"\nharness = \"/bin/sh\"\n", None);
+    let sends = |l: &Ledger| l.sent().matches(">>> send to ").count();
+    let states = |l: &Ledger| -> Vec<String> {
+        let all: Vec<serde_json::Value> = l.json(&["handoff", "ls", "--json"]);
+        all.iter().rev().map(|h| format!("{}={}", h["id"].as_str().unwrap(), h["state"].as_str().unwrap())).collect()
+    };
+    let round = |l: &Ledger, env: &[(&str, &str)]| {
+        let out = l.yonderd(&["--once"]).envs(env.iter().copied()).output().unwrap();
+        assert!(out.status.success(), "{}", stderr(&out));
+    };
+
+    // The prompt: who, what to write, and the command to run.
+    let prompt = l.ok(&["handoff", "prompt", "ops"]);
+    for want in [env!("CARGO_BIN_EXE_yonder"), " handoff ops <<'EOF'\n", "homelab ops", "MEMORY.md", "--via paste", "Secrets"] {
+        assert!(prompt.contains(want), "{want:?} in {prompt}");
+    }
+
+    // Refused: nothing kept.
+    assert_eq!(hand(&l, &["handoff", "ops"], b" \n\n", &[]).2, "handoff_empty: the handoff on stdin is empty; pipe the handoff in on stdin\n");
+    let (code, _, err) = hand(&l, &["handoff", "ops"], &vec![b'a'; 200 * 1024 + 1], &[]);
+    assert!(code == Some(1) && err.starts_with("handoff_too_large: "), "{err}");
+    let (code, _, err) = hand(&l, &["handoff", "nova"], b"x", &[]);
+    assert!(code == Some(1) && err.starts_with("handoff_oneoff: "), "{err}");
+    assert_eq!(l.ok(&["handoff", "ls"]), "no handoffs\n");
+
+    // Not running: it waits, and goes once the bot starts, after its first message.
+    assert_eq!(hand(&l, &["handoff", "ops"], b"note one\n", &[]).1, "H-0001: waiting \u{2014} not running\n");
+    round(&l, &[]);
+    assert_eq!(sends(&l), 0);
+    assert_eq!(l.ok(&["bot", "start", "ops"]), "ops: ready at t70\nH-0001: delivered to ops at t70\n");
+    let sent = l.sent();
+    let first = sent.find("hello ops").unwrap();
+    let handed = sent.find("[yonder kind=handoff id=H-0001 from=owner via=command time=").unwrap();
+    assert!(first < handed, "{sent}");
+    assert!(sent.contains("<payload untrusted=\"true\" source=\"handoff\">\nnote one\n</payload>"), "{sent}");
+
+    // Busy: yonderd hands it over once it is idle, and only once.
+    let (code, out, _) = hand(&l, &["handoff", "ops", "--via", "paste"], b"note two", &[("FAKE_HC_STATUS", "working")]);
+    assert_eq!((code, out.as_str()), (Some(0), "H-0002: waiting \u{2014} working\n"));
+    round(&l, &[("FAKE_HC_STATUS", "working")]);
+    assert_eq!(sends(&l), 2);
+    round(&l, &[]);
+    round(&l, &[]);
+    assert_eq!(sends(&l), 3);
+    assert!(l.sent().contains("id=H-0002 from=owner via=paste "));
+
+    // Paused: it waits until resumed.
+    l.ok(&["bot", "pause", "ops"]);
+    assert_eq!(hand(&l, &["handoff", "ops"], b"note three", &[]).1, "H-0003: waiting \u{2014} paused\n");
+    round(&l, &[]);
+    assert_eq!(sends(&l), 3);
+    assert_eq!(l.ok(&["bot", "resume", "ops"]), "ops: ready at t71\nH-0003: delivered to ops at t71\n");
+
+    // May have arrived: lost, never again; refused before typing: again later.
+    let out = hand(&l, &["handoff", "ops"], b"note four", &[("FAKE_HC_SEND_ERROR", "timeout")]).1;
+    assert!(out.starts_with("H-0004: lost \u{2014} hc send: exit:5: timeout: "), "{out}");
+    let out = hand(&l, &["handoff", "ops"], b"note five", &[("FAKE_HC_SEND_ERROR", "not_found")]).1;
+    assert!(out.starts_with("H-0005: waiting \u{2014} hc refused it before typing"), "{out}");
+    round(&l, &[]);
+    round(&l, &[]);
+    assert_eq!((l.sent().matches("id=H-0004 ").count(), l.sent().matches("id=H-0005 ").count()), (1, 1));
+    assert_eq!(states(&l), ["H-0001=delivered", "H-0002=delivered", "H-0003=delivered", "H-0004=lost", "H-0005=delivered"]);
+
+    // A reset sends none again.
+    let before = l.sent().matches("kind=handoff").count();
+    l.ok(&["bot", "reset", "ops", "--yes"]);
+    round(&l, &[]);
+    assert_eq!(l.sent().matches("kind=handoff").count(), before);
+
+    // The list: newest first, one line each; the log has a line for each.
+    let ls = l.ok(&["handoff", "ls", "ops"]);
+    let lines: Vec<&str> = ls.lines().collect();
+    assert!(lines[0].starts_with("H-0005  ops               delivered  ") && lines[0].contains("  command  ") && lines[0].ends_with(" 9 B  note five"), "{ls}");
+    assert!(lines[1].contains(" lost ") && lines[1].contains("(hc send: exit:5: timeout: "), "{ls}");
+    let log = l.ok(&["log", "--bot", "ops"]);
+    assert!(log.contains(" ops handoff address=t70 reason=H-0001:delivered\n") && log.contains("reason=H-0004:lost\n"), "{log}");
+}
+
 #[test]
 fn bots_elsewhere_resume_their_session() {
     let l = Ledger::new("bots_elsewhere_resume_their_session");

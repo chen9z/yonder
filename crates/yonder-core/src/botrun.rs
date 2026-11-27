@@ -361,15 +361,18 @@ pub struct StartWith<'a> {
     pub poll: Duration,
 }
 
-/// A bot that started: where, and warnings to show.
+/// A bot that started: where, warnings to show, and what became of the
+/// handoffs that waited for it.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Started {
     pub address: String,
     pub warnings: Vec<String>,
+    pub handoffs: Vec<(String, crate::handoff::Outcome)>,
 }
 
 /// Starts `def` in a new terminal and waits until it is ready, then sends
-/// the first message (`template`, and the task). Never kills a terminal:
+/// the first message (`template`, and the task), then the handoffs waiting
+/// for it, if it is free for them (`handoff::deliver`). Never kills a terminal:
 /// one that fails is left for a person to look at.
 pub fn start(store: &Store, hc: &HcBots, def: &BotDef, template: &str, with: &StartWith) -> Result<Started, BotFail> {
     let name = def.name.as_str();
@@ -419,7 +422,12 @@ pub fn start(store: &Store, hc: &HcBots, def: &BotDef, template: &str, with: &St
     if let Some(text) = first_message(template, with.task) {
         hc.send(&address, &text).map_err(|e| fail("send_failed", format!("{name} is ready at {address}, but the first message: {e}")))?;
     }
-    Ok(Started { address, warnings })
+    let mut warnings = warnings;
+    let handoffs = crate::handoff::deliver(&with.home, store, hc, name).unwrap_or_else(|e| {
+        warnings.push(format!("its waiting handoffs were not looked at: {e}"));
+        Vec::new()
+    });
+    Ok(Started { address, warnings, handoffs })
 }
 
 /// Looks at a starting terminal until it is ready, needs a person, ends,

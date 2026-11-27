@@ -13,6 +13,7 @@ pub mod check_exec;
 pub mod config;
 pub mod daemon;
 pub mod firing;
+pub mod handoff;
 pub mod hc;
 pub mod home;
 pub mod keychain;

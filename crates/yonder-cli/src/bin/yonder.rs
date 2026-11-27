@@ -16,7 +16,7 @@ use yonder_core::keychain::{self, Keychain, KeychainError};
 use yonder_core::redact::excerpt;
 use yonder_core::when::{self, Rule};
 use yonder_core::bot::{self, Bot, BotError, Level};
-use yonder_core::{NewReminder, Store, StoreError, check_exec, daemon, home, service, store, sync};
+use yonder_core::{NewReminder, Store, StoreError, check_exec, daemon, handoff, home, service, store, sync};
 use yonder_model::{BotDef, BotKind, Reminder, Task, TaskState};
 
 /// What agents are told about Yonder: `yonder manual`, and the end of the
@@ -53,6 +53,9 @@ enum Cmd {
     Bot(BotCmd),
     /// How agents work with Yonder, for them to read.
     Manual,
+    /// Hand a bot what a conversation elsewhere knows (read from stdin),
+    /// for it to merge into its MEMORY.md; delivered once, when it is free.
+    Handoff(HandoffArgs),
     /// The end of yonderd's log and the bots' log (logs/ in Yonder's home).
     Log {
         /// Only lines naming this bot, and the end of its live terminal.
@@ -171,6 +174,32 @@ enum BotCmd {
         #[arg(long)]
         dry_run: bool,
     },
+}
+
+#[derive(Args)]
+#[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
+struct HandoffArgs {
+    #[command(subcommand)]
+    cmd: Option<HandoffCmd>,
+    /// The bot it is for.
+    #[arg(required = true)]
+    name: Option<String>,
+    /// How it came: run by the conversation itself, or pasted by the owner.
+    #[arg(long, default_value = "command", value_parser = ["command", "paste"])]
+    via: String,
+}
+
+#[derive(Subcommand)]
+enum HandoffCmd {
+    /// The handoffs, newest first: all, or one bot's.
+    Ls {
+        name: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Words to give a conversation elsewhere, so it writes a handoff for a
+    /// bot and sends it (or has the owner paste it).
+    Prompt { name: String },
 }
 
 #[derive(Subcommand)]
@@ -356,6 +385,7 @@ fn run(cmd: Cmd) -> Result<(), Fail> {
         Cmd::Ctl(CtlCmd::ServicePlist) => return service_plist(),
         Cmd::Bot(cmd) => return bot_cmd(cmd),
         Cmd::Log { bot, lines } => return show_log(bot, lines),
+        Cmd::Handoff(args) => return handoff_cmd(args),
         Cmd::Manual => {
             print!("{MANUAL}");
             return Ok(());
@@ -383,7 +413,7 @@ fn run(cmd: Cmd) -> Result<(), Fail> {
         Cmd::Task(TaskCmd::Cancel { id }) => print_task(&store.close_task(&id, TaskState::Cancelled, now)?),
         Cmd::Remind(RemindCmd::Set(args)) => set_reminder(&mut store, args, now)?,
         Cmd::Ctl(CtlCmd::Status { json }) => status(&store, json)?,
-        Cmd::Ctl(CtlCmd::ServicePlist) | Cmd::Bot(_) | Cmd::Manual | Cmd::Log { .. } => unreachable!("handled before the ledger opens"),
+        Cmd::Ctl(CtlCmd::ServicePlist) | Cmd::Bot(_) | Cmd::Manual | Cmd::Log { .. } | Cmd::Handoff(_) => unreachable!("handled before the ledger opens"),
         Cmd::Remind(RemindCmd::Ls { all, json }) => {
             let reminders = store.reminders(all)?;
             if json {
@@ -778,6 +808,151 @@ fn print_started(name: &str, started: &botrun::Started) {
         eprintln!("warning: {name}: {w}");
     }
     println!("{name}: ready at {}", started.address);
+    for (id, outcome) in &started.handoffs {
+        println!("{}", handoff_line(id, name, outcome));
+    }
+}
+
+/// `H-0001: delivered to <bot> at <address>`, `... waiting — <why>`, or lost.
+fn handoff_line(id: &str, bot: &str, outcome: &handoff::Outcome) -> String {
+    match outcome {
+        handoff::Outcome::Delivered(to) => format!("{id}: delivered to {bot} at {to}"),
+        handoff::Outcome::Waiting(why) => format!("{id}: waiting — {why}"),
+        handoff::Outcome::Lost(why) => format!("{id}: lost — {why}; it may have arrived, so it is not sent again"),
+    }
+}
+
+/// A valid, persistent bot: what takes handoffs.
+fn handoff_bot(bots: &std::path::Path, name: &str) -> Result<Bot, Fail> {
+    let b = bot::find(bots, name)?;
+    if valid(&b)?.kind == BotKind::Oneoff {
+        return Err(Fail { code: "handoff_oneoff", msg: format!("{name} is oneoff: it keeps no memory to hand over to"), hint: "hand it to a persistent bot" });
+    }
+    Ok(b)
+}
+
+fn handoff_cmd(args: HandoffArgs) -> Result<(), Fail> {
+    let home = store::home_dir()?;
+    let bots = home::bots_dir(&home);
+    match (args.cmd, args.name) {
+        (Some(HandoffCmd::Ls { name, json }), _) => {
+            if let Some(name) = &name {
+                bot::find(&bots, name)?;
+            }
+            let all = match Store::open_read_only(&home)? {
+                Some(store) => store.handoffs(name.as_deref())?,
+                None => Vec::new(),
+            };
+            if json {
+                let items: Vec<_> = all
+                    .iter()
+                    .map(|h| {
+                        serde_json::json!({
+                            "id": h.id, "bot": h.bot, "state": h.state, "via": h.via, "created_at": h.created_at,
+                            "delivered_at": h.delivered_at, "address": h.address, "reason": h.reason,
+                            "bytes": h.body.len(), "first_line": first_line_of(&h.body),
+                        })
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&items).expect("plain data"));
+                return Ok(());
+            }
+            if all.is_empty() {
+                println!("no handoffs");
+            }
+            for h in &all {
+                let why = h.reason.as_ref().filter(|_| h.state != "delivered").map(|r| format!("  ({r})")).unwrap_or_default();
+                println!("{}  {:<16}  {:<9}  {}  {:<7}  {:>9}  {}{why}", h.id, h.bot, h.state, local(&h.created_at), h.via, size(h.body.len()), first_line_of(&h.body));
+            }
+        }
+        (Some(HandoffCmd::Prompt { name }), _) => {
+            let b = handoff_bot(&bots, &name)?;
+            let def = valid(&b)?;
+            let yonder = std::env::current_exe().and_then(|p| p.canonicalize()).map_err(|e| Fail {
+                code: "no_program",
+                msg: format!("where yonder runs from: {e}"),
+                hint: "run yonder by its path",
+            })?;
+            print!("{}", handoff_prompt(&name, &def.description, &yonder.display().to_string()));
+        }
+        (None, Some(name)) => {
+            use std::io::Read;
+            let b = handoff_bot(&bots, &name)?;
+            let mut input = Vec::new();
+            std::io::stdin().take(handoff::MAX_HANDOFF as u64 + 1).read_to_end(&mut input).map_err(|e| Fail {
+                code: "bad_input",
+                msg: format!("reading the handoff: {e}"),
+                hint: "pipe it in on stdin",
+            })?;
+            let body = handoff::body_of(&input).map_err(|r| match r {
+                handoff::Refused::Empty => Fail { code: "handoff_empty", msg: "the handoff on stdin is empty".into(), hint: "pipe the handoff in on stdin" },
+                handoff::Refused::TooLarge(_) => Fail {
+                    code: "handoff_too_large",
+                    msg: format!("the handoff is more than {} KiB", handoff::MAX_HANDOFF / 1024),
+                    hint: "write the details in a file and give only its path in the handoff",
+                },
+                handoff::Refused::NotText => Fail { code: "bad_input", msg: "the handoff is not UTF-8 text".into(), hint: "give it as UTF-8 text" },
+            })?;
+            let mut store = Store::open(&home)?;
+            let h = store.add_handoff(&b.name, &body, &args.via, when::now())?;
+            let tried = handoff::deliver(&home, &store, &hc_bots()?, &b.name)?;
+            // Older ones sent (or lost) on the way first, then this one.
+            for (id, outcome) in tried.iter().filter(|(id, o)| *id != h.id && !matches!(o, handoff::Outcome::Waiting(_))) {
+                println!("{}", handoff_line(id, &b.name, outcome));
+            }
+            let mine = tried.into_iter().find(|(id, _)| *id == h.id).map_or(handoff::Outcome::Waiting("not tried".into()), |(_, o)| o);
+            println!("{}", handoff_line(&h.id, &b.name, &mine));
+        }
+        (None, None) => unreachable!("clap asks for a name or a subcommand"),
+    }
+    Ok(())
+}
+
+/// A handoff's first non-blank line, at most 60 characters.
+fn first_line_of(body: &str) -> String {
+    let line = body.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
+    let mut cut: String = line.chars().take(60).collect();
+    if line.chars().count() > 60 {
+        cut.push('…');
+    }
+    cut
+}
+
+fn size(bytes: usize) -> String {
+    if bytes < 1024 { format!("{bytes} B") } else { format!("{:.1} KiB", bytes as f64 / 1024.0) }
+}
+
+/// What a conversation elsewhere is told, to hand `name` what it knows.
+fn handoff_prompt(name: &str, description: &str, yonder: &str) -> String {
+    format!(
+        "Please write a handoff for {name}, an agent of mine that runs in Yonder: {description}
+{name} keeps its long-term notes in its own MEMORY.md. It will read your handoff once, merge what will matter later into MEMORY.md, and make tasks for follow-ups. It does not reply, and it cannot see this conversation, so write what it needs to carry on.
+
+Write, as plain text (Markdown is fine), at most 200 KiB:
+- Background and the goal.
+- Decisions made, and why.
+- Work in progress: what is done, what is next.
+- Open questions.
+- My preferences you have learned.
+- Paths of the files that matter, and where the record of this conversation is kept.
+
+Leave out:
+- Secrets: passwords, API keys, tokens, private keys. Say where they are kept instead, if that matters.
+- Whole conversations or long logs: give their paths instead.
+
+If you can run commands here, send it yourself, once (no line of it may be just EOF):
+
+{yonder} handoff {name} <<'EOF'
+<the handoff>
+EOF
+
+It prints H-0001: delivered to {name} ..., or H-0001: waiting (it goes when {name} is free). Either way it is done: do not send it again.
+
+If you cannot run commands (a chat in a web page), write only the handoff text, and I will paste it into:
+
+{yonder} handoff {name} --via paste
+"
+    )
 }
 
 fn config() -> Result<Config, Fail> {

@@ -389,6 +389,15 @@ impl HcBots {
         Ok(first_line(&out))
     }
 
+    /// Sends `text`, telling (as the lead's sends do) whether it surely
+    /// did not arrive (`NotSent`: hc refused before typing) or may have.
+    pub fn send_once(&self, address: &str, text: &str) -> Result<(), SendError> {
+        let mut command = Command::new(&self.bin);
+        command.args(["send", address, text]);
+        let run = capture(command, SEND_TIMEOUT, MAX_REPLY, self.stop, true);
+        outcome("send", &self.bin, run).map(drop)
+    }
+
     pub fn send(&self, address: &str, text: &str) -> Result<(), HcFail> {
         self.call(&["send", address, text], None, SEND_TIMEOUT).map(drop)
     }
