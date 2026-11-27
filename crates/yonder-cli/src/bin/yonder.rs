@@ -53,6 +53,15 @@ enum Cmd {
     Bot(BotCmd),
     /// How agents work with Yonder, for them to read.
     Manual,
+    /// The end of yonderd's log and the bots' log (logs/ in Yonder's home).
+    Log {
+        /// Only lines naming this bot, and the end of its live terminal.
+        #[arg(long)]
+        bot: Option<String>,
+        /// How many lines of each.
+        #[arg(long, default_value_t = 50)]
+        lines: usize,
+    },
 }
 
 #[derive(Subcommand)]
@@ -107,6 +116,35 @@ enum BotCmd {
     /// Stop what a ready bot is doing now (its stop key); its terminal and
     /// session stay.
     Stop { name: String },
+    /// End a bot's terminal (ctrl+c, then hc kill; kept, not removed) and
+    /// keep it from starting until resumed. Its session stays.
+    Pause { name: String },
+    /// Clear a bot's pause and start it, resuming its session.
+    Resume { name: String },
+    /// Start a bot afresh: end its terminal, forget its session and pause,
+    /// start it without one and send it a recap of its MEMORY.md.
+    Reset {
+        name: String,
+        /// It cannot be undone: say so.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Remove a bot that is not running: its directory goes to
+    /// bots/.trash/, the ledger and keychain forget it. Where it works is
+    /// left alone.
+    Rm {
+        name: String,
+        /// It cannot be undone here: say so.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// What to paste when asking for help with a bot: versions, its fields,
+    /// state, which env values are set (never the values), its files.
+    Diagnostics {
+        name: String,
+        #[arg(long)]
+        json: bool,
+    },
     /// The session a bot resumes when started: show it, set it, or --clear it.
     Session {
         name: String,
@@ -317,6 +355,7 @@ fn run(cmd: Cmd) -> Result<(), Fail> {
     let cmd = match cmd {
         Cmd::Ctl(CtlCmd::ServicePlist) => return service_plist(),
         Cmd::Bot(cmd) => return bot_cmd(cmd),
+        Cmd::Log { bot, lines } => return show_log(bot, lines),
         Cmd::Manual => {
             print!("{MANUAL}");
             return Ok(());
@@ -344,7 +383,7 @@ fn run(cmd: Cmd) -> Result<(), Fail> {
         Cmd::Task(TaskCmd::Cancel { id }) => print_task(&store.close_task(&id, TaskState::Cancelled, now)?),
         Cmd::Remind(RemindCmd::Set(args)) => set_reminder(&mut store, args, now)?,
         Cmd::Ctl(CtlCmd::Status { json }) => status(&store, json)?,
-        Cmd::Ctl(CtlCmd::ServicePlist) | Cmd::Bot(_) | Cmd::Manual => unreachable!("handled before the ledger opens"),
+        Cmd::Ctl(CtlCmd::ServicePlist) | Cmd::Bot(_) | Cmd::Manual | Cmd::Log { .. } => unreachable!("handled before the ledger opens"),
         Cmd::Remind(RemindCmd::Ls { all, json }) => {
             let reminders = store.reminders(all)?;
             if json {
@@ -601,41 +640,84 @@ fn bot_cmd(cmd: BotCmd) -> Result<(), Fail> {
         BotCmd::Start { name, task, cwd } => {
             let b = bot::find(&bots, &name)?;
             let def = valid(&b)?;
-            let template = b.files.iter().find(|(f, _)| *f == "template.md").map(|(_, p)| std::fs::read_to_string(p)).transpose().map_err(|e| Fail {
-                code: "home",
-                msg: format!("reading {name}'s template.md: {e}"),
-                hint: "check its permissions",
-            })?;
+            let template = template_of(&b)?;
             let store = Store::open(&home)?;
-            let config = config()?;
-            let with = StartWith {
-                task: task.as_deref(),
-                cwd: cwd.as_deref(),
-                yonder: std::env::current_exe().and_then(|p| p.canonicalize()).map_err(|e| Fail {
-                    code: "no_program",
-                    msg: format!("where yonder runs from: {e}"),
-                    hint: "run yonder by its path",
-                })?,
-                home: home.clone(),
-                service: std::env::var("YONDER_KEYCHAIN_SERVICE").ok().filter(|s| !s.is_empty()),
-                user_home: std::env::var_os("HOME"),
-                here: std::env::current_dir().unwrap_or_default(),
-                timeout: std::time::Duration::from_secs(config.bot.start_timeout_secs),
-                poll: std::time::Duration::from_secs(1),
-            };
-            let started = botrun::start(&store, &hc_bots()?, def, template.as_deref().unwrap_or(""), &with).map_err(bot_fail)?;
-            for w in &started.warnings {
-                eprintln!("warning: {name}: {w}");
-            }
-            println!("{name}: ready at {}", started.address);
+            let with = StartWith { task: task.as_deref(), cwd: cwd.as_deref(), ..start_with(&home)? };
+            let started = botrun::start(&store, &hc_bots()?, def, &template, &with).map_err(bot_fail)?;
+            print_started(&name, &started);
         }
         BotCmd::Status { name, json } => bot_status(&home, &bots, name, json)?,
         BotCmd::Stop { name } => {
             bot::find(&bots, &name)?;
             let store = Store::open(&home)?;
-            let (address, outcome) = botrun::stop(&store, &hc_bots()?, &name, config()?.bot.start_timeout_secs).map_err(bot_fail)?;
+            let (address, outcome) = botrun::stop(&home, &store, &hc_bots()?, &name, config()?.bot.start_timeout_secs).map_err(bot_fail)?;
             println!("{name}: interrupted at {address} (hc says: {outcome})");
         }
+        BotCmd::Pause { name } => {
+            bot::find(&bots, &name)?;
+            let store = Store::open(&home)?;
+            match botrun::pause(&home, &store, &hc_bots()?, &name).map_err(bot_fail)? {
+                botrun::Paused::Already => println!("{name}: already paused"),
+                botrun::Paused::Now(ended) if ended.is_empty() => println!("{name}: paused (it was not running); its session stays"),
+                botrun::Paused::Now(ended) => println!("{name}: paused; ended {} (kept for hc read); its session stays", ended.join(", ")),
+            }
+        }
+        BotCmd::Resume { name } => {
+            let b = bot::find(&bots, &name)?;
+            let def = valid(&b)?;
+            let template = template_of(&b)?;
+            let store = Store::open(&home)?;
+            let started = botrun::resume(&store, &hc_bots()?, def, &template, &start_with(&home)?).map_err(bot_fail)?;
+            print_started(&name, &started);
+        }
+        BotCmd::Reset { name, yes } => {
+            let b = bot::find(&bots, &name)?;
+            let def = valid(&b)?;
+            if !yes {
+                return Err(Fail {
+                    code: "confirm_needed",
+                    msg: format!("reset ends {name}'s terminal and forgets its session for good"),
+                    hint: "add --yes",
+                });
+            }
+            let template = template_of(&b)?;
+            let memory = botrun::memory_of(&b.dir).map_err(bot_fail)?;
+            let store = Store::open(&home)?;
+            let (ended, started) = botrun::reset(&store, &hc_bots()?, def, &template, memory.as_deref(), &start_with(&home)?).map_err(bot_fail)?;
+            if !ended.is_empty() {
+                println!("{name}: ended {} (kept for hc read)", ended.join(", "));
+            }
+            print_started(&name, &started);
+            let memory = if memory.is_some() { "the start of its MEMORY.md as it was last pulled (yonder bot sync pulls the newest first)" } else { "no MEMORY.md (none was pulled; yonder bot sync pulls it)" };
+            println!("{name}: new session; sent its template and a recap with {memory}");
+        }
+        BotCmd::Rm { name, yes } => {
+            let b = bot::find(&bots, &name)?;
+            let mut store = Store::open(&home)?;
+            let (hc, timeout) = (hc_bots()?, config()?.bot.start_timeout_secs);
+            if !yes {
+                // Refused when running, even unconfirmed: that is what to fix first.
+                let seen = botrun::observe(&store, &hc, &name, timeout, when::now()).map_err(bot_fail)?;
+                if let Some(run) = seen.run.filter(|r| !r.state.is_final()) {
+                    return Err(Fail { code: "bot_running", msg: format!("{name} runs at {}", run.address), hint: "yonder bot pause it first" });
+                }
+                return Err(Fail {
+                    code: "confirm_needed",
+                    msg: format!("rm moves {} to bots/.trash/ and forgets {name} in the ledger and keychain", b.dir.display()),
+                    hint: "add --yes",
+                });
+            }
+            let removed = botrun::rm(&home, &mut store, &hc, &Keychain::from_env(), &b, timeout).map_err(bot_fail)?;
+            println!("{name}: removed; its directory is now {} (move it back to restore the definition)", removed.to.display());
+            if !removed.forgotten.is_empty() {
+                println!("{name}: keychain entries gone: {}", removed.forgotten.join(" "));
+            }
+            if b.def.is_none() {
+                println!("{name}: its definition could not be read, so no keychain entries were looked for");
+            }
+            println!("{name}: where it worked, and its hc terminals, are left as they were");
+        }
+        BotCmd::Diagnostics { name, json } => diagnostics(&home, &bots, &name, json)?,
         BotCmd::Session { name, id, clear } => {
             bot::find(&bots, &name)?;
             let store = Store::open(&home)?;
@@ -662,6 +744,40 @@ fn bot_cmd(cmd: BotCmd) -> Result<(), Fail> {
         BotCmd::Exec { name } => return bot_exec(&home, &bots, &name),
     }
     Ok(())
+}
+
+/// A bot's template.md, empty if it has none.
+fn template_of(b: &Bot) -> Result<String, Fail> {
+    let read = b.files.iter().find(|(f, _)| *f == "template.md").map(|(_, p)| std::fs::read_to_string(p)).transpose();
+    let text = read.map_err(|e| Fail { code: "home", msg: format!("reading {}'s template.md: {e}", b.name), hint: "check its permissions" })?;
+    Ok(text.unwrap_or_default())
+}
+
+/// What starting a bot needs from here: no task, no `--cwd`.
+fn start_with(home: &std::path::Path) -> Result<StartWith<'static>, Fail> {
+    let config = config()?;
+    Ok(StartWith {
+        task: None,
+        cwd: None,
+        yonder: std::env::current_exe().and_then(|p| p.canonicalize()).map_err(|e| Fail {
+            code: "no_program",
+            msg: format!("where yonder runs from: {e}"),
+            hint: "run yonder by its path",
+        })?,
+        home: home.to_path_buf(),
+        service: std::env::var("YONDER_KEYCHAIN_SERVICE").ok().filter(|s| !s.is_empty()),
+        user_home: std::env::var_os("HOME"),
+        here: std::env::current_dir().unwrap_or_default(),
+        timeout: std::time::Duration::from_secs(config.bot.start_timeout_secs),
+        poll: std::time::Duration::from_secs(1),
+    })
+}
+
+fn print_started(name: &str, started: &botrun::Started) {
+    for w in &started.warnings {
+        eprintln!("warning: {name}: {w}");
+    }
+    println!("{name}: ready at {}", started.address);
 }
 
 fn config() -> Result<Config, Fail> {
@@ -708,13 +824,22 @@ fn bot_status(home: &std::path::Path, bots: &std::path::Path, name: Option<Strin
     for b in &all {
         let seen = botrun::observe(&store, &hc, &b.name, timeout, when::now()).map_err(bot_fail)?;
         let session = store.session(&b.name)?;
+        let paused = store.paused(&b.name)?;
         let recorded = seen.run.as_ref().map(|r| r.state.as_str());
-        let state = if seen.unknown.is_some() { "unknown" } else { recorded.unwrap_or("stopped") };
+        let state = if seen.unknown.is_some() {
+            "unknown"
+        } else if paused.is_some() && seen.run.as_ref().is_none_or(|r| r.state.is_final()) {
+            "paused"
+        } else {
+            recorded.unwrap_or("stopped")
+        };
         let run = seen.run.as_ref();
         if json {
             items.push(serde_json::json!({
                 "name": b.name,
                 "state": state,
+                "paused": paused.is_some(),
+                "paused_at": paused,
                 "recorded_state": recorded,
                 "address": run.map(|r| &r.address),
                 "session": session,
@@ -842,6 +967,140 @@ fn bot_exec(home: &std::path::Path, bots: &std::path::Path, name: &str) -> Resul
     }
     let e = command.exec();
     Err(Fail { code: "exec_failed", msg: format!("{}: {e}", def.harness), hint: "check the harness with yonder bot check --live" })
+}
+
+/// What to paste when asking for help: never an env value, nor what a
+/// file holds.
+fn diagnostics(home: &std::path::Path, bots: &std::path::Path, name: &str, json: bool) -> Result<(), Fail> {
+    let b = bot::find(bots, name)?;
+    let hc = hc_bots()?;
+    let uname = std::process::Command::new("uname").arg("-sr").output().ok().filter(|o| o.status.success());
+    let system = uname.map_or("unknown".into(), |o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+    let store = Store::open_read_only(home)?;
+    let run = match &store {
+        Some(s) => s.bot_run(name)?,
+        None => None,
+    };
+    let get = |f: fn(&Store, &str) -> Result<Option<String>, StoreError>| -> Result<Option<String>, Fail> {
+        Ok(match &store {
+            Some(s) => f(s, name)?,
+            None => None,
+        })
+    };
+    let (paused, session, last_sync) = (get(Store::paused)?, get(Store::session)?, get(Store::last_push)?);
+    let keychain = Keychain::from_env();
+    let env: Vec<(String, &str)> = b.def.iter().flat_map(|d| d.env.iter()).map(|var| {
+        let state = match keychain.has(&keychain::account(name, var)) {
+            Ok(true) => "set",
+            Ok(false) => "not set",
+            Err(_) => "unknown",
+        };
+        (var.clone(), state)
+    }).collect();
+    let memory = std::fs::symlink_metadata(b.dir.join("MEMORY.md")).ok().filter(|m| m.is_file()).map(|m| m.len());
+    let d = b.def.as_ref();
+    let v = serde_json::json!({
+        "yonder": env!("CARGO_PKG_VERSION"),
+        "system": system,
+        "hc": hc.version().unwrap_or_else(|_| "unknown".into()),
+        "name": b.name,
+        "kind": d.map(|d| d.kind.to_string()),
+        "machine": d.map(|d| &d.machine),
+        "cwd": d.and_then(|d| d.cwd.as_ref()),
+        "harness": d.map(|d| &d.harness),
+        "model": d.and_then(|d| d.model.as_ref()),
+        "memory_id": d.and_then(|d| d.memory_id.as_ref()),
+        "paused": paused.is_some(),
+        "paused_at": paused,
+        "run": run.as_ref().map(|r| serde_json::json!({
+            "state": r.state.as_str(), "address": r.address, "reason": r.reason, "started_at": r.started_at,
+        })),
+        "session": session,
+        "env": env.iter().map(|(var, state)| (var.clone(), serde_json::Value::from(*state))).collect::<serde_json::Map<_, _>>(),
+        "memory_md_bytes": memory,
+        "files": b.files.iter().map(|(f, _)| *f).collect::<Vec<_>>(),
+        "last_sync": last_sync,
+        "problems": b.problems.iter().map(|p| format!("{}: {}", p.level.as_str(), p.message)).collect::<Vec<_>>(),
+    });
+    if json {
+        println!("{}", serde_json::to_string_pretty(&v).expect("plain data"));
+        return Ok(());
+    }
+    let text = |key: &str| match &v[key] {
+        serde_json::Value::Null => "-".to_string(),
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    };
+    println!("yonder bot diagnostics {name}");
+    for key in ["yonder", "system", "hc", "name", "kind", "machine", "cwd", "harness", "model", "memory_id", "paused", "paused_at"] {
+        println!("{key:<11} {}", text(key));
+    }
+    match &run {
+        Some(r) => println!("run         {} at {}, started {}{}", r.state, r.address, r.started_at, r.reason.as_ref().map(|r| format!(" ({r})")).unwrap_or_default()),
+        None => println!("run         none"),
+    }
+    println!("session     {}", text("session"));
+    if env.is_empty() {
+        println!("env         none");
+    }
+    for (var, state) in &env {
+        println!("env         {var}: {state}");
+    }
+    println!("MEMORY.md   {}", memory.map_or("none".into(), |n| format!("{n} bytes")));
+    println!("files       {}", b.files.iter().map(|(f, _)| *f).collect::<Vec<_>>().join(" "));
+    println!("last sync   {}", text("last_sync"));
+    if b.problems.is_empty() {
+        println!("problems    none");
+    }
+    for p in &b.problems {
+        println!("problem     {}: {}", p.level.as_str(), p.message);
+    }
+    Ok(())
+}
+
+/// The end of yonderd's log and bots.log; with a bot, only the lines naming
+/// it, and the end of its live terminal's screen.
+fn show_log(bot: Option<String>, lines: usize) -> Result<(), Fail> {
+    if let Some(name) = bot.as_deref().filter(|n| !bot::valid_name(n)) {
+        return Err(BotError::BadName(name.into()).into());
+    }
+    let home = store::home_dir()?;
+    for (title, path) in [("yonderd.log", home.join("logs").join("yonderd.log")), ("bots.log", botrun::bots_log(&home))] {
+        println!("== {title} (last {lines} lines) ==");
+        match std::fs::read(&path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => println!("(none)"),
+            Err(e) => println!("(cannot read it: {e})"),
+            Ok(data) => {
+                let text = String::from_utf8_lossy(&data);
+                let kept: Vec<&str> = text.lines().filter(|l| bot.as_deref().is_none_or(|b| names(l, b))).collect();
+                kept[kept.len().saturating_sub(lines)..].iter().for_each(|l| println!("{l}"));
+            }
+        }
+    }
+    let Some(name) = bot else {
+        return Ok(());
+    };
+    match hc_bots()?.live_labelled(&botrun::label(&name)) {
+        Ok(None) => {}
+        Ok(Some(address)) => {
+            println!("== {address}, {name}'s terminal (last {lines} lines of its screen) ==");
+            let screen = hc_bots()?.screen(&address).unwrap_or_else(|| "(hc read gave nothing)".into());
+            let shown: Vec<&str> = screen.lines().collect();
+            shown[shown.len().saturating_sub(lines)..].iter().for_each(|l| println!("{l}"));
+        }
+        Err(e) => println!("== {name}'s terminal ==\n(hc: {e})"),
+    }
+    Ok(())
+}
+
+/// Whether `line` names `bot` as a whole word: not inside a longer name.
+fn names(line: &str, bot: &str) -> bool {
+    let word = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';
+    line.match_indices(bot).any(|(at, _)| {
+        let before = line[..at].chars().next_back().is_none_or(|c| !word(c));
+        let after = line[at + bot.len()..].chars().next().is_none_or(|c| !word(c));
+        before && after
+    })
 }
 
 /// One line a bot; one bot's trouble never stops the others. A dry run

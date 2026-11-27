@@ -27,6 +27,7 @@
 #                                    kill finishes it
 #   exec [--on M] -- <argv...>       logs ">>> exec --on <M> -- <argv>"; runs
 #     argv here without --on, else exits $FAKE_HC_EXEC_CODE (default 0)
+#   --version                        "hc 0.0.0-fake"
 # Unknown terminals are not_found, exit 3, as hc says it.
 
 log() { printf '%s\n' "$*" >> "${FAKE_HC_LOG:?set FAKE_HC_LOG}"; }
@@ -39,6 +40,9 @@ unknown() {
 term_state() { if [ -e "$(term "$1").finished" ]; then echo finished; else echo live; fi; }
 
 case "$1" in
+--version)
+    echo "hc 0.0.0-fake"
+    ;;
 ls)
     label=
     while [ $# -gt 0 ]; do [ "$1" = --label ] && label=$2; shift; done
@@ -202,7 +206,7 @@ exec)
     ;;
 *)
     # On stderr, as hc puts its errors.
-    echo '{"error":{"kind":"usage","message":"the fake hc knows ls, send, file, run, get, read, interrupt, kill and exec"}}' >&2
+    echo '{"error":{"kind":"usage","message":"the fake hc knows --version, ls, send, file, run, get, read, interrupt, kill and exec"}}' >&2
     exit 2
     ;;
 esac

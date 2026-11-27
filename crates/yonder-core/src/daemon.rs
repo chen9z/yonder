@@ -263,15 +263,29 @@ pub fn lock_path(home: &Path) -> PathBuf {
     home.join("yonderd.lock")
 }
 
+/// How long a taken instance lock is tried again: far longer than a
+/// look by `running_pid`, far shorter than any yonderd runs.
+const LOCK_PATIENCE: Duration = Duration::from_millis(250);
+
 /// Held for as long as this yonderd runs.
 pub struct InstanceLock(#[allow(dead_code)] File);
 
 impl InstanceLock {
     /// The lock, or None if another yonderd holds it.
+    ///
+    /// `running_pid` (`yonder ctl status`) takes the lock shared for a
+    /// moment to ask whether anyone holds it; a yonderd starting just then
+    /// found it taken and gave up as `already_running`, never to run. A
+    /// yonderd holds it for as long as it runs, a look for microseconds:
+    /// so a taken lock is tried again for a while before it counts.
     pub fn acquire(home: &Path) -> std::io::Result<Option<InstanceLock>> {
         let mut file = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(lock_path(home))?;
-        if !flock(&file, libc::LOCK_EX)? {
-            return Ok(None);
+        let until = std::time::Instant::now() + LOCK_PATIENCE;
+        while !flock(&file, libc::LOCK_EX)? {
+            if std::time::Instant::now() >= until {
+                return Ok(None);
+            }
+            std::thread::sleep(Duration::from_millis(5));
         }
         file.set_len(0)?;
         file.rewind()?;
@@ -537,6 +551,25 @@ mod tests {
         drop(lock);
         assert_eq!(running_pid(&dir).unwrap(), None);
         assert!(InstanceLock::acquire(&dir).unwrap().is_some());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A look at the lock while yonderd starts never keeps it from starting.
+    #[test]
+    fn a_look_at_the_lock_does_not_stop_a_start() {
+        let dir = crate::test_dir("lock-look");
+        let path = lock_path(&dir);
+        std::fs::write(&path, "").unwrap();
+        // Someone looking, holding it shared for 50 ms, as running_pid does
+        // for a moment.
+        let looking = File::open(&path).unwrap();
+        assert!(flock(&looking, libc::LOCK_SH).unwrap());
+        let let_go = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            drop(looking);
+        });
+        assert!(InstanceLock::acquire(&dir).unwrap().is_some(), "a start gave up on a look");
+        let_go.join().unwrap();
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

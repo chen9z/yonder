@@ -12,11 +12,11 @@ Yonder 是跑在自己电脑上的个人 agent 底座和客户端。agent 本身
 
 | 部件 | 是什么 | 状态 |
 |---|---|---|
-| `yonder` | 命令行：台账（任务、提醒）、`yonderd` 的状态、bot 的定义和同步；以后加 bot 生命周期和交接 | 已实现一部分 |
+| `yonder` | 命令行：台账（任务、提醒）、`yonderd` 的状态、bot 的定义、同步和生命周期、日志；以后加交接 | 已实现一部分 |
 | `yonderd` | 常驻后台：提醒到点、跑带检查的提醒、把结果投递给主 agent 的终端 | 已实现 |
 | 存储 | SQLite `ledger.db`（WAL） | 已实现 |
 | App | 同一个 NSH app：Android 版和 macOS 版（`Yonder.app`） | 已实现（连电脑、看 agents 和终端） |
-| 自定义 bot | 用户自己定义常驻或一次性的 bot，由 Yonder 起停、同步、交接 | 定义和查看（B1）、同步（B2）、起停和状态（B3a）已实现；其余计划（B3b、B5、B4） |
+| 自定义 bot | 用户自己定义常驻或一次性的 bot，由 Yonder 起停、同步、交接 | 定义和查看（B1）、同步（B2）、起停和状态（B3a）、暂停恢复重置删除诊断和日志（B3b）已实现；其余计划（B5、B4） |
 
 不做：
 
@@ -116,7 +116,7 @@ env         = ["EXAMPLE_API_KEY"] # 可空，只写变量名
 - 别的机器：只经 `crates/yonder-core/src/hc.rs` 的 `HcFiles`：`hc file read --json --on <machine> <路径>` 取 JSON 的 `text`，`hc file write --on <machine> <路径>` 内容走 stdin，每次调用限时 30 秒。`cwd` 的 `~/` 去掉，传相对路径（hc 带 `--on` 时从那台机器的家目录算起）；绝对路径原样传；以 `-` 开头的相对路径前面加 `./`。hc 报 `not_found` 算文件不存在，别的错误记 `failed`，原因只带 hc 的 `kind` 和 `message`（不带 `hint`，hint 里有机器列表）。`hc file write` 会建缺的目录，所以远端的 `cwd` 不存在时照样推得上去，这一点和本机不同。
 - `hc file read` 一次最多给 8 MB，超过的部分截掉却仍退出 0（`last` 小于 `lines`）；Yonder 把这种情况当 `failed`，不拉回半个文件。不是 UTF-8 的文件 hc 报 `not_text`，记 `failed`。
 
-### 2.7 bot 运行（已实现，B3a）
+### 2.7 bot 运行（已实现，B3a、B3b）
 
 代码在 `crates/yonder-core/src/botrun.rs`（流程）、`store.rs`（台账）、`hc.rs` 的 `HcBots`（hc 调用）、`keychain.rs`（钥匙串）。Yonder 自己经 hc 起 bot，不生成、不读 hc 模板。
 
@@ -127,15 +127,16 @@ env         = ["EXAMPLE_API_KEY"] # 可空，只写变量名
 starting --hc get 说 idle 或 done--> ready
 starting --终端结束 / 已知对话框或 blocked / 超时--> failed（reason：exited: code N、needs_attention: …、start_timeout）
 ready --终端结束或不在了（status、start、stop 看到时）--> gone
+starting、ready --bot pause / bot reset 杀掉终端--> gone（reason：paused、reset）（B3b）
 ```
 
 - 每次转换都是 `UPDATE bot_runs … WHERE bot = ? AND address = ? AND state = <来源状态>`（`Store::move_run`），只允许上面这几步；地址不对（更早那次 run 迟到的结果）或已经被别人推进过，就什么都不改。新一次 start 只能覆盖 `failed`、`gone`（`Store::begin_run`），同一行复用。
 - 不会卡在 `starting`：`start` 自己等到出结论；它中途被打断时，下次 `status` / `start` / `stop` 看到 `starting` 超过启动时限再加 10 秒就记 `failed`（`start_timeout`），终端已经结束或不在了也记 `failed`。hc 调不通时不改台账。
-- 终端从不由 Yonder 杀掉：失败的留给人去 `hc attach` 看。
+- 只有 `bot pause` 和 `bot reset` 杀终端（`hc kill`，不 `hc rm`），别的情况终端都不杀：失败的留给人去 `hc attach` 看。
 
 **`yonder bot start <名字> [--task <文字>] [--cwd <目录>]`**：
 
-1. 定义要合法。oneoff 必须给 `--cwd` 和 `--task`，persistent 不接受 `--cwd`（用 `bot.toml` 的 `cwd`），否则 `bad_input`。远端 bot 有 `env` 就报 `env_remote_unsupported`，不起。
+1. 定义要合法。暂停着的报 `bot_paused`（`<名字> is paused; yonder bot resume <名字> starts it`），退出 1，什么 hc 调用都不做（B3b）。oneoff 必须给 `--cwd` 和 `--task`，persistent 不接受 `--cwd`（用 `bot.toml` 的 `cwd`），否则 `bad_input`。远端 bot 有 `env` 就报 `env_remote_unsupported`，不起。
 2. 启动检查（同 `bot check --live`）有 error 就报 `start_check`，不起。
 3. 先按 hc 的实际情况推进旧记录；`hc ls --json --label yonder.bot=<名字>` 有活着的终端，或记录还是 `starting` / `ready`，报 `already_running`，不起。hc 的 `--name` 在活着的终端里唯一，两个 start 同时跑时第二个的 `hc run` 会失败。
 4. `hc run --bg --json --name <名字> --label yonder.bot=<名字> --outlive-parent --keep [--on <machine>] --cwd <cwd> -- <argv>`，记 `starting`。cwd：本机是绝对路径（`~/` 按 `$HOME` 展开，oneoff 的相对 `--cwd` 从当前目录算）；远端去掉 `~/` 传相对路径（hc 带 `--on` 时从那台机器的家目录算起，实测过；hc 不展开 `~`，目录不存在时 `hc run` 直接报 `spawn_failed`），绝对路径原样传，其他相对写法报 `bad_input`。
@@ -165,6 +166,37 @@ ready --终端结束或不在了（status、start、stop 看到时）--> gone
 
 **`yonder bot stop <名字>`**：只叫停当前这一轮：`hc interrupt <地址>`（按一次 ctrl+c），不关终端、不改会话，输出 hc 看到的结果（实测多半是 `unknown`）。没有 `ready` 的记录、或终端已经结束，报 `not_running`（顺便记 `gone`）。
 
+**暂停**（B3b）：是 owner 设的状态，和 run 分开存：台账 `bot_pauses` 表（迁移第 5 步），一个 bot 一行 `bot`、`paused_at`。只有 `bot pause` 设它，只有 `bot resume`、`bot reset`、`bot rm` 清它；run 的状态变化、`status` 的观察、重启都不碰它。暂停着时 `bot status` 的 state 显示 `paused`（run 是 `starting`、`ready` 时仍显示 run 的状态，正常不会出现），`--json` 多 `paused`、`paused_at`。
+
+**`yonder bot pause <名字>`**（B3b）：已经暂停：输出 `<名字>: already paused`，退出 0，不调 hc。否则把它的终端都结束：当前 run 不是终态时它的地址，加上 `hc ls --label yonder.bot=<名字>` 里活着的（最多 8 个），每个先 `hc interrupt`，还活着就 `hc kill`（终端留着，可以 `hc read`，不 `hc rm`）；当前 run 记 `gone`、reason `paused`；会话 id 保留；记成已暂停。没在跑也能暂停，只记标记。hc 出错时报 `hc`，不记暂停。
+
+**`yonder bot resume <名字>`**（B3b）：没暂停报 `not_paused`，退出 1。否则清掉暂停标记，然后和 `bot start` 一样起（带记着的会话）。起失败时暂停标记仍然清掉（run 是 `failed`，能再 `start`），错误信息末尾写明 `no longer paused`。
+
+**`yonder bot reset <名字> --yes`**（B3b）：丢掉会话重新开始。没有 `--yes` 报 `confirm_needed`，退出 1，什么都不改、不调 hc。oneoff 报 `bad_input`（没有会话可丢）。有 `--yes`：像 `pause` 那样结束终端（reason `reset`），清掉会话 id 和暂停标记，再像 `bot start` 那样起（不带会话参数），第一条消息是 `template.md` 正文 + 空行 + 近况包：
+
+```text
+[yonder kind=recap bot=<名字>]
+Your session was reset; you start fresh. The start of your MEMORY.md:
+<payload untrusted="true" source="memory">
+<bots/<名字>/MEMORY.md 的前 4096 字节，按 UTF-8 边界截断（截在半个字符上就丢掉那半个），去掉末尾空白；没有这个文件就写 (none)>
+</payload>
+```
+
+头和正文照 2.4 转义（`botrun::recap`）。`MEMORY.md` 用 `bot sync` 上次拉回的那份（符号链接不跟随），输出里提示先 `bot sync` 能拿到最新的。起失败时会话已经清了，错误信息里写明。
+
+**`yonder bot rm <名字> --yes`**（B3b）：先按 hc 推进记录；run 还是 `starting` / `ready`，或 hc 上有活着的带它 label 的终端，报 `bot_running`（提示先 `pause`），退出 1（没有 `--yes` 时也先查这个）。没有 `--yes` 报 `confirm_needed`。有 `--yes`：
+
+- 把 `bots/<名字>/` 整个改名到 `bots/.trash/<名字>-<UTC 时间，如 20261127T012841Z>/`（重名时末尾加 `-2`、`-3`…），不删，手工挪回来就能找回定义；`.trash` 以 `.` 开头，`bot ls` 本来就跳过；没有就建（0700），是符号链接或不是目录时报 `home`、不挪。
+- 台账删掉它的 run、会话、暂停标记、同步记录（`Store::forget_bot`，一个事务）。
+- 删掉钥匙串里它 `env` 每个变量的条目（`delete-generic-password`，不存在的跳过）；定义读不出来时不知道有哪些变量，不删，输出写明。
+- 不碰它的工作目录，不动 hc 终端。输出写明挪到了哪。
+
+**`yonder bot diagnostics <名字> [--json]`**（B3b）：一段可以直接贴出去的纯文本，每行 `键 值`：yonder 版本、系统（`uname -sr`）、hc 版本（`hc --version` 的第一行，拿不到写 `unknown`）、bot 的 name/kind/machine/cwd/harness/model/memory_id、是否暂停和时间、run 的 state/address/started_at/reason（台账里记的，不去问 hc）、会话 id、`env` 每个变量 `set` / `not set`（`find-generic-password` 不带 `-w`，输出丢掉，只看退出码；钥匙串出错写 `unknown`）、`MEMORY.md` 的字节数、有哪些定义文件、上次同步（`bot_pushes` 里最近的推送时间）、`bot check` 的 problems。不含任何 env 值和文件内容。台账不存在时不建。`--json` 是同样内容的一个对象。
+
+**bot 日志**（B3b）：`<home>/logs/bots.log`，bot 的每一步一行：`<UTC> <名字> <事件> [address=…] [reason=…]`，事件是 `start`（`hc run` 成功后）、`ready`、`failed`（reason 是错误码）、`stop`、`pause`、`resume`、`reset`、`rm`；`pause`、`reset` 的 address 是结束的终端（逗号隔开，没有就不写）。值里的空白换成 `_`，最多 200 字。不写 env 值、不写消息正文。文件 0600，超过 1 MiB 时改名成 `bots.log.1`。写不进去不让命令失败（`botrun::log_event`）。
+
+**`yonder log [--bot <名字>] [--lines <N>]`**（B3b）：打印 `logs/yonderd.log` 和 `logs/bots.log` 末尾各 N 行（默认 50），每段一行标题 `== yonderd.log (last N lines) ==`；文件不存在写 `(none)`。`--bot X`：两个文件都只留按整词提到 X 的行（前后不是字母、数字、`-`、`_`，所以 `trainer` 不匹配 `trainer-2`），再附上它活着的终端（`hc ls --label`）屏幕最后 N 行（`hc read`），段标题写地址；没有活着的终端就不附，hc 出错写一行 `(hc: …)`。
+
 **`yonder bot check --live [<名字>]`**：B1 的校验之后再查：机器连得上、`cwd` 存在（oneoff 的 cwd 每次 start 才给，这里不查）、harness 是终端那边的登录 shell 找得到的程序。本机远端都是一次 `hc exec [--on <machine>] -- /bin/sh -c 'cd -- "$1" || exit 10; "${SHELL:-/bin/sh}" -lic '\''command -v "$1" > /dev/null 2>&1'\'' yonder-bot "$2" || exit 11' yonder-bot <cwd> <harness>`（B3a.1 起；路径和 harness 作为参数传，不拼进脚本），环境和 `bot start` 起 harness 时一样；本机的 cwd 仍直接查（传给 hc exec 的是 `.`）。按退出码和 hc 的错误把原因归到机器、cwd 或 harness。B3a 时本机用的是 `yonder` 进程自己的 PATH，查得到而终端里找不到，这个漏洞 B3a.1 修了。harness 登录了没有不查。只有这类问题时报 `start_check`，定义本身有错仍报 `bot_invalid`。
 
 ## 3. 命令
@@ -193,15 +225,15 @@ ready --终端结束或不在了（status、start、stop 看到时）--> gone
 | `yonder bot env set` | 已实现 | 把一个声明过的 env 的值写进登录钥匙串（`-X` hex），从 stdin 读，不回显，只写不读；见 2.7 |
 | `yonder bot start` | 已实现 | `[--task] [--cwd]`：启动检查，`hc run --bg` 起 bot，等就绪（已知对话框立即失败、不按键），发第一条；env 经 `bot exec` 从钥匙串注入；见 2.7 |
 | `yonder bot stop` | 已实现 | `hc interrupt` 只中断这一轮，不关终端、不改会话；没在跑报 `not_running` |
-| `yonder bot pause` | 计划（B3b） | 暂停：不再给它投递 |
-| `yonder bot resume` | 计划（B3b） | 恢复投递 |
-| `yonder bot reset` | 计划（B3b） | 丢掉会话，用近况包（含 `MEMORY.md` 开头）开新会话 |
-| `yonder bot rm` | 计划（B3b） | 删除 bot |
-| `yonder bot status` | 已实现 | 每个 bot 一行：state（`stopped`、`starting`、`ready`、`failed`、`gone`，hc 调不通时 `unknown`）、地址、会话、上次原因；顺手推进记录；`--json` |
+| `yonder bot pause` | 已实现 | 结束它的终端（interrupt + kill，终端留着）、记 `gone`，会话保留，标记暂停；暂停着时 `start` 报 `bot_paused`；已暂停再 pause 输出 `already paused`；见 2.7 |
+| `yonder bot resume` | 已实现 | 清掉暂停标记，像 `start` 一样起（续记着的会话）；没暂停报 `not_paused` |
+| `yonder bot reset` | 已实现 | `--yes`：结束终端、清会话和暂停，开新会话，第一条是模板加近况包（`MEMORY.md` 前 4096 字节，untrusted）；没有 `--yes` 报 `confirm_needed` |
+| `yonder bot rm` | 已实现 | `--yes`：目录挪进 `bots/.trash/<名字>-<UTC>/`，台账和钥匙串条目删掉，工作目录和终端不动；在跑报 `bot_running`，没有 `--yes` 报 `confirm_needed` |
+| `yonder bot status` | 已实现 | 每个 bot 一行：state（`stopped`、`starting`、`ready`、`failed`、`gone`，暂停着 `paused`，hc 调不通时 `unknown`）、地址、会话、上次原因；顺手推进记录；`--json` |
 | `yonder bot session` | 已实现 | `<名字> [<id>] [--clear]`：记下、打印（没有就打印 `none`）或清掉 bot 下次 start 时续的会话 |
 | `yonder bot exec` | 已实现（内部） | hc 终端里跑的：从钥匙串取 env，`exec` harness；缺值报 `env_missing`，不起 |
-| `yonder bot diagnostics` | 计划（B3b） | 一份可以直接贴出去排查的诊断信息，不含密钥 |
-| `yonder log` | 计划（B3b） | 看 yonderd 和 bot 的日志 |
+| `yonder bot diagnostics` | 已实现 | 一份可以直接贴出去排查的纯文本：版本、系统、字段、暂停和 run、会话、env 有没有设（绝不取值）、文件、上次同步、problems；`--json` |
+| `yonder log` | 已实现 | `[--bot <名字>] [--lines N]`：`yonderd.log` 和 `bots.log` 末尾各 N 行（默认 50）；`--bot` 只留提到它的行，再附它活着的终端屏幕 |
 | `yonder handoff` | 计划（B5） | 把别处对话的进展、决定、偏好交给一个 bot：排队、只投一次、有大小上限；bot 自己整理进 `MEMORY.md` |
 | `yonder handoff prompt` | 计划（B5） | 打印一段提示词，贴给别处的对话，让它写出交接内容 |
 | `yonder ui snapshot` | 计划（台账页，暂停） | 给 App 台账页的一次性快照，`--json` |
@@ -209,7 +241,7 @@ ready --终端结束或不在了（status、start、stop 看到时）--> gone
 
 `yonderd` 自己的参数（已实现）：`--once` 跑一轮就退出，`--now <UTC>` 把这一轮当成指定时间（测试和验收用）。
 
-排查 bot 的顺序（`reset`、`diagnostics` 是 B3b）：叫停（`bot stop`）→ 重置（`bot reset`）→ 诊断（`bot diagnostics`）。
+排查 bot 的顺序：叫停（`bot stop`）→ 重置（`bot reset`）→ 诊断（`bot diagnostics`），日志看 `yonder log --bot`。
 
 ## 4. yonderd
 
@@ -220,14 +252,14 @@ ready --终端结束或不在了（status、start、stop 看到时）--> gone
 - **找主 agent**：`hc ls --json --label <lead.label>` 里第一个活着的终端（`lead.label` 默认 `yonder.role=lead`），用 `hc send` 写进去。一条消息最多 256 KiB 的信封，用空行隔开。每次调用 hc 都有时限（`ls` 15 秒，`send` 120 秒）。
 - **hc 的错误怎么算**：hc 退出非 0 时从 stderr 读它的错误 JSON。kind 在 `REFUSED_BEFORE_TYPING`（`not_found`、`machine_unknown`、`invalid_params`、`status_mismatch`）里的算没发出去，留着下轮再发；其他 kind、没有 kind、没有 JSON、被信号杀掉，都算可能送到了，记 `lost`。
 - **本机通知**：`notify.local`（默认开）时到点也用 macOS 通知提示一下。
-- **单实例**：状态目录里的 `yonderd.lock`（flock，内容是 pid）；第二个实例报 `already_running` 退出 1。`--once` 也拿这把锁。
+- **单实例**：状态目录里的 `yonderd.lock`（flock，内容是 pid）；第二个实例报 `already_running` 退出 1。`--once` 也拿这把锁。`yonder ctl status` 查 yonderd 在不在时会短暂拿这把锁的共享锁（微秒级），所以 yonderd 拿锁失败时在 250 毫秒内（`LOCK_PATIENCE`）每 5 毫秒再试一次才算被占（B3b；之前恰好撞上一次查看的 yonderd 会直接报 `already_running`，见 9.1）。
 - **停止**：SIGTERM / SIGINT 后不再开始新的触发、检查和发送，2 秒内退出，退出码 0；发到一半的投递下次启动时记 `lost`。
 - **日志**：状态目录下 `logs/yonderd.log`。
 - **服务**：launchd label `dev.yonder.daemon`（`service.label` 可改），plist 由 `yonder ctl service-plist` 打印。
 
 计划：
 
-- B3b：监视 bot 的终端状态、自动拉起（bot 的运行记录和状态机 B3a 已有，见 2.7，现在只在命令里推进）。
+- 未排期：监视 bot 的终端状态、自动拉起（运行记录和状态机已有，见 2.7，现在只在命令里推进；B3b 没做）。
 - 暂停：锁屏推送、主 agent 离线自动拉起和冷启动近况包、本机 API、IM 网关。
 
 ## 5. 目录
@@ -244,6 +276,8 @@ ready --终端结束或不在了（status、start、stop 看到时）--> gone
 | 配置 | `<home>/config.toml`，没有就全用默认值；示例见 `crates/yonder-core/config.example.toml` |
 | 台账 | `<home>/ledger.db` |
 | yonderd 的锁和日志 | `<home>/yonderd.lock`、`<home>/logs/yonderd.log` |
+| bot 日志 | `<home>/logs/bots.log`（B3b，见 2.7） |
+| 删掉的 bot | `<home>/bots/.trash/<名字>-<UTC>/`（`bot rm`，B3b） |
 | bot 定义 | `<home>/bots/<名字>/` |
 | hc | 配置的 `hc.bin`，没有就从 PATH 找；`YONDER_HC` 优先 |
 
@@ -261,6 +295,7 @@ ready --终端结束或不在了（status、start、stop 看到时）--> gone
         ├── template.md
         ├── AGENTS.md
         └── MEMORY.md      # bot sync 从 bot 工作目录拉回，留 git 历史
+    └── .trash/            # bot rm 挪进来的目录，不删
 ```
 
 bot 的工作目录是 `bot.toml` 里的 `cwd`（可以在别的机器上，经 hc 读写）：Yonder 只往里推 `AGENTS.md`，只从里面拉 `MEMORY.md`，不写别的（见 2.6）。台账多了一张 `bot_pushes` 表，记每个 bot 上次推出去的 `AGENTS.md` 的哈希。
@@ -312,7 +347,7 @@ scripts/check.sh    # clippy 和全部测试
 - 每个 bot 的记忆是它工作目录里的 `MEMORY.md`，由 bot 自己写；Yonder 不替它写。`bot sync` 把它拉回 `~/.yonder/bots/<名字>/`，留 git 历史（已实现，B2；git 提交由用户自己做，Yonder 不跑 git）。
 - 一次性 bot（`kind = "oneoff"`）不写记忆；它在回报里提「经验候选」，由主 agent 决定写到哪。
 - 正在做的事进台账，不进记忆。
-- 冷启动和 `bot reset` 的近况包带上 `MEMORY.md` 的开头（B3b）。`yonder handoff` 交来的内容由 bot 自己整理进 `MEMORY.md`（B5）。
+- `bot reset` 的近况包带上 `MEMORY.md` 的开头（已实现，B3b，见 2.7）；主 agent 冷启动的近况包仍是计划。`yonder handoff` 交来的内容由 bot 自己整理进 `MEMORY.md`（B5）。
 - 不做：记忆体检、每天自动整理、记忆搜索（没有 `yonder memory search`）。
 - Nowledge 只作为可选身份：`bot.toml` 有 `memory_id` 时，起 bot 时带上 `NMEM_AGENT_ID=<memory_id>`，别的不接。Yonder 不依赖 Nowledge，没有它一切照常。
 - `bot sync` 不生成 hc 模板（B2 照此实现）：`bot start` 由 yonder 直接 `hc run` 起 bot（B3a 已实现），模板不再需要；hc 模板目录里原有的软链由用户自己删，Yonder 不碰。
@@ -328,7 +363,7 @@ scripts/check.sh    # clippy 和全部测试
 | B1 | bot 定义格式、`bot new/ls/show/check`、`~/.yonder` 目录 | 已完成 |
 | B2 | `bot sync`、`yonder manual` | 已完成 |
 | B3a | `bot start/status/stop/session/env set`、`bot check --live`、`bot exec`、`bot_runs` 状态机 | 已完成 |
-| B3b | `bot pause/resume/reset/rm/diagnostics`、`yonder log`、监视和自动拉起 | 计划 |
+| B3b | `bot pause/resume/reset/rm/diagnostics`、`yonder log`、`bots.log`、暂停标记（迁移第 5 步） | 已完成（监视和自动拉起没做，未排期） |
 | B5 | `yonder handoff` 和提示词 | 计划 |
 | B4 | App 里的 bot 页 | 计划 |
 
@@ -361,6 +396,8 @@ scripts/check.sh    # clippy 和全部测试
 - bot 起停：本机和远端的 run 参数、`--label yonder.bot=`、会话参数、就绪后发第一条、`already_running`、`stop` 发 `interrupt`、终端没了记 `gone` 和 `not_running`、远端有 env 拒绝、已知对话框和 `blocked` 立即失败不发消息、超时失败、oneoff 要 `--cwd` 和 `--task`、`starting` 卡住后被 `status` 记成 `failed`、hc 调不通时显示 `unknown` 不改台账、远端启动检查归因：`crates/yonder-cli/tests/cli.rs` 的 `bots_start_get_ready_and_stop`、`bots_elsewhere_resume_their_session`、`starts_that_cannot_get_ready_fail_and_say_why`、`a_start_cut_short_is_failed_later`、`oneoff_bots_get_a_place_and_a_task`，`botrun::tests`，`store::tests::runs_move_only_from_where_they_are`、`keeps_sessions_apart_from_runs`，以及 B3a 验收第 3–11 条。这些都用假 hc（`tests/fake-hc.sh`）。
 - 登录 shell 包装：每个参数原样到达（含空格、`$`、引号、反引号、`*`）：`botrun::tests::the_login_shell_gets_each_argument_whole`；只有登录 shell 的 profile 里才在 PATH 上的 harness，`check --live` 找得到（没有那个 profile 时报找不到），`bot start` 起得来、参数原样：`harnesses_are_found_and_run_by_the_login_shell`（测试里 `SHELL=/bin/sh`，profile 经 `$ENV` 读）；model 映射：`botrun::tests::models_go_after_the_session`，B3a.1 验收第 3 条。
 - 真实 hc 起 `pi`（B3a.1 验收第 4–5 条，本机，临时 home，模板为空、不发消息，用完 `hc kill` + `hc rm`）：`bot check --live` 在 hc exec 的登录 shell 里找到 `pi`，退出 0；`bot start` 3 秒内 `ready`，hc 报 `"status":{"app":"pi","state":"idle"}`；`bot status` 是 `ready`。harness 换成不存在的名字时 `check --live` 退出 1。B3a 时同样的起法因为终端 PATH 太短报 127。
+- 暂停、恢复、重置、删除、诊断、日志（B3b）：暂停时 interrupt 再 kill、记 `gone`/`paused`、会话保留、再 pause 不调 hc、暂停着 `start` 报 `bot_paused` 不调 hc、`resume` 续会话和 `not_paused`、`reset` 没 `--yes` 不改东西、有 `--yes` 杀旧终端清会话、新 run 不续会话、第一条带近况包、`diagnostics` 不含文件内容、`rm` 在跑拒绝、挪进 `.trash`、台账忘掉、`log --bot` 按整词：`bots_pause_resume_reset_and_go_to_the_trash`；近况包的转义和 4096 字节按 UTF-8 截断：`botrun::tests::recaps_carry_the_start_of_memory_untrusted`；暂停标记不随 run 变、`forget_bot` 只删这个 bot：`store::tests::pauses_are_the_owners_and_bots_can_be_forgotten`；钥匙串只看有没有、删条目：`keychain::tests`；以及 B3b 验收第 2–7 条（含 env 的 `set`、诊断和日志里没有密钥值、`rm` 删掉测试条目）。都用假 hc。
+- yonderd 偶发起不来（B3a.1 验收时 `yonderd_runs_alone_and_stops_on_sigterm` 报 `yonderd never started`）：原因是锁，不是慢。测试一边循环 `yonder ctl status`，一边等 yonderd 起来；`ctl status` 的 `running_pid` 拿共享锁看有没有人占，yonderd 恰好这时拿独占锁就失败、报 `already_running` 退出，测试等满 10 秒。手工复现：一边死循环 `ctl status`，一边起 yonderd，30 次里 2 次起不来。改成拿锁失败时 250 毫秒内重试（见第 4 节）后 60 次 0 次；`daemon::tests::a_look_at_the_lock_does_not_stop_a_start`（别人拿着共享锁 50 毫秒时 `acquire` 仍成功；把重试时限改成 0 它就失败）。测试的时限没改。
 - env 注入：值从 stdin 进钥匙串（`.test` service）、未声明和保留名拒绝、带换行拒绝、`bot exec` 缺值不起、起起来的进程拿到值和 `NMEM_AGENT_ID`、假 hc 日志里没有值、run 行走 `bot exec`：`env_values_go_from_the_keychain_to_the_bot_only`、`keychain::tests::keeps_and_gives_back_values`（用完删掉条目），B3a 验收第 2–3 条。
 - 真实 hc（0.1.22）上 B3a 时实测（只起自己的 `sh -c 'sleep …'` 临时终端，用完 `hc kill` 加 `hc rm`；没起 codex、pi、claude，没给别的终端发消息）：`run --bg --json` 打印 `{"address","agent","cwd","name","state","turn"}`；`get --json` 的 `status` 对 sh 是 null，`screen` 字段是 `"exact"`（保存方式，不是文字），屏幕文字要 `read --json` 的 `text`；`status.state` 的取值按 `hc schema` 是 idle、working、done、blocked、error；终端结束后 `get` 是 `"state":"finished"`，带 `exit_code`、`reason`；`interrupt --json` 对活着的终端打印 `{"key":"ctrl+c","outcome":"unknown"}` 退出 0（sh 里的 trap 确实收到了 INT），对结束了的报 `finished` 退出 11；`ls --json --label` 只列带这个 label 的；`rm` 打印 `{"removed":…}`；`exec` 不带 `--json` 时退出码就是程序的，带 `--json` 时退出 0、码在 `code` 里、输出 base64。在一台真实远端机器上起过 `sh -c 'pwd; sleep 4'`：`--cwd .`、`--cwd ..` 从那台机器的家目录算起；`--cwd '~'` 和不存在的目录都让 `run` 报 `spawn_failed`。
 - 钥匙串在 hc 终端里能读到：在本机真实 hc 起的 sh 终端里跑 `security find-generic-password -s dev.yonder.bots.test … -w`，拿到了值（条目由 `security` 自己建，用完删掉）；同时看到终端的环境变量名来自 hc core（有 `HOME PATH USER`、`HC_TERMINAL_ID` 等，没有调用者的 `YONDER_HOME`）。
@@ -384,7 +421,9 @@ scripts/check.sh    # clippy 和全部测试
 - 登录交互 shell 没有终端（`hc exec`）时，有的 rc 会报错或等输入：只在本机 zsh 上试过（cindy 的 `hc exec -- zsh -lic 'command -v pi'`，以及 B3a.1 冒烟）。
 - harness 的登录状态：不查。
 - 钥匙串：只在本机、登录着、钥匙串解锁时试过 hc 终端里能读；锁屏或钥匙串锁着时 `bot exec` 会怎样（弹窗还是失败）没试过。条目由 `/usr/bin/security` 建，它在条目的访问列表里；别的程序读会不会弹窗没试过。
-- `hc interrupt` 对真实 harness 的效果：只对 sh 试过，结果总是 `outcome: unknown`。
-- 没有 `--no-notify` / `--no-parent`：`bot start` 在某个 hc 终端里跑时，hc 默认把那个终端当 bot 终端的父，bot 结束时会往父终端打通知；要不要关掉，没定。
+- `hc interrupt` 对真实 harness 的效果：只对 sh 试过，结果总是 `outcome: unknown`。B3b 时在真实 hc 上看到：带 `--keep` 的终端，`interrupt` 之后终端仍是 live（zsh 接上）；`hc kill` 之后 `"state":"finished"`、`"reason":"killed"`，带 `--keep` 也一样。
+- 会话 id 不会自动抓：Yonder 不从 harness 读会话 id，只用 `bot session <名字> <id>` 记下的。所以 `pause` 后 `resume` 能不能接上之前的对话，取决于有没有人记过会话；没记过就是开新会话（和 `start` 一样，没有近况包）。真实 harness 的 `resume` 参数（codex `resume`、pi `--session`、claude `--resume`）没在真实会话上试过能不能接上。
+- `pause` 先 `interrupt` 再立刻 `kill`，中间不等；harness 有没有机会在被杀前存好会话，没看过。
+- `reset` 的近况包只在假 hc 上看过格式；真实 harness 收到后会怎么处理，B3b 冒烟只看到发出去之后它还是 `ready`。
 - `bot sync` 往真实远端机器写 `AGENTS.md`（`hc file write --on`）：没做过，只在本机 `/tmp` 用 `hc file write` 试过输出格式；远端写入的权限、换行、已有文件的属性是否保留都没看过。
 - `hc file write` 是不是原子写（先写临时文件再改名）：没查，远端 `AGENTS.md` 写到一半断了会怎样不知道；下次同步会因为内容既不是上次推的也不是这次要推的而报 `drifted`，要 `--force`。

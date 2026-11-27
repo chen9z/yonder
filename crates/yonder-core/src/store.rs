@@ -14,7 +14,7 @@ use crate::when::{Rule, format_utc};
 
 /// The schema, one step per ledger version; `PRAGMA user_version` says how
 /// many are applied. Only ever append.
-const MIGRATIONS: &[&str] = &[include_str!("schema.sql"), include_str!("schema2.sql"), include_str!("schema3.sql"), include_str!("schema4.sql")];
+const MIGRATIONS: &[&str] = &[include_str!("schema.sql"), include_str!("schema2.sql"), include_str!("schema3.sql"), include_str!("schema4.sql"), include_str!("schema5.sql")];
 
 const TASK_COLS: &str = "id, title, state, source, created_at, updated_at";
 pub(crate) const REMINDER_COLS: &str = "id, content, state, next_fire_at, every_spec, snooze_until, check_cmd, check_hash, \
@@ -172,10 +172,11 @@ impl Store {
     /// Moves `bot`'s run at `address` from `from` to `to`, only if it is
     /// still there and in `from`: a late word about an older run, or one
     /// already moved, changes nothing (false). Only `starting` to `ready`
-    /// or `failed`, and `ready` to `gone`.
+    /// or `failed`, and `ready` to `gone`; `starting` to `gone` too, when
+    /// the owner ends it (`bot pause`, `bot reset`).
     pub fn move_run(&self, bot: &str, address: &str, from: BotRunState, to: BotRunState, reason: Option<&str>, now: i64) -> Result<bool> {
         use BotRunState::*;
-        if !matches!((from, to), (Starting, Ready) | (Starting, Failed) | (Ready, Gone)) {
+        if !matches!((from, to), (Starting, Ready) | (Starting, Failed) | (Ready, Gone) | (Starting, Gone)) {
             return Err(StoreError::WrongState { id: bot.into(), state: from.to_string(), want: "starting, or ready to go" });
         }
         let changed = self.conn.execute(
@@ -200,6 +201,38 @@ impl Store {
             )?,
             None => self.conn.execute("DELETE FROM bot_sessions WHERE bot = ?1", [bot])?,
         };
+        Ok(())
+    }
+
+    /// When the owner paused `bot`, if it is paused.
+    pub fn paused(&self, bot: &str) -> Result<Option<String>> {
+        Ok(self.conn.query_row("SELECT paused_at FROM bot_pauses WHERE bot = ?1", [bot], |r| r.get(0)).optional()?)
+    }
+
+    /// Pauses `bot`; false if it was paused already (kept as it was).
+    pub fn set_paused(&self, bot: &str, now: i64) -> Result<bool> {
+        let added = self.conn.execute("INSERT INTO bot_pauses (bot, paused_at) VALUES (?1, ?2) ON CONFLICT (bot) DO NOTHING", params![bot, format_utc(now)])?;
+        Ok(added == 1)
+    }
+
+    /// No longer paused; false if it was not.
+    pub fn clear_paused(&self, bot: &str) -> Result<bool> {
+        Ok(self.conn.execute("DELETE FROM bot_pauses WHERE bot = ?1", [bot])? == 1)
+    }
+
+    /// When `bot`'s AGENTS.md was last pushed anywhere, if ever.
+    pub fn last_push(&self, bot: &str) -> Result<Option<String>> {
+        Ok(self.conn.query_row("SELECT max(pushed_at) FROM bot_pushes WHERE bot = ?1", [bot], |r| r.get(0))?)
+    }
+
+    /// Forgets all the ledger keeps of `bot`: its run, session, pause and
+    /// pushes, in one transaction.
+    pub fn forget_bot(&mut self, bot: &str) -> Result<()> {
+        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for table in ["bot_runs", "bot_sessions", "bot_pauses", "bot_pushes"] {
+            tx.execute(&format!("DELETE FROM {table} WHERE bot = ?1"), [bot])?;
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -538,6 +571,31 @@ mod tests {
         assert!(s.begin_run("ops", "t72", None, 5).unwrap());
         let run = s.bot_run("ops").unwrap().unwrap();
         assert_eq!((run.address.as_str(), run.state, run.reason, run.started_at.as_str()), ("t72", Starting, None, "1970-01-01T00:00:05Z"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn pauses_are_the_owners_and_bots_can_be_forgotten() {
+        let (mut s, dir) = store("store-pauses");
+        assert_eq!(s.paused("ops").unwrap(), None);
+        assert!(s.set_paused("ops", 0).unwrap());
+        assert!(!s.set_paused("ops", 5).unwrap());
+        assert_eq!(s.paused("ops").unwrap().as_deref(), Some("1970-01-01T00:00:00Z"));
+        // A run's ups and downs leave it alone.
+        assert!(s.begin_run("ops", "t70", None, 1).unwrap());
+        assert!(s.move_run("ops", "t70", BotRunState::Starting, BotRunState::Failed, None, 2).unwrap());
+        assert!(s.paused("ops").unwrap().is_some());
+        assert!(s.clear_paused("ops").unwrap());
+        assert!(!s.clear_paused("ops").unwrap());
+        // Everything about one bot goes, nothing about another.
+        s.set_session("ops", Some("s-1"), 3).unwrap();
+        s.set_paused("ops", 3).unwrap();
+        s.set_pushed("ops", "local:/tmp/example", "aa", 3).unwrap();
+        s.set_session("trainer", Some("s-2"), 3).unwrap();
+        assert_eq!(s.last_push("ops").unwrap().as_deref(), Some("1970-01-01T00:00:03Z"));
+        s.forget_bot("ops").unwrap();
+        assert_eq!((s.bot_run("ops").unwrap(), s.session("ops").unwrap(), s.paused("ops").unwrap(), s.last_push("ops").unwrap()), (None, None, None, None));
+        assert_eq!(s.session("trainer").unwrap().as_deref(), Some("s-2"));
         std::fs::remove_dir_all(dir).unwrap();
     }
 

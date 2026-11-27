@@ -148,10 +148,43 @@ impl Keychain {
         }
     }
 
-    /// Forgets `account`; for tests.
-    #[cfg(test)]
-    fn delete(&self, account: &str) {
-        let _ = Command::new(&self.tool).args(["delete-generic-password", "-s", &self.service, "-a", account]).output();
+    /// Whether a value is kept at `account`, without reading it: `find`
+    /// without `-w` gives the item's attributes, which are thrown away.
+    pub fn has(&self, account: &str) -> Result<bool, KeychainError> {
+        check_word("the keychain service", &self.service)?;
+        check_word("the keychain account", account)?;
+        let login = self.login_keychain()?;
+        let status = Command::new(&self.tool)
+            .args(["find-generic-password", "-s", &self.service, "-a", account, &login])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map_err(|e| KeychainError::Failed(format!("{}: {e}", self.tool.display())))?;
+        match status.code() {
+            Some(0) => Ok(true),
+            Some(NOT_FOUND) => Ok(false),
+            code => Err(KeychainError::Failed(format!("looking for {account}: exit {}", code.unwrap_or(-1)))),
+        }
+    }
+
+    /// Forgets the value at `account`; false if none was kept.
+    pub fn delete(&self, account: &str) -> Result<bool, KeychainError> {
+        check_word("the keychain service", &self.service)?;
+        check_word("the keychain account", account)?;
+        let login = self.login_keychain()?;
+        let status = Command::new(&self.tool)
+            .args(["delete-generic-password", "-s", &self.service, "-a", account, &login])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map_err(|e| KeychainError::Failed(format!("{}: {e}", self.tool.display())))?;
+        match status.code() {
+            Some(0) => Ok(true),
+            Some(NOT_FOUND) => Ok(false),
+            code => Err(KeychainError::Failed(format!("forgetting {account}: exit {}", code.unwrap_or(-1)))),
+        }
     }
 }
 
@@ -195,8 +228,9 @@ mod tests {
     fn keeps_and_gives_back_values() {
         let k = Keychain { service: "dev.yonder.bots.test".into(), tool: TOOL.into() };
         let acct = format!("unit-{}/EXAMPLE_API_KEY", std::process::id());
-        k.delete(&acct);
+        let _ = k.delete(&acct);
         assert_eq!(k.get(&acct), Ok(None));
+        assert_eq!(k.has(&acct), Ok(false));
         for value in ["synthetic-1", "with \"quotes\", a \\ and -X 00 \"x\""] {
             k.set(&acct, value).unwrap();
             assert_eq!(k.get(&acct).unwrap().as_deref(), Some(value));
@@ -204,7 +238,9 @@ mod tests {
         assert_eq!(k.set(&acct, "a\nb").unwrap_err().code(), "bad_value");
         let bad = Keychain { service: "dev.yonder.bots.test x".into(), tool: TOOL.into() };
         assert!(bad.set(&acct, "x").is_err());
-        k.delete(&acct);
+        assert_eq!(k.has(&acct), Ok(true));
+        assert_eq!(k.delete(&acct), Ok(true));
+        assert_eq!(k.delete(&acct), Ok(false));
         assert_eq!(k.get(&acct), Ok(None));
     }
 }

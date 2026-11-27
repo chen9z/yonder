@@ -26,7 +26,11 @@
 //!   `hc read --json <t>`'s `text`.
 //! - `hc interrupt --json <t>` presses ctrl+c and prints
 //!   `{"key":"ctrl+c","outcome":"unknown"}`; a finished terminal is
-//!   `finished`, exit 11.
+//!   `finished`, exit 11. A program that ends on it, in a terminal
+//!   started with `--keep`, is replaced by a login shell: the terminal
+//!   stays live.
+//! - `hc kill --json <t>` ends it for good, `--keep` or not:
+//!   `"state":"finished"`, `"reason":"killed"`.
 //! - `hc exec` without `--json` exits with the program's code and prints
 //!   what it wrote; hc's own failures are its error line (`--json` would
 //!   exit 0 with the code inside).
@@ -367,6 +371,22 @@ impl HcBots {
             Err(e) if matches!(e.kind(), Some("finished" | "not_found")) => Ok(None),
             Err(e) => Err(e),
         }
+    }
+
+    /// Ends its program (hc hangs up, then escalates; with `--keep` too):
+    /// false if it had finished or is not there.
+    pub fn kill(&self, address: &str) -> Result<bool, HcFail> {
+        match self.call(&["kill", "--json", address], None, INTERRUPT_TIMEOUT) {
+            Ok(_) => Ok(true),
+            Err(e) if matches!(e.kind(), Some("finished" | "not_found")) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// `hc --version`'s first line.
+    pub fn version(&self) -> Result<String, HcFail> {
+        let out = self.call(&["--version"], None, LOOK_TIMEOUT)?;
+        Ok(first_line(&out))
     }
 
     pub fn send(&self, address: &str, text: &str) -> Result<(), HcFail> {

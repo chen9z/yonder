@@ -5,7 +5,7 @@ Yonder：跑在自己电脑上的个人 agent 底座。agent 跑在 herdr-core�
 ## 代码地图
 
 - `crates/yonder-model`：共享类型和信封 v1，只依赖 serde、serde_json（Android 也编它）。
-- `crates/yonder-core`：存储（`ledger.db`）、配置、提醒规则、检查执行、投递状态机、hc 调用（`hc.rs`）、bot 定义（`bot.rs`）、bot 同步（`sync.rs`）、bot 起停和运行状态机（`botrun.rs`）、钥匙串里的 bot env（`keychain.rs`）。
+- `crates/yonder-core`：存储（`ledger.db`）、配置、提醒规则、检查执行、投递状态机、hc 调用（`hc.rs`）、bot 定义（`bot.rs`）、bot 同步（`sync.rs`）、bot 起停、暂停、重置、删除、运行状态机和 `bots.log`（`botrun.rs`）、钥匙串里的 bot env（`keychain.rs`）。
 - `crates/yonder-cli`：两个二进制，`yonder`（命令行）和 `yonderd`（常驻后台）；集成测试在 `tests/cli.rs`，假 hc 是 `tests/fake-hc.sh`。
 - `crates/herdc-*`：app 用的 SSH、协议、终端、引擎和测试工具（`herdc-testkit` 起隔离的 hc core）。
 - `app/`：NSH app，独立 workspace，同一份代码出 Android 和 macOS 版；只能依赖 `yonder-model`。

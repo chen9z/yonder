@@ -768,6 +768,86 @@ fn bots_start_get_ready_and_stop() {
 }
 
 #[test]
+fn bots_pause_resume_reset_and_go_to_the_trash() {
+    let l = Ledger::new("bots_pause_resume_reset_and_go_to_the_trash");
+    let trainer = "name = \"trainer\"\ndescription = \"x\"\nkind = \"persistent\"\nmachine = \"gpu-box\"\ncwd = \"~/bots/trainer\"\nharness = \"codex\"\n";
+    bot(&l, "trainer", trainer, Some("hello trainer\n"));
+    let calls = |l: &Ledger| l.sent().lines().filter(|x| x.starts_with(">>> ")).count();
+    // Not running: only marked.
+    assert_eq!(l.ok(&["bot", "pause", "trainer"]), "trainer: paused (it was not running); its session stays\n");
+    assert_eq!(l.ok(&["bot", "pause", "trainer"]), "trainer: already paused\n");
+    assert_eq!(calls(&l), 0);
+    let (code, _, err) = with_env(&l, &["bot", "start", "trainer"], &[]);
+    assert_eq!((code, err.as_str()), (Some(1), "bot_paused: trainer is paused; yonder bot resume trainer starts it\n"));
+    assert_eq!(calls(&l), 0, "a paused bot asks hc nothing");
+    assert!(l.ok(&["bot", "status", "trainer"]).starts_with("trainer           paused "));
+
+    l.ok(&["bot", "session", "trainer", "s-1"]);
+    assert_eq!(l.ok(&["bot", "resume", "trainer"]), "trainer: ready at gpu-box/t70\n");
+    assert!(runs(&l)[0].contains(" codex resume s-1"), "{:?}", runs(&l));
+    let (code, _, err) = with_env(&l, &["bot", "resume", "trainer"], &[]);
+    assert_eq!((code, err.as_str()), (Some(1), "not_paused: trainer is not paused; yonder bot start trainer starts it\n"));
+
+    // Running: ctrl+c, then kill; the session stays.
+    assert_eq!(l.ok(&["bot", "pause", "trainer"]), "trainer: paused; ended gpu-box/t70 (kept for hc read); its session stays\n");
+    assert!(l.sent().contains(">>> interrupt gpu-box/t70\n>>> kill gpu-box/t70\n"), "{}", l.sent());
+    let status: Vec<serde_json::Value> = l.json(&["bot", "status", "trainer", "--json"]);
+    assert_eq!((status[0]["state"].as_str(), status[0]["reason"].as_str(), status[0]["session"].as_str()), (Some("paused"), Some("paused"), Some("s-1")));
+
+    // Reset: confirmed, or nothing changes.
+    std::fs::write(l.0.join("bots/trainer/MEMORY.md"), "mem-head-line\n").unwrap();
+    let before = calls(&l);
+    let (code, _, err) = with_env(&l, &["bot", "reset", "trainer"], &[]);
+    assert_eq!((code, err.as_str()), (Some(1), "confirm_needed: reset ends trainer's terminal and forgets its session for good; add --yes\n"));
+    assert_eq!((calls(&l), l.ok(&["bot", "session", "trainer"]).as_str()), (before, "s-1\n"));
+    let out = l.ok(&["bot", "reset", "trainer", "--yes"]);
+    assert!(out.starts_with("trainer: ready at gpu-box/t71\n"), "{out}");
+    assert_eq!(l.ok(&["bot", "session", "trainer"]), "none\n");
+    assert!(!runs(&l)[1].contains("resume"), "{:?}", runs(&l));
+    let sent = l.sent();
+    let first = sent.split(">>> send to gpu-box/t71\n").nth(1).unwrap();
+    assert!(first.starts_with("hello trainer\n\n[yonder kind=recap bot=trainer]\n"), "{first}");
+    assert!(first.contains("<payload untrusted=\"true\" source=\"memory\">\nmem-head-line\n</payload>"), "{first}");
+
+    // Diagnostics: what is kept, not what files hold.
+    let diag = l.ok(&["bot", "diagnostics", "trainer"]);
+    for want in ["hc          hc 0.0.0-fake\n", "harness     codex\n", "paused      false\n", "run         ready at gpu-box/t71", "MEMORY.md   14 bytes\n", "files       bot.toml template.md MEMORY.md\n"] {
+        assert!(diag.contains(want), "{want:?} in {diag}");
+    }
+    assert!(!diag.contains("mem-head-line") && !diag.contains("hello trainer"), "{diag}");
+    let diag: serde_json::Value = serde_json::from_str(&l.ok(&["bot", "diagnostics", "trainer", "--json"])).unwrap();
+    assert_eq!(diag["run"]["address"], "gpu-box/t71");
+
+    // rm: never while running; confirmed; to the trash, and forgotten.
+    let (code, _, err) = with_env(&l, &["bot", "rm", "trainer", "--yes"], &[]);
+    assert_eq!((code, err.as_str()), (Some(1), "bot_running: trainer runs at gpu-box/t71; yonder bot pause trainer first\n"));
+    l.ok(&["bot", "pause", "trainer"]);
+    let (code, _, err) = with_env(&l, &["bot", "rm", "trainer"], &[]);
+    assert!(code == Some(1) && err.starts_with("confirm_needed: "), "{err}");
+    let out = l.ok(&["bot", "rm", "trainer", "--yes"]);
+    assert!(!l.0.join("bots/trainer").exists());
+    let trash: Vec<_> = std::fs::read_dir(l.0.join("bots/.trash")).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+    assert!(trash.len() == 1 && trash[0].starts_with("trainer-20") && trash[0].ends_with('Z'), "{trash:?}");
+    assert!(out.contains(&format!("bots/.trash/{}", trash[0])), "{out}");
+    assert!(l.0.join("bots/.trash").join(&trash[0]).join("MEMORY.md").is_file());
+    assert_eq!(l.ok(&["bot", "ls"]), format!("no bots in {}\n", l.0.join("bots").display()));
+    bot(&l, "trainer", trainer, None);
+    assert_eq!(l.ok(&["bot", "session", "trainer"]), "none\n", "the ledger forgot it");
+    assert!(l.ok(&["bot", "status", "trainer"]).starts_with("trainer           stopped "));
+
+    // The bots' log: each step, a line; --bot keeps whole words only.
+    bot(&l, "trainer-2", &trainer.replace("\"trainer\"", "\"trainer-2\""), None);
+    l.ok(&["bot", "pause", "trainer-2"]);
+    let log = l.ok(&["log", "--bot", "trainer"]);
+    let events: Vec<&str> = log.lines().filter_map(|x| x.split(' ').nth(2).filter(|_| x.contains(" trainer "))).collect();
+    assert_eq!(events, ["pause", "resume", "start", "ready", "pause", "reset", "start", "ready", "pause", "rm"], "{log}");
+    assert!(log.starts_with("== yonderd.log (last 50 lines) ==\n(none)\n== bots.log (last 50 lines) ==\n"), "{log}");
+    assert!(!log.contains("trainer-2"), "{log}");
+    let all = l.ok(&["log", "--lines", "1"]);
+    assert!(all.ends_with(" trainer-2 pause\n"), "{all}");
+}
+
+#[test]
 fn bots_elsewhere_resume_their_session() {
     let l = Ledger::new("bots_elsewhere_resume_their_session");
     let trainer = "name = \"trainer\"\ndescription = \"x\"\nkind = \"persistent\"\nmachine = \"gpu-box\"\ncwd = \"~/bots/trainer\"\nharness = \"codex\"\nargs = [\"--no-daemon\"]\nmemory_id = \"trainer\"\n";

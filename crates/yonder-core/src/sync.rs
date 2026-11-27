@@ -58,7 +58,7 @@ impl Files for LocalFiles {
 
 /// The regular file at `path`, None if nothing is there; a symbolic link
 /// is not followed, and anything else is not read.
-fn read_file(path: &Path) -> Result<Option<Vec<u8>>, String> {
+pub(crate) fn read_file(path: &Path) -> Result<Option<Vec<u8>>, String> {
     // Without O_NONBLOCK, opening a FIFO would wait for a writer.
     let opened = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path);
     let mut file = match opened {
