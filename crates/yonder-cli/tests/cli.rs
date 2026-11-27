@@ -647,7 +647,7 @@ fn bots_sync_to_where_they_work() {
     std::fs::write(&target, format!("{pushed}hand edit\n")).unwrap();
     let (code, out, err) = sync(&l, &["ops"], &[]);
     assert_eq!((code, out.as_str()), (Some(1), "ops: AGENTS.md drifted; MEMORY.md missing\n"));
-    assert!(err.starts_with("sync_incomplete: ops: AGENTS.md was changed there") && err.lines().count() == 1, "{err}");
+    assert_eq!(err, "sync_incomplete: ops: AGENTS.md was changed there since the last sync; see the lines above; --force writes over a changed AGENTS.md\n");
     assert!(read(&target).contains("hand edit"));
     assert_eq!(sync(&l, &["ops", "--force"], &[]).0, Some(0));
     assert_eq!(read(&target), pushed);
@@ -677,7 +677,7 @@ fn bots_sync_to_where_they_work() {
     let (code, out, err) = sync(&l, &[], &[]);
     assert_eq!(code, Some(1));
     assert_eq!(out, "error: broken: bot.toml line 2: string values must be quoted, expected literal string\nnova: skipped, oneoff\nops: AGENTS.md unchanged; MEMORY.md missing\ntrainer: AGENTS.md unchanged; MEMORY.md unchanged\n");
-    assert!(err.starts_with("sync_incomplete: broken: invalid"), "{err}");
+    assert_eq!(err, "sync_incomplete: broken: invalid; see the lines above\n");
     assert!(sync(&l, &["homelab"], &[]).1.starts_with("error: homelab: no bot homelab"));
     std::fs::remove_dir_all(bots.join("nova")).unwrap();
     std::fs::remove_dir_all(bots.join("broken")).unwrap();

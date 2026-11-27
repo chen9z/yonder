@@ -550,7 +550,7 @@ fn bot_sync(home: &std::path::Path, bots: &std::path::Path, names: Vec<String>, 
     if chosen.is_empty() {
         println!("no bots in {}", bots.display());
     }
-    let mut incomplete = Vec::new();
+    let (mut incomplete, mut any_drifted) = (Vec::new(), false);
     for item in chosen {
         let b = match item {
             Ok(b) => b,
@@ -592,6 +592,7 @@ fn bot_sync(home: &std::path::Path, bots: &std::path::Path, names: Vec<String>, 
         println!("{}", synced.line(&b.name));
         if !synced.complete() {
             let drifted = synced.push == sync::Push::Drifted;
+            any_drifted |= drifted;
             let failed = synced.push == sync::Push::Failed || synced.pull == sync::Pull::Failed;
             let what = match (drifted, failed) {
                 (true, false) => "AGENTS.md was changed there since the last sync",
@@ -607,7 +608,7 @@ fn bot_sync(home: &std::path::Path, bots: &std::path::Path, names: Vec<String>, 
     Err(Fail {
         code: "sync_incomplete",
         msg: incomplete.join("; "),
-        hint: "see the lines above; --force writes over a changed AGENTS.md",
+        hint: if any_drifted { "see the lines above; --force writes over a changed AGENTS.md" } else { "see the lines above" },
     })
 }
 
