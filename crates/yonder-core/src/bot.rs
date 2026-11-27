@@ -345,6 +345,9 @@ pub fn parse(dir_name: &str, text: &str) -> (Option<BotDef>, Vec<Problem>) {
         }
         kind
     });
+    if let Some(cwd) = cwd.as_deref().filter(|c| !c.starts_with('/') && !c.starts_with("~/")) {
+        problems.push(error(format!("cwd {cwd:?} is neither absolute nor under ~/")));
+    }
     if kind == Some(BotKind::Persistent) && cwd.is_none() {
         problems.push(error("a persistent bot needs cwd, where it works".into()));
     }
@@ -428,6 +431,11 @@ mod tests {
         }
         let (_, problems) = parse("ops", "name = \"ops\"\ndescription = \"x\"\nkind = \"persistent\"\nharness = \"pi\"\n");
         assert_eq!(errors(&problems), ["a persistent bot needs cwd, where it works"]);
+        for cwd in ["work/x", "~", "~nova/x", "./x"] {
+            let (def, problems) = parse("trainer", &TRAINER.replace("~/bots/trainer", cwd));
+            assert!(def.is_none(), "{cwd}");
+            assert_eq!(errors(&problems), [format!("cwd {cwd:?} is neither absolute nor under ~/").as_str()]);
+        }
         let (def, problems) = parse("ops", "name = \"ops\"\ndescription = \"x\"\nkind = \"oneoff\"\nharness = \"pi\"\n");
         assert_eq!((def.is_some(), problems.len()), (true, 0));
         let (_, problems) = parse("ops", "name = 3\ndescription = \"\"\nkind = \"oneoff\"\nharness = \"pi\"\nargs = \"-x\"\n");

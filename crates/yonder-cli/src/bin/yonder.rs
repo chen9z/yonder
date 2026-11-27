@@ -5,6 +5,7 @@
 //! and what to do next, such as `check_failed: exit:3; ...`.
 
 use std::process::ExitCode;
+use std::sync::atomic::AtomicBool;
 
 use clap::{Args, Parser, Subcommand};
 use yonder_core::config::Config;
@@ -13,8 +14,15 @@ use yonder_core::hc::Hc;
 use yonder_core::redact::excerpt;
 use yonder_core::when::{self, Rule};
 use yonder_core::bot::{self, Bot, BotError, Level};
-use yonder_core::{NewReminder, Store, StoreError, check_exec, daemon, home, service, store};
+use yonder_core::{NewReminder, Store, StoreError, check_exec, daemon, home, service, store, sync};
 use yonder_model::{BotKind, Reminder, Task, TaskState};
+
+/// What agents are told about Yonder: `yonder manual`, and the end of the
+/// AGENTS.md that `yonder bot sync` pushes.
+const MANUAL: &str = include_str!("../manual.md");
+
+/// hc calls from `yonder` are never stopped early, only timed out.
+static NEVER: AtomicBool = AtomicBool::new(false);
 
 /// How long a check runs if --for does not say, and the most it may say.
 const CHECK_FOR: &str = "7d";
@@ -41,6 +49,8 @@ enum Cmd {
     /// Bots, as defined in bots/ in Yonder's home.
     #[command(subcommand)]
     Bot(BotCmd),
+    /// How agents work with Yonder, for them to read.
+    Manual,
 }
 
 #[derive(Subcommand)]
@@ -67,6 +77,18 @@ enum BotCmd {
     },
     /// Check the definitions, one bot's or all; exits 1 on any error.
     Check { name: Option<String> },
+    /// Push each persistent bot's AGENTS.md (with the manual) to its cwd,
+    /// and pull its MEMORY.md back; all bots if none are named. Exits 1 if
+    /// any drifted, failed or is invalid.
+    Sync {
+        names: Vec<String>,
+        /// Write AGENTS.md even where it was changed since the last sync.
+        #[arg(long)]
+        force: bool,
+        /// Say what would happen; write nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -240,6 +262,10 @@ fn run(cmd: Cmd) -> Result<(), Fail> {
     let cmd = match cmd {
         Cmd::Ctl(CtlCmd::ServicePlist) => return service_plist(),
         Cmd::Bot(cmd) => return bot_cmd(cmd),
+        Cmd::Manual => {
+            print!("{MANUAL}");
+            return Ok(());
+        }
         cmd => cmd,
     };
     let mut store = Store::open_default()?;
@@ -263,7 +289,7 @@ fn run(cmd: Cmd) -> Result<(), Fail> {
         Cmd::Task(TaskCmd::Cancel { id }) => print_task(&store.close_task(&id, TaskState::Cancelled, now)?),
         Cmd::Remind(RemindCmd::Set(args)) => set_reminder(&mut store, args, now)?,
         Cmd::Ctl(CtlCmd::Status { json }) => status(&store, json)?,
-        Cmd::Ctl(CtlCmd::ServicePlist) | Cmd::Bot(_) => unreachable!("handled before the ledger opens"),
+        Cmd::Ctl(CtlCmd::ServicePlist) | Cmd::Bot(_) | Cmd::Manual => unreachable!("handled before the ledger opens"),
         Cmd::Remind(RemindCmd::Ls { all, json }) => {
             let reminders = store.reminders(all)?;
             if json {
@@ -504,8 +530,85 @@ fn bot_cmd(cmd: BotCmd) -> Result<(), Fail> {
                 return Err(Fail { code: "bot_invalid", msg: "a bot's definition has errors".into(), hint: "fix what the error lines say" });
             }
         }
+        BotCmd::Sync { names, force, dry_run } => bot_sync(&home, &bots, names, sync::Options { force, dry_run })?,
     }
     Ok(())
+}
+
+/// One line a bot; one bot's trouble never stops the others. A dry run
+/// opens the ledger only to read, and writes nothing anywhere.
+fn bot_sync(home: &std::path::Path, bots: &std::path::Path, names: Vec<String>, opts: sync::Options) -> Result<(), Fail> {
+    let config = Config::load_default().map_err(|e| Fail { code: "config", msg: e.to_string(), hint: "fix the config file" })?;
+    let user_home = std::env::var_os("HOME");
+    let hc = Hc::bin(&config.hc.bin, std::path::Path::new(user_home.as_deref().unwrap_or_default()));
+    let store = if opts.dry_run { Store::open_read_only(home)? } else { Some(Store::open(home)?) };
+    let chosen: Vec<Result<Bot, (String, BotError)>> = if names.is_empty() {
+        bot::list(bots)?.into_iter().map(Ok).collect()
+    } else {
+        names.into_iter().map(|n| bot::find(bots, &n).map_err(|e| (n, e))).collect()
+    };
+    if chosen.is_empty() {
+        println!("no bots in {}", bots.display());
+    }
+    let mut incomplete = Vec::new();
+    for item in chosen {
+        let b = match item {
+            Ok(b) => b,
+            // bots/ itself a link: nothing is read through it.
+            Err((_, e @ BotError::Link(_))) => return Err(e.into()),
+            Err((name, e)) => {
+                println!("error: {name}: {e}");
+                incomplete.push(format!("{name}: {e}"));
+                continue;
+            }
+        };
+        let def = match &b.def {
+            None => {
+                println!("error: {}: {}", b.name, first_error(&b));
+                incomplete.push(format!("{}: invalid", b.name));
+                continue;
+            }
+            Some(d) if d.kind == BotKind::Oneoff => {
+                println!("{}: skipped, oneoff", b.name);
+                continue;
+            }
+            Some(d) => d,
+        };
+        let target = sync::target(def);
+        let last = match &store {
+            Some(s) => s.pushed(&b.name, &target)?,
+            None => None,
+        };
+        let mut synced = match sync::files_of(def, user_home.clone(), &hc, &NEVER) {
+            Ok(mut there) => sync::sync(&b.dir, there.as_mut(), MANUAL, last.as_deref(), opts),
+            Err(e) => sync::Synced::failed(e),
+        };
+        if let (Some(hash), Some(s), false) = (&synced.record, &store, opts.dry_run)
+            && let Err(e) = s.set_pushed(&b.name, &target, hash, when::now())
+        {
+            synced.push = sync::Push::Failed;
+            synced.why.push(format!("AGENTS.md is there, but the ledger did not take it: {e}"));
+        }
+        println!("{}", synced.line(&b.name));
+        if !synced.complete() {
+            let drifted = synced.push == sync::Push::Drifted;
+            let failed = synced.push == sync::Push::Failed || synced.pull == sync::Pull::Failed;
+            let what = match (drifted, failed) {
+                (true, false) => "AGENTS.md was changed there since the last sync",
+                (true, true) => "AGENTS.md was changed there, and MEMORY.md failed",
+                _ => "failed",
+            };
+            incomplete.push(format!("{}: {what}", b.name));
+        }
+    }
+    if incomplete.is_empty() {
+        return Ok(());
+    }
+    Err(Fail {
+        code: "sync_incomplete",
+        msg: incomplete.join("; "),
+        hint: "see the lines above; --force writes over a changed AGENTS.md",
+    })
 }
 
 fn first_error(b: &Bot) -> &str {

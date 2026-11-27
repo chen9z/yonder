@@ -14,7 +14,7 @@ use crate::when::{Rule, format_utc};
 
 /// The schema, one step per ledger version; `PRAGMA user_version` says how
 /// many are applied. Only ever append.
-const MIGRATIONS: &[&str] = &[include_str!("schema.sql"), include_str!("schema2.sql")];
+const MIGRATIONS: &[&str] = &[include_str!("schema.sql"), include_str!("schema2.sql"), include_str!("schema3.sql")];
 
 const TASK_COLS: &str = "id, title, state, source, created_at, updated_at";
 pub(crate) const REMINDER_COLS: &str = "id, content, state, next_fire_at, every_spec, snooze_until, check_cmd, check_hash, \
@@ -103,6 +103,51 @@ impl Store {
         conn.execute_batch("PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON;")?;
         migrate(&mut conn)?;
         Ok(Store { conn })
+    }
+
+    /// The ledger in `dir` if there is one, only to read: nothing is made
+    /// or migrated. One older than this yonder reads as if it had nothing
+    /// newer in it (see `pushed`).
+    pub fn open_read_only(dir: &Path) -> Result<Option<Store>> {
+        let path = dir.join("ledger.db");
+        if !path.is_file() {
+            return Ok(None);
+        }
+        let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let conn = Connection::open_with_flags(path, flags)?;
+        conn.busy_timeout(Duration::from_secs(5))?;
+        let store = Store { conn };
+        let v = store.version()?;
+        if v > MIGRATIONS.len() as i64 {
+            return Err(StoreError::TooNew(v));
+        }
+        Ok(Some(store))
+    }
+
+    fn version(&self) -> Result<i64> {
+        Ok(self.conn.query_row("PRAGMA user_version", [], |r| r.get(0))?)
+    }
+
+    /// The SHA-256 hex of the AGENTS.md last pushed to `bot` at `target`.
+    pub fn pushed(&self, bot: &str, target: &str) -> Result<Option<String>> {
+        if self.version()? < 3 {
+            return Ok(None);
+        }
+        let hash = self
+            .conn
+            .query_row("SELECT agents_sha256 FROM bot_pushes WHERE bot = ?1 AND target = ?2", [bot, target], |r| r.get(0))
+            .optional()?;
+        Ok(hash)
+    }
+
+    /// Records that an AGENTS.md of `hash` went to `bot` at `target`.
+    pub fn set_pushed(&self, bot: &str, target: &str, hash: &str, now: i64) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO bot_pushes (bot, target, agents_sha256, pushed_at) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT (bot, target) DO UPDATE SET agents_sha256 = excluded.agents_sha256, pushed_at = excluded.pushed_at",
+            params![bot, target, hash, format_utc(now)],
+        )?;
+        Ok(())
     }
 
     /// How long to wait for another writer before giving up.
@@ -376,6 +421,33 @@ mod tests {
     }
 
     #[test]
+    fn remembers_pushes_and_reads_without_writing() {
+        let dir = crate::test_dir("store-pushes");
+        assert!(Store::open_read_only(&dir).unwrap().is_none());
+        assert!(!dir.join("ledger.db").exists(), "a read made the ledger");
+        let s = Store::open(&dir).unwrap();
+        assert_eq!(s.pushed("ops", "local:/tmp/example/ops").unwrap(), None);
+        s.set_pushed("ops", "local:/tmp/example/ops", "aa", 0).unwrap();
+        s.set_pushed("ops", "local:/tmp/example/ops", "bb", 1).unwrap();
+        s.set_pushed("ops", "gpu-box:~/ops", "cc", 1).unwrap();
+        assert_eq!(s.pushed("ops", "local:/tmp/example/ops").unwrap().as_deref(), Some("bb"));
+        drop(s);
+        let r = Store::open_read_only(&dir).unwrap().unwrap();
+        assert_eq!(r.pushed("ops", "gpu-box:~/ops").unwrap().as_deref(), Some("cc"));
+        assert!(r.set_pushed("ops", "gpu-box:~/ops", "dd", 2).is_err(), "a read-only ledger took a write");
+        // An older ledger is not migrated by a read: it has no pushes yet.
+        r.conn.close().unwrap();
+        let conn = Connection::open(dir.join("ledger.db")).unwrap();
+        conn.execute_batch("DROP TABLE bot_pushes; PRAGMA user_version = 2;").unwrap();
+        drop(conn);
+        let r = Store::open_read_only(&dir).unwrap().unwrap();
+        assert_eq!(r.pushed("ops", "gpu-box:~/ops").unwrap(), None);
+        assert_eq!(r.version().unwrap(), 2);
+        drop(r);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn migrates_a_version_1_ledger() {
         let dir = crate::test_dir("migrates_a_version_1_ledger");
         let conn = Connection::open(dir.join("ledger.db")).unwrap();
@@ -393,7 +465,9 @@ mod tests {
         assert_eq!((r.check_cmd.as_deref(), r.check_hash.as_deref(), r.task_id.as_deref()), (Some("uptime"), Some("ab"), Some("T-0001")));
         assert_eq!((r.check_until, r.check_failures, r.check_once), (None, 0, false));
         let version: i64 = s.conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(version, 2);
+        // Up to the latest: a version 1 ledger goes through every step after it.
+        assert_eq!(version, MIGRATIONS.len() as i64);
+        assert_eq!(s.pushed("ops", "local:/tmp/example").unwrap(), None);
         let fk: i64 = s.conn.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| r.get(0)).unwrap();
         assert_eq!(fk, 0);
         std::fs::remove_dir_all(dir).unwrap();

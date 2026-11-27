@@ -87,7 +87,21 @@ pub fn run_until(cmd: &str, timeout: Duration, max_output: usize, stop: &AtomicB
 /// its output closed, or at the deadline or `stop`, which kill the group.
 /// The environment, and stderr without `stderr_too`, are the caller's.
 pub fn capture(
+    command: Command,
+    timeout: Duration,
+    max_output: usize,
+    stop: &AtomicBool,
+    stderr_too: bool,
+) -> Result<(ExitStatus, Vec<u8>), CheckError> {
+    capture_input(command, None, timeout, max_output, stop, stderr_too)
+}
+
+/// As `capture`, with `input` (if any) on its stdin, else nothing there.
+/// The input is written from a thread of its own, so a command that
+/// never reads it still ends at the deadline.
+pub fn capture_input(
     mut command: Command,
+    input: Option<Vec<u8>>,
     timeout: Duration,
     max_output: usize,
     stop: &AtomicBool,
@@ -98,12 +112,20 @@ pub fn capture(
     if stderr_too {
         command.stderr(writer.try_clone().map_err(CheckError::Spawn)?);
     }
-    command.stdin(Stdio::null()).stdout(writer).process_group(0);
+    let stdin = if input.is_some() { Stdio::piped() } else { Stdio::null() };
+    command.stdin(stdin).stdout(writer).process_group(0);
     let spawned = command.spawn();
     // The command keeps its copies of the write end: without them gone,
     // the output would never close.
     drop(command);
     let mut child = spawned.map_err(CheckError::Spawn)?;
+    if let (Some(input), Some(mut pipe)) = (input, child.stdin.take()) {
+        // Ends when all is written, or with an error once the group is
+        // gone and nothing reads; then the pipe closes.
+        std::thread::spawn(move || {
+            let _ = std::io::Write::write_all(&mut pipe, &input);
+        });
+    }
     // The child leads its group, and its pid (so the group's id) stays
     // ours until it is reaped: exits are only watched, never reaped, until
     // the group has been killed.
@@ -214,7 +236,7 @@ fn has_exited(pid: libc::pid_t) -> std::io::Result<bool> {
     }
 }
 
-fn hex(bytes: &[u8]) -> String {
+pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
@@ -229,6 +251,26 @@ mod tests {
         // sha256("ok")
         assert_eq!(out.hash, "2689367b205c16ce32ed4200942b8b8b1e262dfc70d9bc9fbc77c49699a4f1df");
         assert_eq!(run("echo ok").unwrap().hash, out.hash);
+    }
+
+    #[test]
+    fn gives_input_on_stdin() {
+        let sh = |cmd: &str| {
+            let mut c = Command::new("/bin/sh");
+            c.arg("-c").arg(cmd);
+            c
+        };
+        let never = AtomicBool::new(false);
+        let (status, out) = capture_input(sh("cat"), Some(b"a\nb".to_vec()), TIMEOUT, MAX_OUTPUT, &never, false).unwrap();
+        assert!(status.success());
+        assert_eq!(out, b"a\nb");
+        // Without input, stdin is empty.
+        assert_eq!(capture(sh("cat"), TIMEOUT, MAX_OUTPUT, &never, false).unwrap().1, b"");
+        // Never read, more than a pipe holds: still ends at the deadline.
+        let start = Instant::now();
+        let r = capture_input(sh("sleep 10"), Some(vec![b'x'; 1 << 20]), Duration::from_millis(300), MAX_OUTPUT, &never, false);
+        assert!(matches!(r, Err(CheckError::Timeout)));
+        assert!(start.elapsed() < Duration::from_secs(5));
     }
 
     #[test]

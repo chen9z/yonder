@@ -1,5 +1,5 @@
 //! What the `yonder` programs share: Yonder's home directory (`home`), bot
-//! definitions (`bot`), the ledger (`store`, and `firing` for
+//! definitions (`bot`) and their sync to where they work (`sync`), the ledger (`store`, and `firing` for
 //! what yonderd does to it), times and repeat rules (`when`), running
 //! reminder checks (`check_exec`), the lead agent's terminal (`hc`),
 //! yonderd's rounds (`daemon`) and its launchd plist (`service`), masking secrets (`redact`) and the config
@@ -15,6 +15,7 @@ pub mod home;
 pub mod redact;
 pub mod service;
 pub mod store;
+pub mod sync;
 pub mod when;
 
 pub use store::{NewReminder, Store, StoreError};
