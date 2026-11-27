@@ -67,7 +67,10 @@ fn run(cli: Cli) -> Result<(), Fail> {
         Some(s) => Some(when::parse_utc(s).ok_or(("bad_time", format!("{s:?} is not a UTC time"), "use YYYY-MM-DDTHH:MM:SSZ"))?),
     };
     let config = Config::load_default().map_err(|e| ("config", e.to_string(), "fix the config file"))?;
-    let state_err = |e: store::StoreError| (e.code(), e.to_string(), "set YONDER_HOME to a writable directory");
+    let state_err = |e: store::StoreError| {
+        let hint = if e.code() == "bad_home" { yonder_core::home::ABSOLUTE } else { "set YONDER_HOME to a writable directory" };
+        (e.code(), e.to_string(), hint)
+    };
     let dir = store::home_dir().map_err(state_err)?;
     let store = Store::open(&dir).map_err(state_err)?;
     let io_err = |what: &str, e: std::io::Error| ("home", format!("{what}: {e}"), "check the permissions of Yonder's home");

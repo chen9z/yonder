@@ -198,7 +198,7 @@ pub enum ConfigError {
 impl Config {
     /// `config.toml` in Yonder's home, if there is a home.
     pub fn default_path() -> Option<PathBuf> {
-        crate::home::dir().map(|home| crate::home::config_path(&home))
+        crate::home::dir().ok().map(|home| crate::home::config_path(&home))
     }
 
     /// The config at `default_path`, or the defaults.

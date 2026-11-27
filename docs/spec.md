@@ -95,6 +95,7 @@ env         = ["EXAMPLE_API_KEY"] # 可空，只写变量名
 - 未知字段：`bot check` 报警告，不失败（以后加字段时旧版本还能读）。
 - 校验（`crates/yonder-core/src/bot.rs`）：error 是 toml 语法错（带行号）、没有 `bot.toml`、必填字段缺了或为空、字段类型不对、名字格式不对、`name` 和目录名不一致、`kind` 不是 `persistent` / `oneoff`、persistent 没有 `cwd`、`env` 名字不合法；有 error 的定义算 `invalid`，不能用。warning 是未知字段、`env` 重复、`description` 还是 `bot new` 写的占位（`TODO: ` 开头）。
 - 读定义永远不会整体失败：一个坏定义只让它自己 `invalid`，不挡别的。`bots/` 下不是目录的、`.` 开头的都不算 bot。
+- bot 目录和 `bot.toml` 不能是符号链接：是的话（或 `bot.toml` 不是普通文件）这个 bot 标 `invalid` 并写明原因，不读链接指向的东西，`bot ls` 照样列出它、不挡别的。`bots/` 本身是符号链接时 `bot ls/show/check/new` 都报 `symlink`。`bot new` 的三个文件都是排他创建，那里已经有东西（文件或链接）就报错，不覆盖。
 - `bot new` 只生成文件，之后 Yonder 不改 bot 目录里的任何东西。生成的 `bot.toml` 字段都在顶层，没有表，所以在文件末尾追加一行（如 `cwd = ...`）就是加一个字段；`cwd` 等可选字段以注释给出。不带 `--harness` 时 `harness` 为空，`bot check` 会报 error。
 - 同目录可选文件：`template.md`（第一条消息的正文）、`AGENTS.md`（bot 的角色和规则）、`MEMORY.md`（从 bot 工作目录拉回来的记忆）。
 - bot 运行状态（会话 id、是否在跑、上次停在哪）记进台账（B3）；每个非终态都要有出路，迟到的结果不覆盖新状态。
@@ -165,6 +166,9 @@ env         = ["EXAMPLE_API_KEY"] # 可空，只写变量名
 ### 5.1 Yonder 的 home
 
 所有东西在一个 home 下：默认 `~/.yonder`，`YONDER_HOME` 覆盖（`crates/yonder-core/src/home.rs`）。没有旧位置，也不读旧的环境变量。
+
+- home 必须是绝对路径：`YONDER_HOME` 是相对路径（或 `HOME` 是相对路径）时，`yonder` 和 `yonderd` 都报 `bad_home` 并退出非 0，不在当前目录下建任何东西。所以 `ctl service-plist` 写进去的 home 一定是绝对路径，launchd 起的 yonderd 和 yonder 用的是同一个。
+- 不存在的 home 由第一个用到它的命令建（台账或 `bot new` 都一样），权限 0700，连同建出来的上级目录；已经存在的 home 不改权限。
 
 | 内容 | 位置 |
 |---|---|
@@ -273,6 +277,8 @@ scripts/check.sh    # clippy 和全部测试
 - 单实例、SIGTERM 后 2 秒内退出（包括 `--once` 正在等检查时）：`yonderd_runs_alone_and_stops_on_sigterm`、`yonderd_stops_in_time_with_a_check_running`、`yonderd_once_stops_in_time_with_a_check_running`。
 - plist 合法、含 `KeepAlive` 和 `dev.yonder.daemon`、不读 shell 配置、带上 `YONDER_HOME`：`service_plist_is_valid`，以及 M1b 验收第 8 条（`plutil -lint`）。
 - 台账、锁、日志都在 `YONDER_HOME` 下，没设时在 `~/.yonder`，不再碰旧位置：`everything_is_in_the_yonder_home`，`home::tests::finds_the_home`。
+- 相对的 home 被拒（`bad_home`）、新 home 是 0700、已有的不改：`a_relative_home_is_refused`、`bot_new_in_a_new_home_keeps_it_the_owners`、`home::tests::a_new_home_is_the_owners_only`、`bot::tests::a_new_bot_in_a_new_home_keeps_it_the_owners`。
+- 符号链接不跟随、新文件不覆盖：`bot::tests::links_are_never_followed`、`new_files_never_replace_what_is_there`。
 - bot 定义的生成、不覆盖、列出（坏定义不挡别的）、校验（行号、名字和目录不一致、persistent 缺 cwd、未知字段只警告）、`show --json`：`bots_are_made_listed_and_checked`，`crates/yonder-core/src/bot.rs` 的单元测试，以及 B1 验收第 2–6 条。
 - yonderd 用真实 hc 投递：M1b 验收时手工冒烟过一次。
 - 钥匙串存取、不产出明文、test-vault 下也加密、钥匙串路径校验：`app/src/vault.rs` 的 `keychain_round_trip`、`never_seals_to_plaintext`、`test_vault_seals_too`、`keychain_path_is_one_line_of_its_own`（测试只用 `.test` 结尾的 service，跑完删掉）。

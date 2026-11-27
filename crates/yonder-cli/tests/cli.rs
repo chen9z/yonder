@@ -564,3 +564,30 @@ fn bots_are_made_listed_and_checked() {
     let bad = l.run(&["bot", "new", "Nova"]);
     assert!(!bad.status.success() && stderr(&bad).starts_with("bad_name: "), "{}", stderr(&bad));
 }
+
+#[test]
+fn a_relative_home_is_refused() {
+    let l = Ledger::new("a_relative_home_is_refused");
+    for (what, mut cmd) in [
+        ("yonder", l.cmd(&["task", "ls"])),
+        ("yonder bot", l.cmd(&["bot", "new", "trainer"])),
+        ("yonder ctl service-plist", l.cmd(&["ctl", "service-plist"])),
+        ("yonderd", l.yonderd(&["--once"])),
+    ] {
+        let out = cmd.env("YONDER_HOME", "relative/home").current_dir(&l.0).output().unwrap();
+        assert!(!out.status.success(), "{what}");
+        let said = stderr(&out);
+        assert!(said.starts_with("bad_home: ") && said.contains("absolute path") && said.lines().count() == 1, "{what}: {said}");
+    }
+    assert!(!l.0.join("relative").exists(), "something was made in the relative home");
+}
+
+#[test]
+fn bot_new_in_a_new_home_keeps_it_the_owners() {
+    use std::os::unix::fs::PermissionsExt;
+    let l = Ledger::new("bot_new_in_a_new_home_keeps_it_the_owners");
+    let home = l.0.join("fresh");
+    let out = l.cmd(&["bot", "new", "trainer"]).env("YONDER_HOME", &home).output().unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(std::fs::metadata(&home).unwrap().permissions().mode() & 0o777, 0o700);
+}

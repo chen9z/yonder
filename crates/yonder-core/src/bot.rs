@@ -2,7 +2,9 @@
 //! `template.md`, `AGENTS.md` and `MEMORY.md` beside it. Reading one never
 //! fails: what is wrong with it is a list of problems, so one broken
 //! definition never hides the others. Yonder only writes a new bot's
-//! files (`create`); it never changes them after.
+//! files (`create`, each made anew, never over one there); it never
+//! changes them after. Symbolic links are never followed: `bots/`, a
+//! bot's directory or its `bot.toml` that is one is not read.
 
 use std::path::{Path, PathBuf};
 
@@ -70,6 +72,8 @@ pub enum BotError {
     Exists(String, PathBuf),
     #[error("no bot {0}")]
     NotFound(String),
+    #[error("{0} is a symbolic link; it is not followed")]
+    Link(PathBuf),
     #[error("{0}: {1}")]
     Io(PathBuf, std::io::Error),
 }
@@ -81,6 +85,7 @@ impl BotError {
             BotError::BadName(_) => "bad_name",
             BotError::Exists(..) => "bot_exists",
             BotError::NotFound(_) => "not_found",
+            BotError::Link(_) => "symlink",
             BotError::Io(..) => "home",
         }
     }
@@ -108,27 +113,43 @@ pub fn env_problem(name: &str) -> Option<String> {
     }
 }
 
-/// The bot in `dir`.
+/// Whether `path` itself (not what it may point to) is a symbolic link.
+fn is_link(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
+}
+
+/// The bot in `dir`. A directory or `bot.toml` that is a symbolic link is
+/// not read: the bot is invalid.
 pub fn load(dir: &Path) -> Bot {
     let name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let files = FILES.iter().map(|f| (*f, dir.join(f))).filter(|(_, p)| p.is_file()).collect();
-    let mut bot = Bot { name, dir: dir.into(), def: None, problems: Vec::new(), files };
+    let mut bot = Bot { name, dir: dir.into(), def: None, problems: Vec::new(), files: Vec::new() };
+    if is_link(dir) {
+        bot.problems.push(error("the bot's directory is a symbolic link; it is not read".into()));
+        return bot;
+    }
+    let regular = |p: &Path| std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_file());
+    bot.files = FILES.iter().map(|f| (*f, dir.join(f))).filter(|(_, p)| regular(p)).collect();
     let path = dir.join("bot.toml");
-    match std::fs::read_to_string(&path) {
-        Ok(text) => {
-            let (def, problems) = parse(&bot.name, &text);
-            bot.def = def;
-            bot.problems = problems;
-        }
+    match std::fs::symlink_metadata(&path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => bot.problems.push(error("no bot.toml".into())),
         Err(e) => bot.problems.push(error(format!("reading bot.toml: {e}"))),
+        Ok(m) if m.file_type().is_symlink() => bot.problems.push(error("bot.toml is a symbolic link; it is not read".into())),
+        Ok(m) if !m.file_type().is_file() => bot.problems.push(error("bot.toml is not a regular file; it is not read".into())),
+        Ok(_) => match std::fs::read_to_string(&path) {
+            Ok(text) => (bot.def, bot.problems) = parse(&bot.name, &text),
+            Err(e) => bot.problems.push(error(format!("reading bot.toml: {e}"))),
+        },
     }
     bot
 }
 
 /// Every bot in `bots` (`home::bots_dir`), by name; none if it isn't there.
-/// Entries that aren't directories, or start with `.`, are not bots.
+/// Entries that aren't directories, or start with `.`, are not bots; a
+/// symbolic link is listed, as invalid.
 pub fn list(bots: &Path) -> Result<Vec<Bot>, BotError> {
+    if is_link(bots) {
+        return Err(BotError::Link(bots.into()));
+    }
     let entries = match std::fs::read_dir(bots) {
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -138,7 +159,8 @@ pub fn list(bots: &Path) -> Result<Vec<Bot>, BotError> {
     for entry in entries {
         let entry = entry.map_err(|e| BotError::Io(bots.into(), e))?;
         let hidden = entry.file_name().to_string_lossy().starts_with('.');
-        if !hidden && entry.path().is_dir() {
+        let kind = entry.file_type().map_err(|e| BotError::Io(entry.path(), e))?;
+        if !hidden && (kind.is_dir() || kind.is_symlink()) {
             found.push(load(&entry.path()));
         }
     }
@@ -148,35 +170,53 @@ pub fn list(bots: &Path) -> Result<Vec<Bot>, BotError> {
 
 /// The bot `name` in `bots`.
 pub fn find(bots: &Path, name: &str) -> Result<Bot, BotError> {
-    let dir = bots.join(name);
     if !valid_name(name) {
         return Err(BotError::BadName(name.into()));
     }
-    if !dir.is_dir() {
-        return Err(BotError::NotFound(name.into()));
+    if is_link(bots) {
+        return Err(BotError::Link(bots.into()));
     }
-    Ok(load(&dir))
+    let dir = bots.join(name);
+    match std::fs::symlink_metadata(&dir) {
+        Ok(m) if m.is_dir() || m.file_type().is_symlink() => Ok(load(&dir)),
+        _ => Err(BotError::NotFound(name.into())),
+    }
 }
 
-/// A new bot `name` in `bots`: its directory, a commented `bot.toml`, and
-/// empty `template.md` and `AGENTS.md`. Never over one that exists.
-pub fn create(bots: &Path, name: &str, kind: BotKind, harness: Option<&str>) -> Result<PathBuf, BotError> {
+/// A new bot `name` in `home`'s `bots/`: its directory, a commented
+/// `bot.toml`, and empty `template.md` and `AGENTS.md`. A new home is made
+/// as `home::ensure` makes it. Never over one that exists, nor through a
+/// symbolic link.
+pub fn create(home: &Path, name: &str, kind: BotKind, harness: Option<&str>) -> Result<PathBuf, BotError> {
     if !valid_name(name) {
         return Err(BotError::BadName(name.into()));
     }
-    let dir = bots.join(name);
     let io = |p: &Path, e| BotError::Io(p.into(), e);
-    std::fs::create_dir_all(bots).map_err(|e| io(bots, e))?;
+    crate::home::ensure(home).map_err(|e| io(home, e))?;
+    let bots = crate::home::bots_dir(home);
+    match std::fs::create_dir(&bots) {
+        Err(_) if is_link(&bots) => return Err(BotError::Link(bots)),
+        Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => return Err(io(&bots, e)),
+        _ => {}
+    }
+    let dir = bots.join(name);
     match std::fs::create_dir(&dir) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Err(BotError::Exists(name.into(), dir)),
         Err(e) => return Err(io(&dir, e)),
     }
     for (file, text) in [("bot.toml", template(name, kind, harness)), ("template.md", String::new()), ("AGENTS.md", String::new())] {
-        let path = dir.join(file);
-        std::fs::write(&path, text).map_err(|e| io(&path, e))?;
+        write_new(&dir.join(file), &text)?;
     }
     Ok(dir)
+}
+
+/// `text` in a file made at `path`; an error if anything is there already
+/// (a file, or a link), which is left as it is.
+fn write_new(path: &Path, text: &str) -> Result<(), BotError> {
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(path).map_err(|e| BotError::Io(path.into(), e))?;
+    file.write_all(text.as_bytes()).map_err(|e| BotError::Io(path.into(), e))
 }
 
 /// The `bot.toml` that `create` writes. Its keys are at the top level, so
@@ -410,15 +450,77 @@ mod tests {
     }
 
     #[test]
+    fn links_are_never_followed() {
+        use std::os::unix::fs::symlink;
+        let home = crate::test_dir("bot-links");
+        let bots = home.join("bots");
+        // Somewhere else, a good definition: never read through a link.
+        let elsewhere = home.join("elsewhere/ops");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::write(elsewhere.join("bot.toml"), "name = \"ops\"\ndescription = \"x\"\nkind = \"oneoff\"\nharness = \"pi\"\n").unwrap();
+        create(&home, "trainer", BotKind::Oneoff, Some("pi")).unwrap();
+        symlink(&elsewhere, bots.join("ops")).unwrap();
+        std::fs::create_dir(bots.join("nova")).unwrap();
+        symlink(elsewhere.join("bot.toml"), bots.join("nova/bot.toml")).unwrap();
+        std::fs::create_dir(bots.join("gpu")).unwrap();
+        std::fs::create_dir(bots.join("gpu/bot.toml")).unwrap();
+        let all = list(&bots).unwrap();
+        let said: Vec<_> = all.iter().map(|b| (b.name.as_str(), b.def.is_some(), errors(&b.problems).join(""))).collect();
+        assert_eq!(said, [
+            ("gpu", false, "bot.toml is not a regular file; it is not read".to_owned()),
+            ("nova", false, "bot.toml is a symbolic link; it is not read".into()),
+            ("ops", false, "the bot's directory is a symbolic link; it is not read".into()),
+            ("trainer", true, String::new()),
+        ]);
+        assert!(all.iter().find(|b| b.name == "ops").unwrap().files.is_empty());
+        assert!(find(&bots, "ops").unwrap().invalid());
+        // bots/ itself a link: nothing is read through it, nothing made in it.
+        let other = crate::test_dir("bot-links-home");
+        symlink(&bots, other.join("bots")).unwrap();
+        assert!(matches!(list(&other.join("bots")), Err(BotError::Link(_))));
+        assert!(matches!(find(&other.join("bots"), "trainer"), Err(BotError::Link(_))));
+        assert!(matches!(create(&other, "homelab", BotKind::Oneoff, None), Err(BotError::Link(_))));
+        assert!(!bots.join("homelab").exists());
+        std::fs::remove_dir_all(other).unwrap();
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn new_files_never_replace_what_is_there() {
+        let dir = crate::test_dir("bot-write-new");
+        let path = dir.join("bot.toml");
+        std::fs::write(&path, "someone's").unwrap();
+        assert!(matches!(write_new(&path, "ours"), Err(BotError::Io(..))));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "someone's");
+        // Nor through a link: what it points to stays as it is.
+        std::os::unix::fs::symlink(&path, dir.join("AGENTS.md")).unwrap();
+        assert!(write_new(&dir.join("AGENTS.md"), "ours").is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "someone's");
+        write_new(&dir.join("template.md"), "ours").unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("template.md")).unwrap(), "ours");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_new_bot_in_a_new_home_keeps_it_the_owners() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = crate::test_dir("bot-new-home");
+        let home = dir.join("home");
+        create(&home, "trainer", BotKind::Persistent, None).unwrap();
+        assert_eq!(std::fs::metadata(&home).unwrap().permissions().mode() & 0o777, 0o700);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn new_bots_are_listed_and_never_written_over() {
         let home = crate::test_dir("bots");
         let bots = home.join("bots");
-        let dir = create(&bots, "trainer", BotKind::Persistent, Some("codex")).unwrap();
+        let dir = create(&home, "trainer", BotKind::Persistent, Some("codex")).unwrap();
         for f in ["bot.toml", "template.md", "AGENTS.md"] {
             assert!(dir.join(f).is_file(), "{f}");
         }
-        assert!(matches!(create(&bots, "trainer", BotKind::Oneoff, None), Err(BotError::Exists(..))));
-        assert!(matches!(create(&bots, "Trainer", BotKind::Oneoff, None), Err(BotError::BadName(_))));
+        assert!(matches!(create(&home, "trainer", BotKind::Oneoff, None), Err(BotError::Exists(..))));
+        assert!(matches!(create(&home, "Trainer", BotKind::Oneoff, None), Err(BotError::BadName(_))));
         // Fresh: only cwd is missing (and the description is a placeholder).
         let bot = find(&bots, "trainer").unwrap();
         assert_eq!(errors(&bot.problems), ["a persistent bot needs cwd, where it works"]);
@@ -429,7 +531,7 @@ mod tests {
         assert!(!bot.invalid(), "{:?}", bot.problems);
         assert_eq!(bot.def.unwrap().harness, "codex");
         // A oneoff one needs no cwd; with no --harness, it needs one.
-        create(&bots, "ops", BotKind::Oneoff, None).unwrap();
+        create(&home, "ops", BotKind::Oneoff, None).unwrap();
         assert_eq!(errors(&find(&bots, "ops").unwrap().problems), ["harness is required, and empty"]);
         // A broken one is listed with the others.
         std::fs::create_dir(bots.join("broken")).unwrap();

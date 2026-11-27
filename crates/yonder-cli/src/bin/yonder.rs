@@ -183,7 +183,8 @@ impl From<StoreError> for Fail {
             StoreError::Empty(_) => "give it some text",
             StoreError::CheckNeedsEvery => "add --every",
             StoreError::TooLong(..) => "say it in fewer words; details can go in a file it names",
-            StoreError::NoHome | StoreError::Dir(..) => "set YONDER_HOME to a writable directory",
+            StoreError::Home(home::HomeError::Relative(_)) => home::ABSOLUTE,
+            StoreError::Home(_) | StoreError::Dir(..) => "set YONDER_HOME to a writable directory",
             StoreError::TooNew(_) => "use a newer yonder",
             StoreError::Sql(_) => "try again; if it stays, look at ledger.db in Yonder's home",
         };
@@ -424,6 +425,7 @@ impl From<BotError> for Fail {
             BotError::BadName(_) => "use a-z, 0-9 and -, starting with a letter, at most 32",
             BotError::Exists(..) => "pick another name, or change the one there",
             BotError::NotFound(_) => "see yonder bot ls",
+            BotError::Link(_) => "make it a directory of its own, not a link",
             BotError::Io(..) => "check the permissions of Yonder's home",
         };
         Fail { code: e.code(), msg: e.to_string(), hint }
@@ -431,11 +433,12 @@ impl From<BotError> for Fail {
 }
 
 fn bot_cmd(cmd: BotCmd) -> Result<(), Fail> {
-    let bots = home::bots_dir(&store::home_dir()?);
+    let home = store::home_dir()?;
+    let bots = home::bots_dir(&home);
     match cmd {
         BotCmd::New { name, kind, harness } => {
             let kind = BotKind::parse(&kind).expect("clap allows only the kinds");
-            let dir = bot::create(&bots, &name, kind, harness.as_deref())?;
+            let dir = bot::create(&home, &name, kind, harness.as_deref())?;
             println!("{name} made: {}", dir.display());
             println!("next: fill in {}, then yonder bot check {name}", dir.join("bot.toml").display());
         }

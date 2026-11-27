@@ -32,8 +32,8 @@ pub enum StoreError {
     CheckNeedsEvery,
     #[error("{0} is {1} bytes, more than {MAX_CONTENT}")]
     TooLong(&'static str, usize),
-    #[error("no Yonder home: set YONDER_HOME or HOME")]
-    NoHome,
+    #[error("{0}")]
+    Home(#[from] crate::home::HomeError),
     #[error("Yonder home {0}: {1}")]
     Dir(PathBuf, std::io::Error),
     #[error("the ledger is version {0}, newer than this yonder knows")]
@@ -51,7 +51,8 @@ impl StoreError {
             StoreError::Empty(_) => "empty",
             StoreError::CheckNeedsEvery => "check_needs_every",
             StoreError::TooLong(..) => "bad_input",
-            StoreError::NoHome | StoreError::Dir(..) => "home",
+            StoreError::Home(crate::home::HomeError::Relative(_)) => "bad_home",
+            StoreError::Home(_) | StoreError::Dir(..) => "home",
             StoreError::TooNew(_) => "ledger_too_new",
             StoreError::Sql(_) => "ledger",
         }
@@ -65,7 +66,7 @@ pub const MAX_CONTENT: usize = 4096;
 
 /// Yonder's home (`home::dir`), or why there is none.
 pub fn home_dir() -> Result<PathBuf> {
-    crate::home::dir().ok_or(StoreError::NoHome)
+    Ok(crate::home::dir()?)
 }
 
 /// A reminder to add; times are Unix seconds.
@@ -95,12 +96,7 @@ impl Store {
 
     /// The ledger in `dir`, made (only its owner can read it) if need be.
     pub fn open(dir: &Path) -> Result<Store> {
-        use std::os::unix::fs::DirBuilderExt;
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(dir)
-            .map_err(|e| StoreError::Dir(dir.into(), e))?;
+        crate::home::ensure(dir).map_err(|e| StoreError::Dir(dir.into(), e))?;
         let mut conn = Connection::open(dir.join("ledger.db"))?;
         conn.busy_timeout(Duration::from_secs(5))?;
         conn.query_row("PRAGMA journal_mode = WAL", [], |r| r.get::<_, String>(0))?;
